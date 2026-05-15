@@ -6,6 +6,7 @@ import process from 'node:process';
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
+import PDFDocument from 'pdfkit';
 
 type PdfParseResult = { text?: string };
 type PdfParseFn = (dataBuffer: Buffer) => Promise<PdfParseResult>;
@@ -2717,6 +2718,42 @@ function ensureSchema(db: Database) {
       undo_justification TEXT
     );
   `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS conciliacao_fechamentos (
+      month_key TEXT NOT NULL,
+      orgao_extratos_key TEXT NOT NULL,
+      orgao_extratos_raw TEXT NOT NULL,
+      closed_at TEXT,
+      closed_by TEXT,
+      reopened_at TEXT,
+      reopened_by TEXT,
+      contabilidade_email TEXT,
+      sent_to_contabilidade_at TEXT,
+      sent_to_contabilidade_by TEXT,
+      PRIMARY KEY (month_key, orgao_extratos_key)
+    );
+  `);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS contabilidade_relatorios_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      to_email TEXT,
+      month_key TEXT NOT NULL,
+      orgao_extratos_key TEXT NOT NULL,
+      orgao_extratos_raw TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      pdf_file_name TEXT,
+      pdf_base64 TEXT
+    );
+  `);
+  const outboxCols = getTableColumns(db, 'contabilidade_relatorios_outbox');
+  if (!outboxCols.includes('pdf_file_name')) {
+    db.run(`ALTER TABLE contabilidade_relatorios_outbox ADD COLUMN pdf_file_name TEXT;`);
+  }
+  if (!outboxCols.includes('pdf_base64')) {
+    db.run(`ALTER TABLE contabilidade_relatorios_outbox ADD COLUMN pdf_base64 TEXT;`);
+  }
   const occCols = getTableColumns(db, 'conciliacao_pendencia_actions');
   if (!occCols.includes('previous_value')) {
     db.run(`ALTER TABLE conciliacao_pendencia_actions ADD COLUMN previous_value TEXT;`);
@@ -2922,6 +2959,100 @@ function getConciliacaoTarifaCentsSoft(
   }
 }
 
+type ConciliacaoFechamentoInfo = {
+  isClosed: boolean;
+  closedAt: string | null;
+  closedBy: string | null;
+  reopenedAt: string | null;
+  reopenedBy: string | null;
+  contabilidadeEmail: string | null;
+  sentToContabilidadeAt: string | null;
+  sentToContabilidadeBy: string | null;
+};
+
+function getConciliacaoFechamentoInfo(
+  db: Database,
+  opts: { monthKey: string; orgaoRaw: string },
+): ConciliacaoFechamentoInfo {
+  if (!tableExists(db, 'conciliacao_fechamentos')) {
+    return {
+      isClosed: false,
+      closedAt: null,
+      closedBy: null,
+      reopenedAt: null,
+      reopenedBy: null,
+      contabilidadeEmail: null,
+      sentToContabilidadeAt: null,
+      sentToContabilidadeBy: null,
+    };
+  }
+  const orgaoKey = normalizeExtratosOrgaoForMatch(opts.orgaoRaw);
+  if (!orgaoKey) {
+    return {
+      isClosed: false,
+      closedAt: null,
+      closedBy: null,
+      reopenedAt: null,
+      reopenedBy: null,
+      contabilidadeEmail: null,
+      sentToContabilidadeAt: null,
+      sentToContabilidadeBy: null,
+    };
+  }
+  const stmt = db.prepare(
+    `SELECT closed_at, closed_by, reopened_at, reopened_by, contabilidade_email, sent_to_contabilidade_at, sent_to_contabilidade_by
+     FROM conciliacao_fechamentos
+     WHERE month_key=? AND orgao_extratos_key=?
+     LIMIT 1;`,
+  );
+  try {
+    stmt.bind([opts.monthKey, orgaoKey] as unknown as any[]);
+    if (!stmt.step()) {
+      return {
+        isClosed: false,
+        closedAt: null,
+        closedBy: null,
+        reopenedAt: null,
+        reopenedBy: null,
+        contabilidadeEmail: null,
+        sentToContabilidadeAt: null,
+        sentToContabilidadeBy: null,
+      };
+    }
+    const row = stmt.getAsObject() as Record<string, unknown>;
+    const closedAt = typeof row.closed_at === 'string' ? row.closed_at.trim() : '';
+    const closedBy = typeof row.closed_by === 'string' ? row.closed_by.trim() : '';
+    const reopenedAt = typeof row.reopened_at === 'string' ? row.reopened_at.trim() : '';
+    const reopenedBy = typeof row.reopened_by === 'string' ? row.reopened_by.trim() : '';
+    const contabilidadeEmail =
+      typeof row.contabilidade_email === 'string' ? row.contabilidade_email.trim() : '';
+    const sentToContabilidadeAt =
+      typeof row.sent_to_contabilidade_at === 'string' ? row.sent_to_contabilidade_at.trim() : '';
+    const sentToContabilidadeBy =
+      typeof row.sent_to_contabilidade_by === 'string' ? row.sent_to_contabilidade_by.trim() : '';
+    const isClosed = Boolean(closedAt) && (!reopenedAt || reopenedAt < closedAt);
+    return {
+      isClosed,
+      closedAt: closedAt || null,
+      closedBy: closedBy || null,
+      reopenedAt: reopenedAt || null,
+      reopenedBy: reopenedBy || null,
+      contabilidadeEmail: contabilidadeEmail || null,
+      sentToContabilidadeAt: sentToContabilidadeAt || null,
+      sentToContabilidadeBy: sentToContabilidadeBy || null,
+    };
+  } finally {
+    stmt.free();
+  }
+}
+
+function assertConciliacaoAberta(db: Database, opts: { monthKey: string; orgaoRaw: string }) {
+  const info = getConciliacaoFechamentoInfo(db, opts);
+  if (info.isClosed) {
+    throw new Error('Conciliação fechada. Reabra para alterar.');
+  }
+}
+
 export async function upsertConciliacaoTarifa(opts: {
   month: string;
   orgao: string;
@@ -2943,6 +3074,7 @@ export async function upsertConciliacaoTarifa(opts: {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey, orgaoRaw });
 
   const now = new Date().toISOString();
   db.run('BEGIN;');
@@ -3899,12 +4031,15 @@ function parseDateValue(value: unknown): Date | null {
     return Number.isNaN(d.getTime()) ? null : d;
   }
 
-  const br = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
+  const br = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);
   if (br) {
     const dd = Number(br[1]);
     const mm = Number(br[2]);
     const yy = Number(br[3].length === 2 ? `20${br[3]}` : br[3]);
-    const d = new Date(yy, mm - 1, dd);
+    const hh = Number(br[4] ?? 0);
+    const mi = Number(br[5] ?? 0);
+    const ss = Number(br[6] ?? 0);
+    const d = new Date(yy, mm - 1, dd, hh, mi, ss);
     return Number.isNaN(d.getTime()) ? null : d;
   }
 
@@ -4995,6 +5130,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
 
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
 
   const recursoTable = resolveRecursoTableForOrgao(db, orgaoInput, opts.recursoTable);
 
@@ -5125,6 +5261,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
   const extratoRows = readTableRows(db, 'extratos', extratoSelectCols);
   const consolidacaoKeys = getExtratosConsolidacaoHistoricoKeys(db, { orgaoExtratosRaw: orgaoInput });
   let extratosTotal = 0;
+  const extratosByDate = new Map<string, number>();
   for (const r of extratoRows) {
     const rowMonthKey = extratoCopCol
       ? parseCopetenciaToMonthKey(r[extratoCopCol])
@@ -5163,6 +5300,8 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     const cents = parseMoneyToCents(r[extratoValueCol]);
     if (cents === null) continue;
     extratosTotal += cents;
+    const datePtBr = formatDatePtBr(d);
+    extratosByDate.set(datePtBr, (extratosByDate.get(datePtBr) ?? 0) + cents);
   }
 
   const recursoSelectCols = [
@@ -5321,6 +5460,77 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     relItems[idx].pairId = pid;
     claimedRel[idx] = true;
   }
+
+  const sortDatePtBr = (a: string, b: string) => {
+    const parseKey = (v: string) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v.trim());
+      if (!m) return v;
+      return `${m[3]}${m[2]}${m[1]}`;
+    };
+    return parseKey(a).localeCompare(parseKey(b));
+  };
+
+  const consolidadoPorVencimento = (() => {
+    const relByVenc = new Map<string, number>();
+    const pairVenc = new Map<string, string>();
+    for (const r of relItems) {
+      const v = r.vencimento?.trim();
+      if (!v) continue;
+      relByVenc.set(v, (relByVenc.get(v) ?? 0) + r.cents);
+      if (r.pairId) pairVenc.set(r.pairId, v);
+    }
+
+    const recursoByVenc = new Map<string, number>();
+    for (const r of recursoItems) {
+      if (!r.pairId) continue;
+      const v = pairVenc.get(r.pairId);
+      if (!v) continue;
+      recursoByVenc.set(v, (recursoByVenc.get(v) ?? 0) + r.cents);
+    }
+
+    const vencimentos = Array.from(new Set([...relByVenc.keys()]));
+    vencimentos.sort(sortDatePtBr);
+
+    const extratosByVenc = new Map<string, number>();
+    for (const v of vencimentos) {
+      const matched = extratosByDate.get(v) ?? 0;
+      if (matched !== 0) extratosByVenc.set(v, matched);
+    }
+    const matchedSum = Array.from(extratosByVenc.values()).reduce((acc, v) => acc + v, 0);
+    const remaining = extratosTotal - matchedSum;
+    if (remaining !== 0 && vencimentos.length > 0) {
+      const weights = vencimentos.map((v) => {
+        const wRel = Math.abs(relByVenc.get(v) ?? 0);
+        const wRec = Math.abs(recursoByVenc.get(v) ?? 0);
+        return wRel > 0 ? wRel : wRec > 0 ? wRec : 1;
+      });
+      const totalW = weights.reduce((acc, v) => acc + v, 0);
+      let allocated = 0;
+      for (let i = 0; i < vencimentos.length; i++) {
+        const v = vencimentos[i];
+        const add =
+          i === vencimentos.length - 1
+            ? remaining - allocated
+            : Math.trunc((remaining * weights[i]) / (totalW || 1));
+        extratosByVenc.set(v, (extratosByVenc.get(v) ?? 0) + add);
+        allocated += add;
+      }
+    }
+    return vencimentos
+      .map((vencimento) => {
+        const recursoCents = recursoByVenc.get(vencimento) ?? 0;
+        const relatorioCents = relByVenc.get(vencimento) ?? 0;
+        const extratosCents = extratosByVenc.get(vencimento) ?? 0;
+        return {
+          vencimento,
+          recursoCents,
+          relatorioCents,
+          extratosCents,
+          saldoCents: extratosCents - recursoCents,
+        };
+      })
+      .filter((x) => x.recursoCents !== 0 || x.relatorioCents !== 0 || x.extratosCents !== 0);
+  })();
 
   const recursoTotal = recursoItems.reduce((acc, v) => acc + v.cents, 0);
   const relatorioTotal = relItems.reduce((acc, v) => acc + v.cents, 0);
@@ -5519,6 +5729,8 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     month: wantedMonthKey,
     orgao: orgaoInput,
     recursoTable,
+    closed: getConciliacaoFechamentoInfo(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoInput }),
+    consolidadoPorVencimento,
     totals: {
       extratos: { cents: extratosTotal, text: centsToPtBr(extratosTotal) },
       recurso: { cents: recursoTotal, text: centsToPtBr(recursoTotal) },
@@ -5534,6 +5746,504 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     ...(message ? { message } : {}),
     dbFilePath,
   };
+}
+
+export async function fecharConciliacaoRecursoVsRelatorio(opts: {
+  month: string;
+  orgao: string;
+  closedBy?: string;
+  contabilidadeEmail?: string;
+  evidencePngBase64?: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  if (!orgaoRaw) throw new Error('Informe o órgão.');
+  const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
+  if (!orgaoKey) throw new Error('Órgão inválido.');
+
+  const closedBy = String(opts.closedBy ?? '').trim() || null;
+  const contabilidadeEmailsRaw = String(opts.contabilidadeEmail ?? '').trim();
+  const contabilidadeEmails = contabilidadeEmailsRaw
+    ? contabilidadeEmailsRaw
+        .split(/[,;\n]/g)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .filter((s) => s.includes('@'))
+    : [];
+  const contabilidadeEmail = contabilidadeEmails.length > 0 ? contabilidadeEmails.join('; ') : null;
+  const evidencePng = evidencePngBase64ToBuffer(opts.evidencePngBase64);
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+
+  const existing = getConciliacaoFechamentoInfo(db, { monthKey, orgaoRaw });
+  if (existing.isClosed) {
+    return { month: monthKey, orgao: orgaoRaw, closed: existing, dbFilePath };
+  }
+
+  const now = new Date().toISOString();
+  db.run('BEGIN;');
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO conciliacao_fechamentos
+      (month_key, orgao_extratos_key, orgao_extratos_raw, closed_at, closed_by, reopened_at, reopened_by, contabilidade_email, sent_to_contabilidade_at, sent_to_contabilidade_by)
+      VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL)
+      ON CONFLICT(month_key, orgao_extratos_key)
+      DO UPDATE SET
+        orgao_extratos_raw=excluded.orgao_extratos_raw,
+        closed_at=excluded.closed_at,
+        closed_by=excluded.closed_by,
+        reopened_at=NULL,
+        reopened_by=NULL,
+        contabilidade_email=excluded.contabilidade_email;
+    `);
+    try {
+      stmt.run([monthKey, orgaoKey, orgaoRaw, now, closedBy, contabilidadeEmail] as unknown as any[]);
+    } finally {
+      stmt.free();
+    }
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db, dbFilePath);
+
+  if (!contabilidadeEmail) {
+    throw new Error('E-mail de contabilidade não configurado.');
+  }
+
+  const conciliacao = (await conciliarRecursoOrgaoRelatorio({
+    month: monthKey,
+    orgao: orgaoRaw,
+  })) as any;
+  const payload = JSON.stringify(conciliacao);
+  const closedInfo =
+    conciliacao?.closed && typeof conciliacao.closed === 'object'
+      ? conciliacao.closed
+      : getConciliacaoFechamentoInfo(db, { monthKey, orgaoRaw });
+
+  const ocorrencias = Array.isArray(conciliacao?.relatorio)
+    ? conciliacao.relatorio
+        .map((r: any) => ({
+          cpf: typeof r?.cpf === 'string' ? r.cpf : '',
+          nome: typeof r?.nome === 'string' ? r.nome : '',
+          value: typeof r?.value === 'string' ? r.value : '',
+          ocorrencia: r?.ocorrencia ?? null,
+          vencimento: typeof r?.vencimento === 'string' ? r.vencimento : '',
+        }))
+        .filter((r: any) => r.ocorrencia && typeof r.ocorrencia === 'object')
+        .map((r: any) => ({
+          cpf: r.cpf,
+          nome: r.nome,
+          value: r.value,
+          action: typeof r.ocorrencia?.action === 'string' ? r.ocorrencia.action : '',
+          justification:
+            typeof r.ocorrencia?.justification === 'string' ? r.ocorrencia.justification : '',
+          createdAt: typeof r.ocorrencia?.createdAt === 'string' ? r.ocorrencia.createdAt : '',
+        }))
+        .filter((o: any) => Boolean(o.cpf && o.value))
+    : [];
+
+  const vencimento = buildVencimentosCellText(conciliacao?.relatorio);
+  const consolidadoPorVencimento = Array.isArray(conciliacao?.consolidadoPorVencimento)
+    ? conciliacao.consolidadoPorVencimento
+        .map((v: any) => ({
+          vencimento: String(v?.vencimento ?? '').trim(),
+          recursoCents: Number(v?.recursoCents ?? 0) || 0,
+          relatorioCents: Number(v?.relatorioCents ?? 0) || 0,
+          extratosCents: Number(v?.extratosCents ?? 0) || 0,
+          saldoCents: Number(v?.saldoCents ?? 0) || 0,
+        }))
+        .filter((v: any) => Boolean(v.vencimento))
+    : [];
+
+  const pdfFileName = sanitizeFileName(
+    `CONSIGNADOS_CONFERENCIA_${orgaoRaw}_${monthKey}.pdf`,
+  );
+  const pdfBuffer = await createConciliacaoPdfBuffer({
+    monthKey,
+    orgao: orgaoRaw,
+    vencimento,
+    evidencePng,
+    consolidadoPorVencimento,
+    totals: {
+      extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
+      recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
+      tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+      tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+    },
+    closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
+    closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
+    ocorrencias,
+  });
+  const pdfBase64 = pdfBuffer.toString('base64');
+
+  const db2 = await openDatabase(dbFilePath);
+  ensureSchema(db2);
+  db2.run('BEGIN;');
+  try {
+    const outStmt = db2.prepare(
+      `INSERT INTO contabilidade_relatorios_outbox
+       (created_at, created_by, to_email, month_key, orgao_extratos_key, orgao_extratos_raw, payload_json, pdf_file_name, pdf_base64)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+    );
+    try {
+      outStmt.run([
+        now,
+        closedBy,
+        contabilidadeEmail,
+        monthKey,
+        orgaoKey,
+        orgaoRaw,
+        payload,
+        pdfFileName,
+        pdfBase64,
+      ] as unknown as any[]);
+    } finally {
+      outStmt.free();
+    }
+    db2.run('COMMIT;');
+  } catch (e) {
+    try {
+      db2.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db2, dbFilePath);
+
+  const tenantId = process.env.AZURE_TENANT_ID;
+  const clientId = process.env.AZURE_CLIENT_ID;
+  const clientSecret = process.env.AZURE_CLIENT_SECRET;
+  const notificationFrom = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+  if (!tenantId) throw new Error('AZURE_TENANT_ID não configurado');
+  if (!clientId) throw new Error('AZURE_CLIENT_ID não configurado');
+  if (!clientSecret) throw new Error('AZURE_CLIENT_SECRET não configurado');
+  if (!notificationFrom) throw new Error('NOTIFICATION_EMAIL_FROM não configurado');
+
+  const token = await getGraphToken({ tenantId, clientId, clientSecret });
+  await sendGraphMail({
+    token,
+    from: notificationFrom,
+    to: contabilidadeEmails.length > 0 ? contabilidadeEmails : contabilidadeEmail,
+    subject: `Conciliação consignados • ${orgaoRaw} • ${monthKey}`,
+    html: buildConciliacaoEmailHtml({
+      type: 'fechamento',
+      monthKey,
+      orgao: orgaoRaw,
+      vencimento,
+      closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
+      closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
+      totals: {
+        extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
+        recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
+        tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+        tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+      },
+      consolidadoPorVencimento,
+    }),
+    attachments: [
+      {
+        name: pdfFileName,
+        contentType: 'application/pdf',
+        contentBytesBase64: pdfBase64,
+      },
+    ],
+  });
+
+  const db3 = await openDatabase(dbFilePath);
+  ensureSchema(db3);
+  db3.run('BEGIN;');
+  try {
+    const upd = db3.prepare(
+      `UPDATE conciliacao_fechamentos
+       SET contabilidade_email=?,
+           sent_to_contabilidade_at=?,
+           sent_to_contabilidade_by=?
+       WHERE month_key=? AND orgao_extratos_key=?;`,
+    );
+    try {
+      upd.run([contabilidadeEmail, now, closedBy, monthKey, orgaoKey] as unknown as any[]);
+    } finally {
+      upd.free();
+    }
+    db3.run('COMMIT;');
+  } catch (e) {
+    try {
+      db3.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db3, dbFilePath);
+
+  const closed = getConciliacaoFechamentoInfo(db3, { monthKey, orgaoRaw });
+  return { month: monthKey, orgao: orgaoRaw, closed, dbFilePath };
+}
+
+export async function reabrirConciliacaoRecursoVsRelatorio(opts: {
+  month: string;
+  orgao: string;
+  password: string;
+  reopenedBy?: string;
+}) {
+  dotenv.config();
+  const expected = String(process.env.CONCILIACAO_REABRIR_SENHA ?? '').trim();
+  if (!expected) throw new Error('Senha de reabertura não configurada.');
+  const password = String(opts.password ?? '');
+  if (password !== expected) throw new Error('Senha inválida.');
+
+  const { year, month } = parseMonthInput(opts.month);
+  const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  if (!orgaoRaw) throw new Error('Informe o órgão.');
+  const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
+  if (!orgaoKey) throw new Error('Órgão inválido.');
+  const reopenedBy = String(opts.reopenedBy ?? '').trim() || null;
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+
+  const now = new Date().toISOString();
+  db.run('BEGIN;');
+  try {
+    const stmt = db.prepare(
+      `UPDATE conciliacao_fechamentos
+       SET reopened_at=?, reopened_by=?
+       WHERE month_key=? AND orgao_extratos_key=?;`,
+    );
+    try {
+      stmt.run([now, reopenedBy, monthKey, orgaoKey] as unknown as any[]);
+    } finally {
+      stmt.free();
+    }
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db, dbFilePath);
+
+  const closed = getConciliacaoFechamentoInfo(db, { monthKey, orgaoRaw });
+  return { month: monthKey, orgao: orgaoRaw, closed, dbFilePath };
+}
+
+export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
+  month: string;
+  orgao: string;
+  requestedBy?: string;
+  contabilidadeEmail?: string;
+  evidencePngBase64?: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  if (!orgaoRaw) throw new Error('Informe o órgão.');
+  const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
+  if (!orgaoKey) throw new Error('Órgão inválido.');
+
+  const requestedBy = String(opts.requestedBy ?? '').trim() || null;
+  const contabilidadeEmailsRaw = String(opts.contabilidadeEmail ?? '').trim();
+  const contabilidadeEmails = contabilidadeEmailsRaw
+    ? contabilidadeEmailsRaw
+        .split(/[,;\n]/g)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .filter((s) => s.includes('@'))
+    : [];
+  const contabilidadeEmail = contabilidadeEmails.length > 0 ? contabilidadeEmails.join('; ') : null;
+  const evidencePng = evidencePngBase64ToBuffer(opts.evidencePngBase64);
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+
+  const info = getConciliacaoFechamentoInfo(db, { monthKey, orgaoRaw });
+  if (!info.isClosed) throw new Error('Conciliação não está fechada.');
+
+  const now = new Date().toISOString();
+  if (!contabilidadeEmail) {
+    throw new Error('E-mail de contabilidade não configurado.');
+  }
+  const conciliacao = (await conciliarRecursoOrgaoRelatorio({ month: monthKey, orgao: orgaoRaw })) as any;
+  const payload = JSON.stringify(conciliacao);
+
+  const closedInfo =
+    conciliacao?.closed && typeof conciliacao.closed === 'object'
+      ? conciliacao.closed
+      : info;
+
+  const ocorrencias = Array.isArray(conciliacao?.relatorio)
+    ? conciliacao.relatorio
+        .map((r: any) => ({
+          cpf: typeof r?.cpf === 'string' ? r.cpf : '',
+          nome: typeof r?.nome === 'string' ? r.nome : '',
+          value: typeof r?.value === 'string' ? r.value : '',
+          ocorrencia: r?.ocorrencia ?? null,
+        }))
+        .filter((r: any) => r.ocorrencia && typeof r.ocorrencia === 'object')
+        .map((r: any) => ({
+          cpf: r.cpf,
+          nome: r.nome,
+          value: r.value,
+          action: typeof r.ocorrencia?.action === 'string' ? r.ocorrencia.action : '',
+          justification:
+            typeof r.ocorrencia?.justification === 'string' ? r.ocorrencia.justification : '',
+          createdAt: typeof r.ocorrencia?.createdAt === 'string' ? r.ocorrencia.createdAt : '',
+        }))
+        .filter((o: any) => Boolean(o.cpf && o.value))
+    : [];
+
+  const vencimento = buildVencimentosCellText(conciliacao?.relatorio);
+  const consolidadoPorVencimento = Array.isArray(conciliacao?.consolidadoPorVencimento)
+    ? conciliacao.consolidadoPorVencimento
+        .map((v: any) => ({
+          vencimento: String(v?.vencimento ?? '').trim(),
+          recursoCents: Number(v?.recursoCents ?? 0) || 0,
+          relatorioCents: Number(v?.relatorioCents ?? 0) || 0,
+          extratosCents: Number(v?.extratosCents ?? 0) || 0,
+          saldoCents: Number(v?.saldoCents ?? 0) || 0,
+        }))
+        .filter((v: any) => Boolean(v.vencimento))
+    : [];
+
+  const pdfFileName = sanitizeFileName(
+    `CONSIGNADOS_CONFERENCIA_${orgaoRaw}_${monthKey}.pdf`,
+  );
+  const pdfBuffer = await createConciliacaoPdfBuffer({
+    monthKey,
+    orgao: orgaoRaw,
+    vencimento,
+    evidencePng,
+    consolidadoPorVencimento,
+    totals: {
+      extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
+      recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
+      tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+      tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+    },
+    closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
+    closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
+    ocorrencias,
+  });
+  const pdfBase64 = pdfBuffer.toString('base64');
+
+  db.run('BEGIN;');
+  try {
+    const outStmt = db.prepare(
+      `INSERT INTO contabilidade_relatorios_outbox
+       (created_at, created_by, to_email, month_key, orgao_extratos_key, orgao_extratos_raw, payload_json, pdf_file_name, pdf_base64)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+    );
+    try {
+      outStmt.run([
+        now,
+        requestedBy,
+        contabilidadeEmail,
+        monthKey,
+        orgaoKey,
+        orgaoRaw,
+        payload,
+        pdfFileName,
+        pdfBase64,
+      ] as unknown as any[]);
+    } finally {
+      outStmt.free();
+    }
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db, dbFilePath);
+
+  const tenantId = process.env.AZURE_TENANT_ID;
+  const clientId = process.env.AZURE_CLIENT_ID;
+  const clientSecret = process.env.AZURE_CLIENT_SECRET;
+  const notificationFrom = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+  if (!tenantId) throw new Error('AZURE_TENANT_ID não configurado');
+  if (!clientId) throw new Error('AZURE_CLIENT_ID não configurado');
+  if (!clientSecret) throw new Error('AZURE_CLIENT_SECRET não configurado');
+  if (!notificationFrom) throw new Error('NOTIFICATION_EMAIL_FROM não configurado');
+
+  const token = await getGraphToken({ tenantId, clientId, clientSecret });
+  await sendGraphMail({
+    token,
+    from: notificationFrom,
+    to: contabilidadeEmails.length > 0 ? contabilidadeEmails : contabilidadeEmail,
+    subject: `Conciliação consignados • ${orgaoRaw} • ${monthKey} (reenvio)`,
+    html: buildConciliacaoEmailHtml({
+      type: 'reenvio',
+      monthKey,
+      orgao: orgaoRaw,
+      vencimento,
+      closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
+      closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
+      totals: {
+        extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
+        recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
+        tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+        tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+      },
+      consolidadoPorVencimento,
+    }),
+    attachments: [
+      {
+        name: pdfFileName,
+        contentType: 'application/pdf',
+        contentBytesBase64: pdfBase64,
+      },
+    ],
+  });
+
+  const db4 = await openDatabase(dbFilePath);
+  ensureSchema(db4);
+  db4.run('BEGIN;');
+  try {
+    const upd = db4.prepare(
+      `UPDATE conciliacao_fechamentos
+       SET contabilidade_email=?,
+           sent_to_contabilidade_at=?,
+           sent_to_contabilidade_by=?
+       WHERE month_key=? AND orgao_extratos_key=?;`,
+    );
+    try {
+      upd.run([contabilidadeEmail, now, requestedBy, monthKey, orgaoKey] as unknown as any[]);
+    } finally {
+      upd.free();
+    }
+    db4.run('COMMIT;');
+  } catch (e) {
+    try {
+      db4.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db4, dbFilePath);
+  const closed = getConciliacaoFechamentoInfo(db4, { monthKey, orgaoRaw });
+  return { month: monthKey, orgao: orgaoRaw, closed, dbFilePath };
 }
 
 export async function clonarParaRelatorioSisbrFromExtratos(opts: {
@@ -5587,6 +6297,7 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoInput });
 
   if (tableExists(db, 'conciliacao_pendencia_actions')) {
     const check = db.prepare(
@@ -6029,6 +6740,7 @@ function resolveRelatorioEmpresaFromExtratosOrgao(db: Database, orgaoExtratosRaw
 
 export async function alterarOrgaoRelatorioSisbr(opts: {
   month: string;
+  orgao?: string;
   cpf: string;
   nome: string;
   value: string;
@@ -6058,6 +6770,7 @@ export async function alterarOrgaoRelatorioSisbr(opts: {
 
   const toOrgao = String(opts.toOrgao ?? '').trim();
   if (!toOrgao) throw new Error('Informe o órgão de destino.');
+  const orgaoForLock = String(opts.orgao ?? '').trim() || toOrgao
 
   const action =
     typeof opts.action === 'string' && opts.action.trim()
@@ -6069,6 +6782,7 @@ export async function alterarOrgaoRelatorioSisbr(opts: {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoForLock });
 
   if (!tableExists(db, 'relatorio_consignado'))
     throw new Error('Tabela relatorio_consignado não encontrada.');
@@ -6318,6 +7032,9 @@ export async function desfazerOcorrenciaRelatorioSisbr(opts: {
   const cpf = typeof row.cpf === 'string' ? row.cpf.trim() : '';
   const value = typeof row.value === 'string' ? row.value.trim() : '';
   if (!monthKey || !cpf || !value) throw new Error('Ocorrência inválida.');
+  const orgaoInput = typeof row.orgao === 'string' ? row.orgao.trim() : '';
+  if (!orgaoInput) throw new Error('Ocorrência inválida.');
+  assertConciliacaoAberta(db, { monthKey, orgaoRaw: orgaoInput });
 
   const previousEmpresa =
     typeof row.previous_value === 'string' ? row.previous_value.trim() : '';
@@ -6369,7 +7086,6 @@ export async function desfazerOcorrenciaRelatorioSisbr(opts: {
     }
   }
 
-  const orgaoInput = typeof row.orgao === 'string' ? row.orgao.trim() : '';
   const resolveEmpresaFromOrgao = (): string => {
     if (nextEmpresa) return nextEmpresa;
     if (metaEmpresa) return metaEmpresa;
@@ -6619,6 +7335,8 @@ export async function getModalidades() {
 const CONFIG_KEY_SHAREPOINT_FOLDER_URL = 'sharePointFolderUrl';
 const CONFIG_KEY_RECURSO_ALEGO_URL = 'recursoAlegoUrl';
 const CONFIG_KEY_RECURSO_MPGO_URL = 'recursoMpgoUrl';
+const CONFIG_KEY_NOTIFICATION_EMAIL = 'notificationEmail';
+const CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE = 'notificationEmailContabilidade';
 
 export async function getConsignadoAutomationConfig() {
   dotenv.config();
@@ -6638,13 +7356,30 @@ export async function getConsignadoAutomationConfig() {
     db,
     CONFIG_KEY_RECURSO_MPGO_URL,
   );
-  return { sharePointFolderUrl, recursoAlegoUrl, recursoMpgoUrl, dbFilePath };
+  const notificationEmail = getConsignadoAppConfigValue(
+    db,
+    CONFIG_KEY_NOTIFICATION_EMAIL,
+  );
+  const notificationEmailContabilidade = getConsignadoAppConfigValue(
+    db,
+    CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE,
+  );
+  return {
+    sharePointFolderUrl,
+    recursoAlegoUrl,
+    recursoMpgoUrl,
+    notificationEmail,
+    notificationEmailContabilidade,
+    dbFilePath,
+  };
 }
 
 export async function saveConsignadoAutomationConfig(opts: {
   sharePointFolderUrl?: string | null;
   recursoAlegoUrl?: string | null;
   recursoMpgoUrl?: string | null;
+  notificationEmail?: string | null;
+  notificationEmailContabilidade?: string | null;
 }) {
   dotenv.config();
   const dbFilePath = getSqlitePath();
@@ -6653,21 +7388,41 @@ export async function saveConsignadoAutomationConfig(opts: {
 
   db.run('BEGIN;');
   try {
-    setConsignadoAppConfigValue(
-      db,
-      CONFIG_KEY_SHAREPOINT_FOLDER_URL,
-      opts.sharePointFolderUrl ?? null,
-    );
-    setConsignadoAppConfigValue(
-      db,
-      CONFIG_KEY_RECURSO_ALEGO_URL,
-      opts.recursoAlegoUrl ?? null,
-    );
-    setConsignadoAppConfigValue(
-      db,
-      CONFIG_KEY_RECURSO_MPGO_URL,
-      opts.recursoMpgoUrl ?? null,
-    );
+    if (opts.sharePointFolderUrl !== undefined) {
+      setConsignadoAppConfigValue(
+        db,
+        CONFIG_KEY_SHAREPOINT_FOLDER_URL,
+        opts.sharePointFolderUrl ?? null,
+      );
+    }
+    if (opts.recursoAlegoUrl !== undefined) {
+      setConsignadoAppConfigValue(
+        db,
+        CONFIG_KEY_RECURSO_ALEGO_URL,
+        opts.recursoAlegoUrl ?? null,
+      );
+    }
+    if (opts.recursoMpgoUrl !== undefined) {
+      setConsignadoAppConfigValue(
+        db,
+        CONFIG_KEY_RECURSO_MPGO_URL,
+        opts.recursoMpgoUrl ?? null,
+      );
+    }
+    if (opts.notificationEmail !== undefined) {
+      setConsignadoAppConfigValue(
+        db,
+        CONFIG_KEY_NOTIFICATION_EMAIL,
+        opts.notificationEmail ?? null,
+      );
+    }
+    if (opts.notificationEmailContabilidade !== undefined) {
+      setConsignadoAppConfigValue(
+        db,
+        CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE,
+        opts.notificationEmailContabilidade ?? null,
+      );
+    }
     db.run('COMMIT;');
   } catch (e: unknown) {
     try {
@@ -7297,6 +8052,22 @@ export async function exportConcilicacaoTemporarioXlsx(opts?: {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Conciliacao');
 
+  try {
+    const candidates = [
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
+    ];
+    const logoPath = candidates.find((p) => fs.existsSync(p));
+    if (logoPath) {
+      const logoBuf = Buffer.from(fs.readFileSync(logoPath));
+      const logoId = workbook.addImage({ buffer: logoBuf as any, extension: 'png' } as any);
+      sheet.addImage(logoId, { tl: { col: 7, row: 0 }, ext: { width: 220, height: 48 } });
+    }
+  } catch {
+    void 0;
+  }
+
   sheet.columns = [
     { header: 'Nome', key: 'Nome', width: 44 },
     { header: 'CPF', key: 'CPF', width: 18 },
@@ -7387,6 +8158,194 @@ export async function exportConcilicacaoTemporarioXlsx(opts?: {
       naoConciliados: result.naoConciliados,
     },
   };
+}
+
+export async function exportConcilicacaoRecursoVsRelatorioXlsx(opts: {
+  month: string;
+  orgao: string;
+  onlyDiff?: boolean;
+}) {
+  const monthKey = String(opts.month ?? '').trim();
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  if (!monthKey) throw new Error('Informe a competência no formato YYYY-MM.');
+  if (!orgaoRaw) throw new Error('Informe o órgão.');
+
+  const onlyDiff = Boolean(opts.onlyDiff);
+  const conciliacao = (await conciliarRecursoOrgaoRelatorio({
+    month: monthKey,
+    orgao: orgaoRaw,
+  })) as any;
+
+  const recursoAll = Array.isArray(conciliacao?.recurso) ? conciliacao.recurso : [];
+  const relatorioAll = Array.isArray(conciliacao?.relatorio) ? conciliacao.relatorio : [];
+  const recursoRows = onlyDiff ? recursoAll.filter((x: any) => x?.status === 'pendencia') : recursoAll;
+  const relatorioRows = onlyDiff ? relatorioAll.filter((x: any) => x?.status === 'pendencia') : relatorioAll;
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Portal Administrativo';
+  workbook.created = new Date();
+
+  const ws = workbook.addWorksheet('Conciliação');
+
+  try {
+    const candidates = [
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
+    ];
+    const logoPath = candidates.find((p) => fs.existsSync(p));
+    if (logoPath) {
+      const logoBuf = Buffer.from(fs.readFileSync(logoPath));
+      const logoId = workbook.addImage({ buffer: logoBuf as any, extension: 'png' } as any);
+      ws.addImage(logoId, {
+        tl: { col: 0, row: 0 },
+        ext: { width: 240, height: 55 },
+      });
+    }
+  } catch {
+    void 0;
+  }
+
+  ws.getRow(1).height = 56;
+
+  const titleRowIndex = 2;
+  ws.mergeCells(titleRowIndex, 1, titleRowIndex, 12);
+  const titleCell = ws.getCell(titleRowIndex, 1);
+  titleCell.value = `Conciliação • Extratos — ${monthKey} — ${orgaoRaw}`;
+  titleCell.font = { bold: true, size: 14, color: { argb: 'FF0B2A1F' } };
+  titleCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE7F5EF' } };
+  titleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+  ws.getRow(titleRowIndex).height = 28;
+
+  const headerFill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF006B4F' } } as const;
+  const headerFont = { bold: true, color: { argb: 'FFFFFFFF' } } as const;
+  const borderThin = { style: 'thin', color: { argb: 'FF0B2A1F' } } as const;
+  const setHeaderCell = (cell: ExcelJS.Cell, value: string) => {
+    cell.value = value;
+    cell.font = headerFont as any;
+    cell.fill = headerFill as any;
+    cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true } as any;
+    cell.border = { top: borderThin, left: borderThin, bottom: borderThin, right: borderThin } as any;
+  };
+  const setBodyCell = (cell: ExcelJS.Cell, value: string, opts?: { right?: boolean; bold?: boolean }) => {
+    cell.value = value;
+    cell.alignment = { vertical: 'top', horizontal: opts?.right ? 'right' : 'left', wrapText: true } as any;
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+    } as any;
+    if (opts?.bold) cell.font = { bold: true } as any;
+  };
+
+  const topRow = 4;
+  ws.getRow(topRow).height = 18;
+
+  const leftStartCol = 1;
+  const gapCol = 6;
+  const rightStartCol = 7;
+
+  ws.columns = [
+    { width: 34 },
+    { width: 16 },
+    { width: 14 },
+    { width: 16 },
+    { width: 10 },
+    { width: 3 },
+    { width: 34 },
+    { width: 16 },
+    { width: 14 },
+    { width: 14 },
+    { width: 16 },
+    { width: 16 },
+  ];
+
+  ws.mergeCells(topRow, leftStartCol, topRow, leftStartCol + 4);
+  const leftTitle = ws.getCell(topRow, leftStartCol);
+  leftTitle.value = `Recurso do Órgão (${String(conciliacao?.recursoTable ?? '').trim() || 'Recurso'})`;
+  leftTitle.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  leftTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2937' } };
+  leftTitle.alignment = { vertical: 'middle', horizontal: 'left' };
+
+  ws.mergeCells(topRow, rightStartCol, topRow, rightStartCol + 5);
+  const rightTitle = ws.getCell(topRow, rightStartCol);
+  rightTitle.value = 'Relatório SISBR';
+  rightTitle.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  rightTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2937' } };
+  rightTitle.alignment = { vertical: 'middle', horizontal: 'left' };
+
+  const headerRowIndex = topRow + 1;
+  const hrow = ws.getRow(headerRowIndex);
+  setHeaderCell(hrow.getCell(leftStartCol + 0), 'Nome');
+  setHeaderCell(hrow.getCell(leftStartCol + 1), 'CPF');
+  setHeaderCell(hrow.getCell(leftStartCol + 2), 'Valor Parcela');
+  setHeaderCell(hrow.getCell(leftStartCol + 3), 'Status');
+  setHeaderCell(hrow.getCell(leftStartCol + 4), 'PairId');
+  setHeaderCell(hrow.getCell(rightStartCol + 0), 'Nome');
+  setHeaderCell(hrow.getCell(rightStartCol + 1), 'CPF');
+  setHeaderCell(hrow.getCell(rightStartCol + 2), 'Valor Parcela');
+  setHeaderCell(hrow.getCell(rightStartCol + 3), 'Vencimento');
+  setHeaderCell(hrow.getCell(rightStartCol + 4), 'Modalidade');
+  setHeaderCell(hrow.getCell(rightStartCol + 5), 'Status');
+  hrow.height = 22;
+
+  for (let r = topRow; r <= headerRowIndex; r += 1) {
+    ws.getCell(r, gapCol).value = '';
+  }
+
+  const maxRows = Math.max(recursoRows.length, relatorioRows.length);
+  const firstDataRowIndex = headerRowIndex + 1;
+  for (let i = 0; i < maxRows; i += 1) {
+    const excelRow = ws.getRow(firstDataRowIndex + i);
+    excelRow.height = 18;
+
+    const rec = recursoRows[i] ?? null;
+    if (rec) {
+      setBodyCell(excelRow.getCell(leftStartCol + 0), String(rec.nome ?? ''));
+      setBodyCell(excelRow.getCell(leftStartCol + 1), String(rec.cpf ?? ''));
+      setBodyCell(excelRow.getCell(leftStartCol + 2), String(rec.value ?? ''), { right: true });
+      const statusText = String(rec.status ?? '') === 'conciliado' ? 'Conciliado' : 'Não conciliado';
+      setBodyCell(excelRow.getCell(leftStartCol + 3), statusText, { bold: true });
+      setBodyCell(excelRow.getCell(leftStartCol + 4), String(rec.pairId ?? ''));
+      const isOk = String(rec.status ?? '') === 'conciliado';
+      excelRow.getCell(leftStartCol + 3).font = {
+        bold: true,
+        color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
+      } as any;
+      excelRow.getCell(leftStartCol + 2).font = {
+        bold: true,
+        color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
+      } as any;
+    }
+
+    const rel = relatorioRows[i] ?? null;
+    if (rel) {
+      setBodyCell(excelRow.getCell(rightStartCol + 0), String(rel.nome ?? ''));
+      setBodyCell(excelRow.getCell(rightStartCol + 1), String(rel.cpf ?? ''));
+      setBodyCell(excelRow.getCell(rightStartCol + 2), String(rel.value ?? ''), { right: true });
+      setBodyCell(excelRow.getCell(rightStartCol + 3), String(rel.vencimento ?? ''));
+      setBodyCell(excelRow.getCell(rightStartCol + 4), String(rel.modalidade ?? ''));
+      const statusText = String(rel.status ?? '') === 'conciliado' ? 'Conciliado' : 'Não conciliado';
+      setBodyCell(excelRow.getCell(rightStartCol + 5), statusText, { bold: true });
+      const isOk = String(rel.status ?? '') === 'conciliado';
+      excelRow.getCell(rightStartCol + 5).font = {
+        bold: true,
+        color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
+      } as any;
+      excelRow.getCell(rightStartCol + 2).font = {
+        bold: true,
+        color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
+      } as any;
+    }
+  }
+
+  ws.views = [{ state: 'frozen', ySplit: firstDataRowIndex - 1 }];
+
+  const bufRaw = await workbook.xlsx.writeBuffer();
+  const buf = Buffer.isBuffer(bufRaw) ? bufRaw : Buffer.from(bufRaw as any);
+  const fileName = sanitizeFileName(`Conciliação_Extratos_${monthKey}_${orgaoRaw}.xlsx`);
+  return { fileName, buffer: buf };
 }
 
 export async function importRelatoriosTemporario(opts: {
@@ -8002,10 +8961,36 @@ async function moveDriveItemWithRetry(opts: {
 async function sendGraphMail(opts: {
   token: string;
   from: string;
-  to: string;
+  to: string | string[];
   subject: string;
   html: string;
+  attachments?: Array<{ name: string; contentType: string; contentBytesBase64: string }>;
 }) {
+  const parseEmailRecipients = (input: string | string[]) => {
+    const rawItems = Array.isArray(input)
+      ? input
+      : String(input ?? '')
+          .split(/[,;\n]/g)
+          .map((s) => s.trim())
+          .filter(Boolean);
+    const emails: string[] = [];
+    const seen = new Set<string>();
+    for (const it of rawItems) {
+      const email = it.trim();
+      if (!email) continue;
+      const lower = email.toLowerCase();
+      if (seen.has(lower)) continue;
+      if (!lower.includes('@') || lower.startsWith('@') || lower.endsWith('@')) continue;
+      seen.add(lower);
+      emails.push(email);
+    }
+    return emails;
+  };
+
+  const toRecipientsList = parseEmailRecipients(opts.to);
+  if (toRecipientsList.length === 0) {
+    throw new Error('E-mail de contabilidade não configurado.');
+  }
   const res = await fetch(
     `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
       opts.from,
@@ -8020,7 +9005,17 @@ async function sendGraphMail(opts: {
         message: {
           subject: opts.subject,
           body: { contentType: 'HTML', content: opts.html },
-          toRecipients: [{ emailAddress: { address: opts.to } }],
+          toRecipients: toRecipientsList.map((address) => ({ emailAddress: { address } })),
+          ...(opts.attachments && opts.attachments.length > 0
+            ? {
+                attachments: opts.attachments.map((a) => ({
+                  '@odata.type': '#microsoft.graph.fileAttachment',
+                  name: a.name,
+                  contentType: a.contentType,
+                  contentBytes: a.contentBytesBase64,
+                })),
+              }
+            : {}),
         },
         saveToSentItems: false,
       }),
@@ -8030,6 +9025,994 @@ async function sendGraphMail(opts: {
     const text = await res.text().catch(() => '');
     throw new Error(text || `Falha ao enviar e-mail (HTTP ${res.status})`);
   }
+}
+
+function monthKeyToPtBrUpper(monthKey: string): string {
+  const parts = String(monthKey ?? '').split('-');
+  if (parts.length !== 2) return monthKey;
+  const y = parts[0];
+  const m = Number(parts[1]);
+  const months = [
+    'JANEIRO',
+    'FEVEREIRO',
+    'MARÇO',
+    'ABRIL',
+    'MAIO',
+    'JUNHO',
+    'JULHO',
+    'AGOSTO',
+    'SETEMBRO',
+    'OUTUBRO',
+    'NOVEMBRO',
+    'DEZEMBRO',
+  ];
+  const name = Number.isFinite(m) && m >= 1 && m <= 12 ? months[m - 1] : parts[1];
+  return `${name} ${y}`;
+}
+
+function formatIsoToPtBrDateTime(iso: string | null): string {
+  const raw = String(iso ?? '').trim();
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (!Number.isFinite(d.getTime())) return raw;
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = String(d.getFullYear());
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy} ${hh}:${mi}`;
+}
+
+function sanitizeFileName(v: string): string {
+  return String(v ?? '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
+function evidencePngBase64ToBuffer(input: string | null | undefined): Buffer | null {
+  const raw = String(input ?? '').trim();
+  if (!raw) return null;
+  const base64 = raw.startsWith('data:image')
+    ? raw.slice(raw.indexOf(',') + 1).trim()
+    : raw;
+  if (!base64) return null;
+  const maxBytes = 8 * 1024 * 1024;
+  const estimatedBytes = Math.floor((base64.length * 3) / 4);
+  if (estimatedBytes > maxBytes) {
+    throw new Error('Evidência muito grande para gerar o PDF.');
+  }
+  return Buffer.from(base64, 'base64');
+}
+
+function buildVencimentosCellText(relatorio: any): string | null {
+  const rel = Array.isArray(relatorio) ? relatorio : [];
+  const unique = new Set<string>();
+  for (const r of rel) {
+    const v = typeof r?.vencimento === 'string' ? String(r.vencimento).trim() : '';
+    if (v) unique.add(v);
+  }
+  const list = Array.from(unique);
+  if (list.length === 0) return null;
+
+  const toSortKey = (v: string) => {
+    const m = v.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (m) return `${m[3]}${m[2]}${m[1]}`;
+    return v;
+  };
+  list.sort((a, b) => toSortKey(a).localeCompare(toSortKey(b)));
+
+  const maxItems = 3;
+  const shown = list.slice(0, maxItems);
+  const remaining = list.length - shown.length;
+  return shown.join(' / ') + (remaining > 0 ? ` / +${remaining}` : '');
+}
+
+function escapeHtml(value: string): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function getEmailLogoDataUri(): string | null {
+  try {
+    const candidates = [
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
+    ];
+    const p = candidates.find((x) => fs.existsSync(x));
+    if (!p) return null;
+    const buf = fs.readFileSync(p);
+    if (!buf || buf.length === 0) return null;
+    return `data:image/png;base64,${buf.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
+
+function buildConciliacaoEmailHtml(opts: {
+  type: 'fechamento' | 'reenvio';
+  monthKey: string;
+  orgao: string;
+  vencimento: string | null;
+  closedBy: string | null;
+  closedAt: string | null;
+  totals: { extratosCents: number; recursoCents: number; tarifaLinhaCents: number; tarifaTedCents: number };
+  consolidadoPorVencimento: Array<{
+    vencimento: string;
+    recursoCents: number;
+    extratosCents: number;
+    saldoCents: number;
+  }>;
+}): string {
+  const orgao = escapeHtml(opts.orgao);
+  const competencia = escapeHtml(opts.monthKey);
+  const tipoLabel = opts.type === 'reenvio' ? 'Reenvio do Fechamento' : 'Fechamento da Conciliação';
+  const vencimentos = escapeHtml(String(opts.vencimento ?? '').trim() || '-');
+  const when = escapeHtml(opts.closedAt ? formatIsoToPtBrDateTime(opts.closedAt) : '');
+  const who = escapeHtml(String(opts.closedBy ?? '').trim() || '');
+
+  const totalTarifas = (Number(opts.totals.tarifaLinhaCents ?? 0) || 0) + (Number(opts.totals.tarifaTedCents ?? 0) || 0);
+  const totalDebito = Number(opts.totals.recursoCents ?? 0) || 0;
+  const totalCredito = Number(opts.totals.extratosCents ?? 0) || 0;
+  const saldoTotal = totalCredito - totalDebito;
+  const saldoTarifas = -totalTarifas;
+  const saldoTotalizadorGeral = saldoTotal - saldoTarifas;
+  const money = (cents: number) => `R$ ${centsToPtBr(Math.abs(cents))}`;
+  const moneySigned = (cents: number) => (cents < 0 ? `- ${money(cents)}` : money(cents));
+  const moneyDebit = (cents: number) => `- ${money(cents)}`;
+  const logoDataUri = getEmailLogoDataUri();
+
+  const rows = Array.isArray(opts.consolidadoPorVencimento)
+    ? opts.consolidadoPorVencimento.filter((x) => Boolean(String(x?.vencimento ?? '').trim()))
+    : [];
+
+  const consolidatedHtml =
+    rows.length === 0
+      ? ''
+      : `
+        <div style="margin-top:16px">
+          <div style="font-size:12px;font-weight:800;color:#0f172a;margin-bottom:8px">Consolidado por vencimento</div>
+          <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden">
+            <thead>
+              <tr style="background:#f8fafc">
+                <th style="text-align:left;padding:10px 12px;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Vencimento</th>
+                <th style="text-align:right;padding:10px 12px;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Débito</th>
+                <th style="text-align:right;padding:10px 12px;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Crédito</th>
+                <th style="text-align:right;padding:10px 12px;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Saldo</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows
+                .map((r) => {
+                  const venc = escapeHtml(String(r.vencimento ?? '').trim());
+                  const debRaw = Number(r.recursoCents ?? 0) || 0;
+                  const deb = escapeHtml(debRaw ? moneyDebit(debRaw) : '');
+                  const cred = escapeHtml(money(Number(r.extratosCents ?? 0) || 0));
+                  const sal = escapeHtml(moneySigned(Number(r.saldoCents ?? 0) || 0));
+                  const salColor = Number(r.saldoCents ?? 0) < 0 ? '#b91c1c' : '#0f766e';
+                  return `
+                    <tr>
+                      <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:13px;color:#0f172a">${venc}</td>
+                      <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:13px;color:#b91c1c;text-align:right;font-weight:900">${deb}</td>
+                      <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:13px;color:#0f172a;text-align:right;font-weight:800">${cred}</td>
+                      <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:13px;text-align:right;font-weight:900;color:${salColor}">${sal}</td>
+                    </tr>
+                  `;
+                })
+                .join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+
+  const footer = `
+    <div style="margin-top:18px;padding-top:14px;border-top:1px solid #e5e7eb;text-align:center;color:#9ca3af;font-size:12px;line-height:1.45">
+      <div>© 2026 Sicoob Juriscred • Consignados</div>
+      <div>Desenvolvido Por: Tecnologia da Informação Jusriscred</div>
+      <div>🤖 E-mail automático por agentes de IA - Por favor não responder.</div>
+    </div>
+  `;
+
+  return `
+    <div style="background:#f3f4f6;padding:18px 12px">
+      <div style="max-width:720px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden">
+        <div style="background:#ffffff;padding:16px 18px;border-bottom:1px solid #e5e7eb">
+          <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse">
+            <tr>
+              <td style="width:150px;vertical-align:middle">
+                ${
+                  logoDataUri
+                    ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="display:block;height:40px;width:auto" />`
+                    : ''
+                }
+              </td>
+              <td style="vertical-align:middle">
+                <div style="font-family:Segoe UI,Arial,sans-serif;color:#003641;text-align:center">
+                  <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;font-weight:900">${escapeHtml(tipoLabel)}</div>
+                  <div style="font-size:20px;font-weight:900;margin-top:6px">Conciliação de Consignados</div>
+                  <div style="font-size:13px;opacity:0.92;margin-top:6px">${orgao}</div>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </div>
+
+        <div style="padding:18px 18px 14px 18px;font-family:Segoe UI,Arial,sans-serif;color:#111827">
+          <div style="font-size:14px;line-height:1.6">
+            <div style="font-weight:800;color:#0f172a">Resumo do ${escapeHtml(opts.type === 'reenvio' ? 'reenvio' : 'fechamento')}</div>
+            <div style="margin-top:8px;color:#334155">
+              Competência: <b>${competencia}</b><br/>
+              Vencimento(s): <b>${vencimentos}</b>${who ? `<br/>Responsável: <b>${who}</b>` : ''}${when ? `<br/>Data/Hora: <b>${when}</b>` : ''}
+            </div>
+          </div>
+
+          <div style="margin-top:16px;display:block">
+            <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:separate;border-spacing:0 10px">
+              <tr>
+                <td style="padding:12px 14px;background:#ecfeff;border:1px solid #cffafe;border-radius:14px">
+                  <div style="font-size:12px;color:#155e75;font-weight:900;letter-spacing:0.08em;text-transform:uppercase">Crédito (Extrato SicoobNet)</div>
+                  <div style="font-size:18px;font-weight:900;color:#0f172a;margin-top:6px">${escapeHtml(money(totalCredito))}</div>
+                </td>
+                <td style="width:12px"></td>
+                <td style="padding:12px 14px;background:#fff7ed;border:1px solid #fed7aa;border-radius:14px">
+                  <div style="font-size:12px;color:#9a3412;font-weight:900;letter-spacing:0.08em;text-transform:uppercase">Débito (Folha/Órgão)</div>
+                  <div style="font-size:18px;font-weight:900;color:#b91c1c;margin-top:6px">${escapeHtml(moneyDebit(totalDebito))}</div>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:12px 14px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:14px">
+                  <div style="font-size:12px;color:#475569;font-weight:900;letter-spacing:0.08em;text-transform:uppercase">TOTAL (DÉBITO / CRÉDITO)</div>
+                  <div style="font-size:18px;font-weight:900;color:${saldoTotal < 0 ? '#b91c1c' : '#0f766e'};margin-top:6px">${escapeHtml(moneySigned(saldoTotal))}</div>
+                  <div style="font-size:12px;color:#64748b;margin-top:6px">Saldo R$ do PDF (TOTAL D/C)</div>
+                </td>
+                <td style="width:12px"></td>
+                <td style="padding:12px 14px;background:#fff7ed;border:1px solid #fed7aa;border-radius:14px">
+                  <div style="font-size:12px;color:#9a3412;font-weight:900;letter-spacing:0.08em;text-transform:uppercase">TOTAL GERAL (APÓS TARIFAS)</div>
+                  <div style="font-size:18px;font-weight:900;color:#b91c1c;margin-top:6px">${escapeHtml(moneySigned(saldoTarifas))}</div>
+                  <div style="font-size:12px;color:#64748b;margin-top:6px">Tarifa Linha: ${escapeHtml(moneyDebit(Number(opts.totals.tarifaLinhaCents ?? 0) || 0))} • Tarifa TED: ${escapeHtml(moneyDebit(Number(opts.totals.tarifaTedCents ?? 0) || 0))}</div>
+                </td>
+              </tr>
+              <tr>
+                <td colspan="3" style="padding:12px 14px;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px">
+                  <div style="font-size:12px;color:#003641;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;text-align:center">TOTALIZADOR GERAL (SALDOS)</div>
+                  <div style="font-size:18px;font-weight:900;color:${saldoTotalizadorGeral < 0 ? '#b91c1c' : '#0f766e'};margin-top:8px;text-align:center">${escapeHtml(moneySigned(saldoTotalizadorGeral))}</div>
+                  <div style="font-size:12px;color:#64748b;margin-top:8px;text-align:center">
+                    Coluna SALDO R$ do TOTAL (DÉBITO / CRÉDITO) − coluna SALDO R$ do TOTAL GERAL (APÓS TARIFAS)
+                  </div>
+                </td>
+              </tr>
+            </table>
+          </div>
+
+          <div style="margin-top:14px;font-size:13px;color:#334155;line-height:1.55">
+            O relatório em PDF segue em anexo com a conferência detalhada e a evidência da tela.
+          </div>
+          ${consolidatedHtml}
+          ${footer}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function createConciliacaoAnaliticaXlsxBuffer(opts: {
+  monthKey: string;
+  orgao: string;
+  closedBy: string | null;
+  closedAt: string | null;
+  recurso: Array<{ cpf: string; nome: string; value: string; status: string; pairId: string | null }>;
+  relatorio: Array<{
+    cpf: string;
+    nome: string;
+    value: string;
+    competencia?: string | null;
+    vencimento?: string | null;
+    modalidade?: string | null;
+    empresa?: string | null;
+    status: string;
+    pairId: string | null;
+    ocorrencia?: null | {
+      action?: string | null;
+      justification?: string | null;
+      createdAt?: string | null;
+    };
+  }>;
+  consolidadoPorVencimento: Array<{
+    vencimento: string;
+    recursoCents: number;
+    relatorioCents: number;
+    extratosCents: number;
+    saldoCents: number;
+  }>;
+  ocorrencias: Array<{
+    cpf: string;
+    nome: string;
+    value: string;
+    action: string;
+    justification: string;
+    createdAt: string;
+  }>;
+}): Promise<Buffer> {
+  const sanitizeText = (v: unknown) =>
+    String(v ?? '')
+      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const parseMoneyNumber = (v: unknown): number | null => {
+    const raw = String(v ?? '').trim();
+    if (!raw) return null;
+    const s = raw.includes(',') ? raw.replace(/\./g, '').replace(',', '.') : raw;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Portal Administrativo';
+  workbook.created = new Date();
+
+  const tryAddLogo = (sheet: ExcelJS.Worksheet) => {
+    try {
+      const candidates = [
+        path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+        path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+        path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
+      ];
+      const logoPath = candidates.find((p) => fs.existsSync(p));
+      if (!logoPath) return;
+      const logoBuf = Buffer.from(fs.readFileSync(logoPath));
+      const logoId = workbook.addImage({ buffer: logoBuf as any, extension: 'png' } as any);
+      sheet.addImage(logoId, { tl: { col: 7, row: 0 }, ext: { width: 220, height: 48 } });
+    } catch {
+      void 0;
+    }
+  };
+
+  const summary = workbook.addWorksheet('Resumo');
+  tryAddLogo(summary);
+  summary.getColumn(1).width = 22;
+  summary.getColumn(2).width = 70;
+  summary.getRow(1).height = 28;
+  summary.getCell('A1').value = 'CONCILIAÇÃO ANALÍTICA';
+  summary.getCell('A1').font = { bold: true, size: 16 };
+
+  summary.getCell('A3').value = 'Competência';
+  summary.getCell('B3').value = sanitizeText(opts.monthKey);
+  summary.getCell('A4').value = 'Órgão';
+  summary.getCell('B4').value = sanitizeText(opts.orgao);
+  summary.getCell('A5').value = 'Fechado por';
+  summary.getCell('B5').value = sanitizeText(opts.closedBy);
+  summary.getCell('A6').value = 'Data/Hora';
+  summary.getCell('B6').value = sanitizeText(opts.closedAt ? formatIsoToPtBrDateTime(opts.closedAt) : '');
+  for (const addr of ['A3', 'A4', 'A5', 'A6']) {
+    summary.getCell(addr).font = { bold: true };
+  }
+
+  const consolidado = Array.isArray(opts.consolidadoPorVencimento)
+    ? opts.consolidadoPorVencimento.filter((x) => Boolean(x?.vencimento))
+    : [];
+  if (consolidado.length > 0) {
+    const startRow = 9;
+    summary.getCell(`A${startRow}`).value = 'Vencimento';
+    summary.getCell(`B${startRow}`).value = 'Débito';
+    summary.getCell(`C${startRow}`).value = 'Crédito';
+    summary.getCell(`D${startRow}`).value = 'Saldo';
+    summary.getRow(startRow).font = { bold: true };
+    summary.getColumn(3).width = 18;
+    summary.getColumn(4).width = 18;
+    summary.getColumn(5).width = 18;
+    summary.getColumn(6).width = 18;
+    let r = startRow + 1;
+    for (const it of consolidado) {
+      summary.getCell(`A${r}`).value = sanitizeText(it.vencimento);
+      summary.getCell(`B${r}`).value = (Number(it.recursoCents ?? 0) || 0) / 100;
+      summary.getCell(`C${r}`).value = (Number(it.extratosCents ?? 0) || 0) / 100;
+      summary.getCell(`D${r}`).value = (Number(it.saldoCents ?? 0) || 0) / 100;
+      summary.getCell(`B${r}`).numFmt = '#,##0.00';
+      summary.getCell(`C${r}`).numFmt = '#,##0.00';
+      summary.getCell(`D${r}`).numFmt = '#,##0.00';
+      r += 1;
+    }
+  }
+
+  const sheetRecurso = workbook.addWorksheet('Recurso');
+  tryAddLogo(sheetRecurso);
+  sheetRecurso.columns = [
+    { header: 'Nome', key: 'Nome', width: 44 },
+    { header: 'CPF', key: 'CPF', width: 18 },
+    { header: 'Valor', key: 'Valor', width: 16 },
+    { header: 'Status', key: 'Status', width: 14 },
+    { header: 'PairId', key: 'PairId', width: 26 },
+  ];
+  sheetRecurso.getRow(1).font = { bold: true };
+  sheetRecurso.autoFilter = { from: 'A1', to: 'E1' };
+  for (const it of opts.recurso ?? []) {
+    const row = sheetRecurso.addRow({
+      Nome: sanitizeText(it.nome),
+      CPF: sanitizeText(it.cpf),
+      Valor: parseMoneyNumber(it.value),
+      Status: sanitizeText(it.status),
+      PairId: sanitizeText(it.pairId),
+    });
+    row.getCell(2).numFmt = '@';
+    row.getCell(3).numFmt = '#,##0.00';
+  }
+
+  const sheetRelatorio = workbook.addWorksheet('Relatório');
+  tryAddLogo(sheetRelatorio);
+  sheetRelatorio.columns = [
+    { header: 'Nome', key: 'Nome', width: 44 },
+    { header: 'CPF', key: 'CPF', width: 18 },
+    { header: 'Valor', key: 'Valor', width: 16 },
+    { header: 'Vencimento', key: 'Vencimento', width: 14 },
+    { header: 'Competência', key: 'Competencia', width: 12 },
+    { header: 'Modalidade', key: 'Modalidade', width: 12 },
+    { header: 'Empresa', key: 'Empresa', width: 30 },
+    { header: 'Status', key: 'Status', width: 14 },
+    { header: 'PairId', key: 'PairId', width: 26 },
+    { header: 'Ocorrência', key: 'Ocorrencia', width: 50 },
+    { header: 'Data/Hora Ocorrência', key: 'OcorrenciaAt', width: 20 },
+  ];
+  sheetRelatorio.getRow(1).font = { bold: true };
+  sheetRelatorio.autoFilter = { from: 'A1', to: 'K1' };
+  for (const it of opts.relatorio ?? []) {
+    const row = sheetRelatorio.addRow({
+      Nome: sanitizeText(it.nome),
+      CPF: sanitizeText(it.cpf),
+      Valor: parseMoneyNumber(it.value),
+      Vencimento: sanitizeText(it.vencimento),
+      Competencia: sanitizeText(it.competencia),
+      Modalidade: sanitizeText(it.modalidade),
+      Empresa: sanitizeText(it.empresa),
+      Status: sanitizeText(it.status),
+      PairId: sanitizeText(it.pairId),
+      Ocorrencia: it.ocorrencia
+        ? sanitizeText(
+            [it.ocorrencia.action, it.ocorrencia.justification].filter(Boolean).join(' • '),
+          )
+        : '',
+      OcorrenciaAt: sanitizeText(
+        it.ocorrencia?.createdAt ? formatIsoToPtBrDateTime(it.ocorrencia.createdAt) : '',
+      ),
+    });
+    row.getCell(2).numFmt = '@';
+    row.getCell(3).numFmt = '#,##0.00';
+  }
+
+  const sheetOc = workbook.addWorksheet('Ocorrências');
+  tryAddLogo(sheetOc);
+  sheetOc.columns = [
+    { header: 'Data/Hora', key: 'CreatedAt', width: 18 },
+    { header: 'CPF', key: 'CPF', width: 18 },
+    { header: 'Nome', key: 'Nome', width: 44 },
+    { header: 'Valor', key: 'Valor', width: 16 },
+    { header: 'Ação', key: 'Action', width: 26 },
+    { header: 'Justificativa', key: 'Justification', width: 60 },
+  ];
+  sheetOc.getRow(1).font = { bold: true };
+  sheetOc.autoFilter = { from: 'A1', to: 'F1' };
+  for (const o of opts.ocorrencias ?? []) {
+    const row = sheetOc.addRow({
+      CreatedAt: sanitizeText(o.createdAt ? formatIsoToPtBrDateTime(o.createdAt) : ''),
+      CPF: sanitizeText(o.cpf),
+      Nome: sanitizeText(o.nome),
+      Valor: parseMoneyNumber(o.value),
+      Action: sanitizeText(o.action),
+      Justification: sanitizeText(o.justification),
+    });
+    row.getCell(2).numFmt = '@';
+    row.getCell(4).numFmt = '#,##0.00';
+  }
+
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+async function createConciliacaoPdfBuffer(opts: {
+  monthKey: string;
+  orgao: string;
+  vencimento: string | null;
+  evidencePng: Buffer | null;
+  consolidadoPorVencimento: Array<{
+    vencimento: string;
+    recursoCents: number;
+    relatorioCents: number;
+    extratosCents: number;
+    saldoCents: number;
+  }>;
+  totals: {
+    extratosCents: number;
+    recursoCents: number;
+    tarifaLinhaCents: number;
+    tarifaTedCents: number;
+  };
+  closedBy: string | null;
+  closedAt: string | null;
+  ocorrencias: Array<{
+    cpf: string;
+    nome: string;
+    value: string;
+    action: string;
+    justification: string;
+    createdAt: string;
+  }>;
+}): Promise<Buffer> {
+  const formatCurrency = (cents: number) => `R$ ${centsToPtBr(Math.abs(cents))}`;
+  const formatCurrencySigned = (cents: number) =>
+    cents < 0 ? `- ${formatCurrency(cents)}` : formatCurrency(cents);
+  const adjustToNextBusinessDayPtBr = (input: string) => {
+    const raw = String(input ?? '').trim();
+    if (!raw) return raw;
+    return raw.replace(/\b(\d{2})\/(\d{2})\/(\d{4})\b/g, (m, dd, mm, yyyy) => {
+      const d = Number(dd);
+      const mo = Number(mm);
+      const y = Number(yyyy);
+      if (!Number.isFinite(d) || !Number.isFinite(mo) || !Number.isFinite(y)) return m;
+      const date = new Date(y, mo - 1, d);
+      if (!Number.isFinite(date.getTime())) return m;
+      const dow = date.getDay();
+      const addDays = dow === 6 ? 2 : dow === 0 ? 1 : 0;
+      if (addDays === 0) return m;
+      const next = new Date(date);
+      next.setDate(next.getDate() + addDays);
+      const ndd = String(next.getDate()).padStart(2, '0');
+      const nmm = String(next.getMonth() + 1).padStart(2, '0');
+      const nyyyy = String(next.getFullYear());
+      return `${ndd}/${nmm}/${nyyyy}`;
+    });
+  };
+  const vencimentoListText = String(opts.vencimento ?? '').trim();
+  const evidencePng = opts.evidencePng;
+  const isFolha =
+    opts.orgao.trim() === 'GOIAS ASSEMBLEIA LEGISLATIVA DO ESTADO D' ||
+    opts.orgao.trim() === 'GOIAS MP PROCURADORIA GERAL DE JUSTICA';
+  const debitLabel = isFolha ? 'DÉBITO FOLHA DE PAGAMENTO' : 'DÉBITO ÓRGÃO';
+
+  const consolidado = Array.isArray(opts.consolidadoPorVencimento)
+    ? opts.consolidadoPorVencimento.filter((x) => Boolean(x?.vencimento))
+    : [];
+  const mainRows =
+    consolidado.length > 0
+      ? consolidado
+      : [
+          {
+            vencimento: vencimentoListText,
+            recursoCents: opts.totals.recursoCents,
+            relatorioCents: 0,
+            extratosCents: opts.totals.extratosCents,
+            saldoCents: opts.totals.extratosCents - opts.totals.recursoCents,
+          },
+        ];
+  const compactMode = mainRows.length > 1;
+
+  const doc = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 36 });
+  const chunks: Buffer[] = [];
+  const out = new Promise<Buffer>((resolve, reject) => {
+    doc.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+
+  const footerText = `© 2026 Sicoob Juriscred • Consignados\nDesenvolvido Por: Tecnologia da Informação Jusriscred\nEsse relatório foi gerado automático por agentes de IA, pode cometer erros.`;
+  const getFooterLayout = () => {
+    const pageWidth = doc.page.width;
+    const marginLeft = doc.page.margins.left;
+    const marginRight = doc.page.margins.right;
+    const contentWidth = pageWidth - marginLeft - marginRight;
+    doc.fillColor('#444444').fontSize(8.5).font('Helvetica');
+    const h = doc.heightOfString(footerText, { width: contentWidth, align: 'center' });
+    const y = doc.page.height - doc.page.margins.bottom - h;
+    return { y, h, marginLeft, contentWidth };
+  };
+  const getContentBottomY = () => {
+    const { y: footerY } = getFooterLayout();
+    return footerY - 8;
+  };
+
+  const headerH = 58;
+  let logoBuf: Buffer | null = null;
+  try {
+    const candidates = [
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
+    ];
+    const logoPath = candidates.find((p) => fs.existsSync(p));
+    logoBuf = logoPath ? fs.readFileSync(logoPath) : null;
+  } catch {
+    logoBuf = null;
+  }
+
+  const headerRight = [
+    opts.closedBy ? `Fechado por: ${opts.closedBy}` : '',
+    opts.closedAt ? `Data/Hora: ${formatIsoToPtBrDateTime(opts.closedAt)}` : '',
+  ]
+    .filter(Boolean)
+    .join(' • ');
+  const drawHeader = () => {
+    const pageWidth = doc.page.width;
+    const marginLeft = doc.page.margins.left;
+    const marginRight = doc.page.margins.right;
+    const contentWidth = pageWidth - marginLeft - marginRight;
+    doc.save().rect(0, 0, pageWidth, headerH).fill('#003641').restore();
+    if (logoBuf) {
+      const logoH = 36;
+      const logoY = (headerH - logoH) / 2;
+      doc.image(logoBuf, marginLeft, logoY, { height: logoH });
+    }
+    doc
+      .fillColor('#FFFFFF')
+      .fontSize(10)
+      .font('Helvetica')
+      .text(headerRight, marginLeft, 18, { width: contentWidth, align: 'right' });
+    return { marginLeft, marginRight, contentWidth };
+  };
+  const { marginLeft, marginRight, contentWidth } = drawHeader();
+
+  let y = headerH + 14;
+  const title = `CONSIGNADOS  CONFERÊNCIA - ${monthKeyToPtBrUpper(opts.monthKey)}`;
+  doc.fillColor('#000000').fontSize(16).font('Helvetica-Bold').text(title, marginLeft, y, {
+    width: contentWidth,
+    align: 'center',
+  });
+  y += 26;
+
+  doc
+    .fillColor('#003641')
+    .fontSize(12)
+    .font('Helvetica-Bold')
+    .text(`RECURSO: ${opts.orgao}`, marginLeft, y, { width: contentWidth, align: 'left' });
+  y += 18;
+
+  const colDate = 86;
+  const colDebit = 130;
+  const colCredit = 130;
+  const colSaldo = 130;
+  const colEvent = Math.max(260, contentWidth - (colDate + colDebit + colCredit + colSaldo));
+  const x0 = marginLeft;
+
+  const rowH = compactMode ? 20 : 22;
+  const bodyFontSize = compactMode ? 8.5 : 9;
+  const drawRow = (
+    cells: { date?: string; event: string; debit?: string; credit?: string; saldo?: string },
+    optsRow?: { fill?: string; bold?: boolean; saldoColor?: string; debitColor?: string },
+  ) => {
+    const fill = optsRow?.fill;
+    if (fill) {
+      doc.save().rect(x0, y, colDate + colEvent + colDebit + colCredit + colSaldo, rowH).fill(fill).restore();
+    }
+    doc.lineWidth(0.8).strokeColor('#000000');
+    doc.rect(x0, y, colDate, rowH).stroke();
+    doc.rect(x0 + colDate, y, colEvent, rowH).stroke();
+    doc.rect(x0 + colDate + colEvent, y, colDebit, rowH).stroke();
+    doc.rect(x0 + colDate + colEvent + colDebit, y, colCredit, rowH).stroke();
+    doc.rect(x0 + colDate + colEvent + colDebit + colCredit, y, colSaldo, rowH).stroke();
+
+    doc
+      .fillColor('#000000')
+      .fontSize(bodyFontSize)
+      .font(optsRow?.bold ? 'Helvetica-Bold' : 'Helvetica');
+    const padY = 6;
+    const dateText = cells.date ?? '';
+    const dateFontSize = dateText.length > 12 ? 7.5 : 9;
+    doc.fontSize(dateFontSize);
+    doc.text(cells.date ?? '', x0 + 6, y + padY, { width: colDate - 12, align: 'center' });
+    doc.fontSize(bodyFontSize);
+    doc.text(cells.event ?? '', x0 + colDate + 6, y + padY, { width: colEvent - 12, align: 'left' });
+    doc.fillColor(optsRow?.debitColor ?? '#000000');
+    doc.text(cells.debit ?? '', x0 + colDate + colEvent + 6, y + padY, { width: colDebit - 12, align: 'right' });
+    doc.fillColor('#000000');
+    doc.text(cells.credit ?? '', x0 + colDate + colEvent + colDebit + 6, y + padY, { width: colCredit - 12, align: 'right' });
+    const saldoText = String(cells.saldo ?? '').trim();
+    const autoSaldoColor =
+      saldoText.startsWith('-') || saldoText.startsWith('−') ? '#C00000' : '#000000';
+    doc.fillColor(optsRow?.saldoColor ?? autoSaldoColor);
+    doc.text(cells.saldo ?? '', x0 + colDate + colEvent + colDebit + colCredit + 6, y + padY, { width: colSaldo - 12, align: 'right' });
+    y += rowH;
+  };
+
+  drawRow(
+    { date: 'DATA', event: 'EVENTO/ HISTÓRICO', debit: 'DÉBITO', credit: 'CRÉDITO', saldo: 'SALDO R$' },
+    { fill: '#E6E6E6', bold: true },
+  );
+  const totalMainDebit = mainRows.reduce((acc, r) => acc + (Number(r.recursoCents ?? 0) || 0), 0);
+  const totalMainCredit = mainRows.reduce((acc, r) => acc + (Number(r.extratosCents ?? 0) || 0), 0);
+  const totalMainSaldo = totalMainCredit - totalMainDebit;
+  for (const r of mainRows) {
+    drawRow(
+      {
+        date: adjustToNextBusinessDayPtBr(String(r.vencimento ?? '').trim()),
+        event: debitLabel,
+        debit: `- ${formatCurrency(Number(r.recursoCents ?? 0) || 0)}`,
+        credit: formatCurrency(Number(r.extratosCents ?? 0) || 0),
+        saldo: formatCurrencySigned(Number(r.saldoCents ?? 0) || 0),
+      },
+      { bold: true, debitColor: '#C00000' },
+    );
+  }
+  drawRow(
+    {
+      date: '',
+      event: 'TOTAL (DÉBITO / CRÉDITO)',
+      debit: `- ${formatCurrency(totalMainDebit)}`,
+      credit: formatCurrency(totalMainCredit),
+      saldo: formatCurrencySigned(totalMainSaldo),
+    },
+    {
+      fill: '#F2F2F2',
+      bold: true,
+      debitColor: '#C00000',
+      saldoColor: totalMainSaldo < 0 ? '#C00000' : '#000000',
+    },
+  );
+  if (opts.totals.tarifaLinhaCents > 0) {
+    drawRow(
+      {
+        date: '',
+        event: 'Tarifa Linha',
+        debit: `- ${formatCurrency(opts.totals.tarifaLinhaCents)}`,
+        credit: '',
+        saldo: `- ${formatCurrency(opts.totals.tarifaLinhaCents)}`,
+      },
+      { saldoColor: '#C00000', debitColor: '#C00000' },
+    );
+  }
+  if (opts.totals.tarifaTedCents > 0) {
+    drawRow(
+      {
+        date: '',
+        event: 'Tarifa TED',
+        debit: `- ${formatCurrency(opts.totals.tarifaTedCents)}`,
+        credit: '',
+        saldo: `- ${formatCurrency(opts.totals.tarifaTedCents)}`,
+      },
+      { saldoColor: '#C00000', debitColor: '#C00000' },
+    );
+  }
+  const totalTarifas = (Number(opts.totals.tarifaLinhaCents ?? 0) || 0) + (Number(opts.totals.tarifaTedCents ?? 0) || 0);
+  const totalTarifasSaldo = -totalTarifas;
+  drawRow(
+    {
+      date: '',
+      event: 'TOTAL GERAL (APÓS TARIFAS)',
+      debit: totalTarifas > 0 ? `- ${formatCurrency(totalTarifas)}` : '',
+      credit: '',
+      saldo: totalTarifas > 0 ? formatCurrencySigned(totalTarifasSaldo) : formatCurrencySigned(0),
+    },
+    {
+      fill: '#E6E6E6',
+      bold: true,
+      debitColor: totalTarifas > 0 ? '#C00000' : undefined,
+      saldoColor: totalTarifas > 0 ? '#C00000' : '#000000',
+    },
+  );
+  const saldoGeralSomado = totalMainSaldo - totalTarifasSaldo;
+  const drawOuterOnlyRow = (cells: { label: string; saldo: string }, optsRow?: { fill?: string; bold?: boolean; saldoColor?: string }) => {
+    const fill = optsRow?.fill;
+    const totalW = colDate + colEvent + colDebit + colCredit + colSaldo;
+    if (fill) {
+      doc.save().rect(x0, y, totalW, rowH).fill(fill).restore();
+    }
+    doc.lineWidth(0.8).strokeColor('#000000');
+    doc.rect(x0, y, totalW, rowH).stroke();
+    doc.fillColor('#000000').fontSize(bodyFontSize).font(optsRow?.bold ? 'Helvetica-Bold' : 'Helvetica');
+    const padY = 6;
+    doc.text(cells.label, x0 + 6, y + padY, { width: totalW - 12, align: 'left' });
+    doc.fillColor(optsRow?.saldoColor ?? '#000000');
+    doc.text(cells.saldo, x0 + 6, y + padY, { width: totalW - 12, align: 'right' });
+    y += rowH;
+  };
+  drawOuterOnlyRow(
+    {
+      label: 'TOTALIZADOR GERAL (SALDOS)',
+      saldo: formatCurrencySigned(saldoGeralSomado),
+    },
+    { fill: '#D9D9D9', bold: true, saldoColor: saldoGeralSomado < 0 ? '#C00000' : '#000000' },
+  );
+
+  y += compactMode ? 10 : 14;
+
+  const occLinesAll = opts.ocorrencias.map((o) => {
+    const when = o.createdAt ? formatIsoToPtBrDateTime(o.createdAt) : '';
+    const who = `${o.cpf} • ${o.nome} • R$ ${o.value}`;
+    const what = `${o.action} • ${o.justification}`;
+    const line = [when, who, what].filter(Boolean).join(' — ');
+    const trimmed = line.replace(/\s+/g, ' ').trim();
+    return trimmed;
+  });
+
+  const maxOcc = compactMode ? 3 : 5;
+  const shown = occLinesAll.slice(0, maxOcc);
+  const remaining = occLinesAll.length - shown.length;
+  const occTitle = 'Ocorrências (informativo)';
+  const occInnerW = colDate + colEvent + colDebit + colCredit + colSaldo - 20;
+  const occInnerPadTop = compactMode ? 8 : 10;
+  const occInnerPadBottom = compactMode ? 8 : 10;
+  const occGap = compactMode ? 4 : 6;
+  const occSummaryLine = remaining > 0 ? `... (${remaining} ocorrência(s) a mais)` : '';
+  const occDetailsNote = occLinesAll.length > maxOcc ? 'Detalhado na próxima página.' : '';
+  const occBodyLinesRaw = shown
+    .concat(occSummaryLine ? [occSummaryLine] : [])
+    .concat(occDetailsNote ? [occDetailsNote] : []);
+  const occBodyTextRaw = (occBodyLinesRaw.join('\n') || 'Sem ocorrências.').trim();
+
+  doc.fillColor('#003641').fontSize(11).font('Helvetica-Bold');
+  const occTitleH = doc.heightOfString(occTitle, { width: occInnerW });
+
+  doc.fillColor('#000000').fontSize(9).font('Helvetica');
+  const occBodyHRaw = doc.heightOfString(occBodyTextRaw, { width: occInnerW });
+
+  const maxBoxH = Math.max(compactMode ? 70 : 80, getContentBottomY() - y);
+  const desiredBoxH = occInnerPadTop + occTitleH + occGap + occBodyHRaw + occInnerPadBottom;
+  const boxH = Math.min(desiredBoxH, maxBoxH);
+
+  doc
+    .save()
+    .rect(x0, y, colDate + colEvent + colDebit + colCredit + colSaldo, boxH)
+    .strokeColor('#000000')
+    .lineWidth(0.8)
+    .stroke()
+    .restore();
+
+  doc
+    .fillColor('#003641')
+    .fontSize(11)
+    .font('Helvetica-Bold')
+    .text(occTitle, x0 + 10, y + occInnerPadTop, { width: occInnerW });
+
+  doc.fillColor('#000000').fontSize(9).font('Helvetica');
+  const occBodyY = y + occInnerPadTop + occTitleH + occGap;
+  const maxOccBodyH = Math.max(12, boxH - (occBodyY - y) - occInnerPadBottom);
+  let occBodyLines = occBodyTextRaw === 'Sem ocorrências.' ? ['Sem ocorrências.'] : [...occBodyLinesRaw];
+  const hasSummary = Boolean(occSummaryLine);
+  const hasDetailsNote = Boolean(occDetailsNote);
+  const fits = (text: string) => doc.heightOfString(text, { width: occInnerW }) <= maxOccBodyH;
+  while (occBodyLines.length > 1 && !fits(occBodyLines.join('\n'))) {
+    const last = occBodyLines[occBodyLines.length - 1];
+    if (hasDetailsNote && last === occDetailsNote) {
+      occBodyLines.pop();
+    } else if (hasSummary && last === occSummaryLine) {
+      occBodyLines.pop();
+    } else {
+      if (occLinesAll.length > 0 && occBodyLines.length <= 1) break;
+      occBodyLines.pop();
+    }
+  }
+  let occBodyText = occBodyLines.join('\n');
+  if (!fits(occBodyText)) occBodyText = '...';
+  doc.text(occBodyText, x0 + 10, occBodyY, { width: occInnerW, height: maxOccBodyH });
+
+  const drawFooter = () => {
+    const { y: footerY, marginLeft, contentWidth } = getFooterLayout();
+    doc
+      .fillColor('#444444')
+      .fontSize(8.5)
+      .font('Helvetica')
+      .text(footerText, marginLeft, footerY, {
+        width: contentWidth,
+        align: 'center',
+      });
+  };
+
+  drawFooter();
+
+  const occNeedsDetailsPage =
+    occLinesAll.length > 0 &&
+    (occLinesAll.length > shown.length || occBodyLines.length < occBodyLinesRaw.length);
+
+  const drawOccorrenciasDetalhadasPages = (lines: string[]) => {
+    const bodyFont = 9;
+    const gapY = 6;
+    let i = 0;
+
+    const addPageWithHeader = () => {
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: 36 });
+      const { marginLeft: ml, contentWidth: cw } = drawHeader();
+      let yy = headerH + 14;
+      doc.fillColor('#000000').fontSize(13).font('Helvetica-Bold').text(
+        `OCORRÊNCIAS (DETALHADO) • ${monthKeyToPtBrUpper(opts.monthKey)}`,
+        ml,
+        yy,
+        { width: cw, align: 'left' },
+      );
+      yy += 18;
+      doc.fillColor('#003641').fontSize(12).font('Helvetica-Bold').text(
+        `RECURSO: ${opts.orgao}`,
+        ml,
+        yy,
+        { width: cw, align: 'left' },
+      );
+      return yy + 18;
+    };
+
+    let yy = addPageWithHeader();
+    while (i < lines.length) {
+      const ml = doc.page.margins.left;
+      const mr = doc.page.margins.right;
+      const cw = doc.page.width - ml - mr;
+      const contentBottomY = getContentBottomY();
+      doc.fillColor('#000000').fontSize(bodyFont).font('Helvetica');
+      const line = lines[i] ?? '';
+      const h = doc.heightOfString(line, { width: cw });
+      if (yy + h > contentBottomY) {
+        drawFooter();
+        yy = addPageWithHeader();
+        continue;
+      }
+      doc.text(line, ml, yy, { width: cw, align: 'left' });
+      yy += h + gapY;
+      i += 1;
+    }
+    drawFooter();
+  };
+
+  if (occNeedsDetailsPage) {
+    drawOccorrenciasDetalhadasPages(occLinesAll);
+  }
+
+  if (evidencePng && evidencePng.length > 0) {
+    const img = (() => {
+      try {
+        return (doc as any).openImage(evidencePng as any) as { width: number; height: number };
+      } catch {
+        return null;
+      }
+    })();
+
+    const addEvidencePage = (title: string) => {
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: 18 });
+      const pageW = doc.page.width;
+      const { marginLeft: mL, contentWidth: cW } = drawHeader();
+      const titleY = headerH + 12;
+      doc.fillColor('#003641').fontSize(14).font('Helvetica-Bold').text(title, mL, titleY, {
+        width: cW,
+        align: 'left',
+      });
+      const imgY = titleY + 24;
+      const footerLayout = getFooterLayout();
+      const availH = Math.max(60, footerLayout.y - imgY - 8);
+      return { pageW, imgY, availH };
+    };
+
+    if (img && img.width > 0 && img.height > 0) {
+      const firstPage = addEvidencePage('Evidência do Fechamento da Conciliação');
+      const scale = firstPage.pageW / img.width;
+      const drawH = img.height * scale;
+      const pages = Math.max(1, Math.ceil(drawH / firstPage.availH));
+
+      const drawSlice = (sliceIndex: number, total: number) => {
+        const title =
+          total > 1
+            ? `Evidência do Fechamento da Conciliação (parte ${sliceIndex + 1}/${total})`
+            : 'Evidência do Fechamento da Conciliação';
+        const layout = sliceIndex === 0 ? firstPage : addEvidencePage(title);
+        const yOffset = layout.imgY - sliceIndex * layout.availH;
+        doc.save().rect(0, layout.imgY, layout.pageW, layout.availH).clip();
+        doc.image(evidencePng, 0, yOffset, { width: layout.pageW });
+        doc.restore();
+        drawFooter();
+      };
+
+      for (let i = 0; i < pages; i += 1) {
+        drawSlice(i, pages);
+      }
+    } else {
+      const { pageW, imgY, availH } = addEvidencePage('Evidência do Fechamento da Conciliação');
+      doc.image(evidencePng, 0, imgY, { fit: [pageW, availH] });
+      drawFooter();
+    }
+  }
+
+  doc.end();
+  return out;
 }
 
 export async function runImportConsignado(opts?: {

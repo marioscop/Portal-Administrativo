@@ -3,7 +3,9 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import PortalHomePage from './pages/PortalHomePage'
 import CreditoPage from './pages/CreditoPage'
 
-const msalLib = (window as any).msal as any
+const disableMsal = String((import.meta as any).env?.VITE_DISABLE_MSAL ?? '').trim() === '1'
+
+const msalLib = disableMsal ? null : ((window as any).msal as any)
 
 const msalClientId =
   (import.meta as any).env?.VITE_MSAL_CLIENT_ID ?? 'b44c4177-d834-4814-b9c5-8b696212d09d'

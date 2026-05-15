@@ -22,8 +22,12 @@ import {
   desfazerOcorrenciaRelatorioSisbr,
   getOcorrenciaCloneParaSisbrContext,
   upsertConciliacaoTarifa,
+  fecharConciliacaoRecursoVsRelatorio,
+  reenviarFechamentoConciliacaoParaContabilidade,
+  reabrirConciliacaoRecursoVsRelatorio,
   deleteOrgaoDePara,
   exportConcilicacaoTemporarioXlsx,
+  exportConcilicacaoRecursoVsRelatorioXlsx,
   getConsignadoAutomationConfig,
   getConsignadoAccessEmails,
   getModalidades,
@@ -79,13 +83,17 @@ export class ConsignadoController {
       sharePointFolderUrl?: string | null;
       recursoAlegoUrl?: string | null;
       recursoMpgoUrl?: string | null;
+      notificationEmail?: string | null;
+      notificationEmailContabilidade?: string | null;
     },
   ) {
     try {
       return await saveConsignadoAutomationConfig({
-        sharePointFolderUrl: body.sharePointFolderUrl ?? null,
-        recursoAlegoUrl: body.recursoAlegoUrl ?? null,
-        recursoMpgoUrl: body.recursoMpgoUrl ?? null,
+        sharePointFolderUrl: body.sharePointFolderUrl,
+        recursoAlegoUrl: body.recursoAlegoUrl,
+        recursoMpgoUrl: body.recursoMpgoUrl,
+        notificationEmail: body.notificationEmail,
+        notificationEmailContabilidade: body.notificationEmailContabilidade,
       });
     } catch (e) {
       const message =
@@ -392,6 +400,37 @@ export class ConsignadoController {
     }
   }
 
+  @Get('conciliacao/recurso-vs-relatorio/export.xlsx')
+  async exportConciliacaoRecursoVsRelatorioXlsxNow(
+    @Res() res: Response,
+    @Query('month') month?: string,
+    @Query('orgao') orgao?: string,
+    @Query('onlyDiff') onlyDiff?: string,
+  ) {
+    if (!month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!orgao || !orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    try {
+      const out = await exportConcilicacaoRecursoVsRelatorioXlsx({
+        month,
+        orgao,
+        onlyDiff: String(onlyDiff ?? '').trim() === '1',
+      });
+      res.setHeader(
+        'content-type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader('content-disposition', `attachment; filename="${out.fileName}"`);
+      res.status(200).send(out.buffer);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao exportar XLSX.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
   @Post('conciliacao/recurso-vs-relatorio/clonar-para-sisbr')
   async clonarParaSisbr(
     @Body()
@@ -503,6 +542,7 @@ export class ConsignadoController {
     @Body()
     body: {
       month?: string;
+      orgao?: string;
       cpf?: string;
       nome?: string;
       value?: string;
@@ -536,6 +576,7 @@ export class ConsignadoController {
     try {
       return await alterarOrgaoRelatorioSisbr({
         month: body.month,
+        orgao: body.orgao,
         cpf: body.cpf,
         nome: body.nome,
         value: body.value,
@@ -547,6 +588,100 @@ export class ConsignadoController {
     } catch (e) {
       const message =
         e instanceof Error ? e.message : 'Falha ao alterar órgão no Relatório SISBR.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('conciliacao/recurso-vs-relatorio/fechar')
+  async fecharConciliacao(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      closedBy?: string;
+      contabilidadeEmail?: string;
+      evidencePngBase64?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    try {
+      return await fecharConciliacaoRecursoVsRelatorio({
+        month: body.month,
+        orgao: body.orgao,
+        closedBy: body.closedBy,
+        contabilidadeEmail: body.contabilidadeEmail,
+        evidencePngBase64: body.evidencePngBase64,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao fechar conciliação.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('conciliacao/recurso-vs-relatorio/reabrir')
+  async reabrirConciliacao(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      password?: string;
+      reopenedBy?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    if (!body.password) {
+      throw new InternalServerErrorException('Informe a senha.');
+    }
+    try {
+      return await reabrirConciliacaoRecursoVsRelatorio({
+        month: body.month,
+        orgao: body.orgao,
+        password: body.password,
+        reopenedBy: body.reopenedBy,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao reabrir conciliação.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('conciliacao/recurso-vs-relatorio/reenviar-contabilidade')
+  async reenviarContabilidade(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      requestedBy?: string;
+      contabilidadeEmail?: string;
+      evidencePngBase64?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    try {
+      return await reenviarFechamentoConciliacaoParaContabilidade({
+        month: body.month,
+        orgao: body.orgao,
+        requestedBy: body.requestedBy,
+        contabilidadeEmail: body.contabilidadeEmail,
+        evidencePngBase64: body.evidencePngBase64,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao reenviar para contabilidade.';
       throw new InternalServerErrorException(message);
     }
   }
