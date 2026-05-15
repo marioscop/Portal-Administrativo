@@ -1,0 +1,14 @@
+**/node_modules/
+**/dist/
+**/.vite/
+**/.cache/
+
+backend/.env
+backend/data/
+backend/Debugar/
+backend/Temporario/
+
+frontend/.certs/
+
+*.sqlite
+*.log
