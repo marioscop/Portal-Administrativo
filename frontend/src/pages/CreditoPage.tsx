@@ -9,6 +9,9 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import html2canvas from 'html2canvas'
+import * as Dialog from '@radix-ui/react-dialog'
+import { Toaster, toast } from 'sonner'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
   BadgeDollarSign,
   ChevronDown,
@@ -18,10 +21,13 @@ import {
   LayoutDashboard,
   Lock,
   LogOut,
+  Megaphone,
   Plus,
   Search,
   ShieldCheck,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   Zap,
   Clock,
   Trash2,
@@ -29,6 +35,8 @@ import {
   Printer,
   FileSpreadsheet,
 } from 'lucide-react'
+
+import ReactECharts from 'echarts-for-react'
 
 type ViewId =
   | 'home'
@@ -115,6 +123,9 @@ export default function CreditoPage() {
     return raw.trim().toLowerCase() === 'admin' ? 'admin' : 'usuario'
   })
   const [search, setSearch] = useState('')
+  const [commandOpen, setCommandOpen] = useState(false)
+  const [commandQuery, setCommandQuery] = useState('')
+  const commandInputRef = useRef<HTMLInputElement | null>(null)
   const [sharePointFolderPath, setSharePointFolderPath] = useState(
     storedConfig?.sharePointFolderPath ?? '',
   )
@@ -249,6 +260,7 @@ export default function CreditoPage() {
     month: string
     orgao: string
     recursoTable: string
+    lastUpdatedAt?: string | null
     closed: {
       isClosed: boolean
       closedAt: string | null
@@ -345,6 +357,32 @@ export default function CreditoPage() {
   const [relatorioOcorrenciaSaving, setRelatorioOcorrenciaSaving] = useState(false)
   const [relatorioOcorrenciaError, setRelatorioOcorrenciaError] = useState<string | null>(null)
   const [conciliacaoExportingXlsx, setConciliacaoExportingXlsx] = useState(false)
+  const [conciliacaoExportingPdf, setConciliacaoExportingPdf] = useState(false)
+  const [auditoriaMonth, setAuditoriaMonth] = useState('')
+  const [auditoriaOrgao, setAuditoriaOrgao] = useState('')
+  const [auditoriaGroup, setAuditoriaGroup] = useState('')
+  const [auditoriaLimit] = useState(100)
+  const [auditoriaOffset, setAuditoriaOffset] = useState(0)
+  const [auditoriaLoading, setAuditoriaLoading] = useState(false)
+  const [auditoriaError, setAuditoriaError] = useState<string | null>(null)
+  const [auditoriaData, setAuditoriaData] = useState<null | {
+    items: Array<{
+      id: string
+      occurredAt: string
+      group: 'ocorrencias' | 'tarifas' | 'fechamentos' | 'contabilidade'
+      action: string
+      month: string | null
+      orgao: string | null
+      user: string | null
+      detail: string | null
+      cpf: string | null
+      nome: string | null
+      value: string | null
+    }>
+    total: number
+    limit: number
+    offset: number
+  }>(null)
   const canExportConciliacaoXlsx =
     Boolean(conciliacaoData) &&
     'recurso' in (conciliacaoData as any) &&
@@ -361,6 +399,9 @@ export default function CreditoPage() {
     | { message: string }
 
   const conciliacaoFetchRef = useRef(0)
+  const dashboardAutoPickRef = useRef<string | null>(null)
+  const homeAutoPickRef = useRef<string | null>(null)
+  const [conciliacaoLoadedAtIso, setConciliacaoLoadedAtIso] = useState<string | null>(null)
   const [userDisplayName, setUserDisplayName] = useState<string | null>(null)
   const [userPhotoUrl, setUserPhotoUrl] = useState<string | null>(null)
 
@@ -368,6 +409,28 @@ export default function CreditoPage() {
   const conciliacaoIsClosed = Boolean(conciliacaoData?.closed?.isClosed)
   const ocorrenciaReadOnly = conciliacaoIsClosed || Boolean(ocorrenciaModal?.readOnly)
   const headerUserLabel = String(userDisplayName || 'SICOOB JURISCRED').trim()
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const key = String(e.key || '').toLowerCase()
+      if ((e.ctrlKey || e.metaKey) && key === 'k') {
+        e.preventDefault()
+        setCommandOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  useEffect(() => {
+    if (!commandOpen) {
+      setCommandQuery('')
+      return
+    }
+    window.setTimeout(() => {
+      commandInputRef.current?.focus()
+    }, 0)
+  }, [commandOpen])
 
   useEffect(() => {
     if (!conciliacaoIsClosed) {
@@ -399,6 +462,56 @@ export default function CreditoPage() {
       window.clearInterval(intervalId)
     }
   }, [conciliacaoIsClosed])
+
+  useEffect(() => {
+    if (view !== 'relatorios-auditoria') return
+    setAuditoriaOffset(0)
+  }, [auditoriaGroup, auditoriaMonth, auditoriaOrgao, view])
+
+  useEffect(() => {
+    if (view !== 'relatorios-auditoria') return
+    let cancelled = false
+    Promise.resolve().then(() => {
+      setAuditoriaLoading(true)
+      setAuditoriaError(null)
+    })
+
+    const params = new URLSearchParams()
+    if (auditoriaMonth.trim()) params.set('month', auditoriaMonth.trim())
+    if (auditoriaOrgao.trim()) params.set('orgao', auditoriaOrgao.trim())
+    if (auditoriaGroup.trim()) params.set('group', auditoriaGroup.trim())
+    params.set('limit', String(auditoriaLimit))
+    params.set('offset', String(auditoriaOffset))
+
+    fetch(`/api/consignado/auditoria?${params.toString()}`)
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as any
+        if (!res.ok) {
+          throw new Error(data?.message || `Falha ao carregar auditoria (HTTP ${res.status}).`)
+        }
+        if (cancelled) return
+        const items = Array.isArray(data?.items) ? data.items : []
+        setAuditoriaData({
+          items,
+          total: Number.isFinite(Number(data?.total)) ? Number(data.total) : items.length,
+          limit: Number.isFinite(Number(data?.limit)) ? Number(data.limit) : auditoriaLimit,
+          offset: Number.isFinite(Number(data?.offset)) ? Number(data.offset) : auditoriaOffset,
+        })
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setAuditoriaError(e instanceof Error ? e.message : 'Falha ao carregar auditoria.')
+        setAuditoriaData(null)
+      })
+      .finally(() => {
+        if (cancelled) return
+        setAuditoriaLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [auditoriaGroup, auditoriaLimit, auditoriaMonth, auditoriaOffset, auditoriaOrgao, view])
 
   useEffect(() => {
     let cancelled = false
@@ -985,7 +1098,14 @@ export default function CreditoPage() {
   }, [view])
 
   useEffect(() => {
-    if (view !== 'configuracoes-automacao' && view !== 'conciliacao-extratos')
+    if (
+      view !== 'configuracoes-automacao' &&
+      view !== 'conciliacao-extratos' &&
+      view !== 'home' &&
+      view !== 'dashboard' &&
+      view !== 'relatorios-valores' &&
+      view !== 'relatorios-auditoria'
+    )
       return
     let cancelled = false
     Promise.resolve().then(() => {
@@ -1030,7 +1150,7 @@ export default function CreditoPage() {
     if (view === 'dashboard') return 'Dashboard'
     if (view === 'conciliacao-extratos') return 'Conciliação • Extratos'
     if (view === 'conciliacao-relatorio') return 'Conciliação • Relatório'
-    if (view === 'relatorios-valores') return 'Valores a Descontar'
+    if (view === 'relatorios-valores') return 'Conciliação'
     if (view === 'relatorios-auditoria') return 'Auditoria Sistêmica'
     if (view === 'configuracoes-automacao') return 'Automação'
     if (view === 'configuracoes-acessos') return 'Acessos'
@@ -1075,6 +1195,101 @@ export default function CreditoPage() {
     return unique
   }, [orgaoDePara])
 
+  useEffect(() => {
+    if (view !== 'dashboard') return
+    if (conciliacaoOrgao.trim()) return
+    if (conciliacaoMonthOptions.length === 0) return
+    if (conciliacaoOrgaoOptions.length === 0) return
+
+    const monthWanted =
+      conciliacaoMonthOptions.find((o) => o.value === conciliacaoMonth)?.value ??
+      conciliacaoMonthOptions[0].value
+
+    if (monthWanted !== conciliacaoMonth) {
+      setConciliacaoMonth(monthWanted)
+      return
+    }
+
+    if (dashboardAutoPickRef.current === monthWanted) return
+    dashboardAutoPickRef.current = monthWanted
+
+    let cancelled = false
+    ;(async () => {
+      for (const orgao of conciliacaoOrgaoOptions) {
+        if (cancelled) return
+        try {
+          const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(monthWanted)}&orgao=${encodeURIComponent(orgao)}`
+          const res = await fetch(url)
+          if (!res.ok) continue
+          const data = (await res.json().catch(() => null)) as any
+          const recurso = Array.isArray(data?.recurso) ? data.recurso : []
+          const relatorio = Array.isArray(data?.relatorio) ? data.relatorio : []
+          const hasPendencia =
+            recurso.some((x: any) => x?.status === 'pendencia') ||
+            relatorio.some((x: any) => x?.status === 'pendencia')
+          if (hasPendencia) {
+            if (!cancelled) setConciliacaoOrgao(orgao)
+            return
+          }
+        } catch {
+          continue
+        }
+      }
+      if (!cancelled) setConciliacaoOrgao(conciliacaoOrgaoOptions[0] ?? '')
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, conciliacaoOrgaoOptions, view])
+
+  useEffect(() => {
+    if (view !== 'home') return
+    if (conciliacaoMonthOptions.length === 0) return
+    if (conciliacaoOrgaoOptions.length === 0) return
+
+    const monthWanted =
+      conciliacaoMonthOptions.find((o) => o.value === conciliacaoMonth)?.value ??
+      conciliacaoMonthOptions[0].value
+
+    if (monthWanted !== conciliacaoMonth) {
+      setConciliacaoMonth(monthWanted)
+      return
+    }
+
+    const shouldPick = !conciliacaoOrgao.trim() || conciliacaoIsClosed
+    if (!shouldPick) return
+
+    const runKey = `${monthWanted}|${conciliacaoOrgao.trim()}|${conciliacaoIsClosed ? '1' : '0'}`
+    if (homeAutoPickRef.current === runKey) return
+    homeAutoPickRef.current = runKey
+
+    let cancelled = false
+    ;(async () => {
+      for (const orgao of conciliacaoOrgaoOptions) {
+        if (cancelled) return
+        try {
+          const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(monthWanted)}&orgao=${encodeURIComponent(orgao)}`
+          const res = await fetch(url)
+          if (!res.ok) continue
+          const data = (await res.json().catch(() => null)) as any
+          const isClosed = Boolean(data?.closed?.isClosed)
+          if (!isClosed) {
+            if (!cancelled) setConciliacaoOrgao(orgao)
+            return
+          }
+        } catch {
+          continue
+        }
+      }
+      if (!cancelled) setConciliacaoOrgao(conciliacaoOrgaoOptions[0] ?? '')
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [conciliacaoIsClosed, conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, conciliacaoOrgaoOptions, view])
+
   const relatorioOcorrenciaOrgaoOptions = useMemo(() => {
     const base =
       Array.isArray(orgaoValues.extratos) && orgaoValues.extratos.length > 0
@@ -1095,6 +1310,19 @@ export default function CreditoPage() {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })
+  }
+
+  const formatIsoToPtBrDateTime = (iso: string | null) => {
+    const raw = String(iso ?? '').trim()
+    if (!raw) return '—'
+    const d = new Date(raw)
+    if (!Number.isFinite(d.getTime())) return raw
+    const dd = String(d.getDate()).padStart(2, '0')
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const yyyy = String(d.getFullYear())
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mi = String(d.getMinutes()).padStart(2, '0')
+    return `${dd}/${mm}/${yyyy} ${hh}:${mi}`
   }
 
   const ptBrMoneyToCents = (value: string) => {
@@ -1119,6 +1347,16 @@ export default function CreditoPage() {
       .toUpperCase()
     return `${cpfDigits}||${nomeNoAccent}`
   }
+
+  const normalizeSearchText = (input: string) =>
+    String(input ?? '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+
+  const normalizeSearchDigits = (input: string) => String(input ?? '').replace(/\D/g, '')
 
   const normalizeSortNome = (nome: string) =>
     String(nome ?? '')
@@ -1214,7 +1452,14 @@ export default function CreditoPage() {
   }
 
   useEffect(() => {
-    if (view !== 'conciliacao-extratos') return
+    if (
+      view !== 'conciliacao-extratos' &&
+      view !== 'home' &&
+      view !== 'dashboard' &&
+      view !== 'relatorios-valores' &&
+      view !== 'relatorios-auditoria'
+    )
+      return
     let cancelled = false
     Promise.resolve().then(() => setConciliacaoMonthsLoading(true))
     fetch('/api/consignado/conciliacao/meses')
@@ -1255,13 +1500,20 @@ export default function CreditoPage() {
   }, [view])
 
   useEffect(() => {
-    if (view !== 'conciliacao-extratos') return
+    if (
+      view !== 'conciliacao-extratos' &&
+      view !== 'home' &&
+      view !== 'dashboard' &&
+      view !== 'relatorios-valores'
+    )
+      return
     if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
     if (!conciliacaoOrgao.trim()) {
       setConciliacaoData(null)
       setConciliacaoExpandedKeys([])
       setConciliacaoSelectedPairId(null)
       setConciliacaoSelectedPersonKey(null)
+      setConciliacaoLoadedAtIso(null)
       return
     }
 
@@ -1296,6 +1548,7 @@ export default function CreditoPage() {
           }
           if (conciliacaoFetchRef.current !== requestId) return
           setConciliacaoData(data as NonNullable<typeof conciliacaoData>)
+          setConciliacaoLoadedAtIso((data as any)?.lastUpdatedAt ?? null)
           setConciliacaoExpandedKeys([])
           setConciliacaoSelectedPairId(null)
           setConciliacaoSelectedPersonKey(null)
@@ -1320,6 +1573,7 @@ export default function CreditoPage() {
       setConciliacaoData(null)
       setConciliacaoSelectedPairId(null)
       setConciliacaoSelectedPersonKey(null)
+      setConciliacaoLoadedAtIso(null)
     })()
       .finally(() => {
         if (conciliacaoFetchRef.current !== requestId) return
@@ -1379,6 +1633,7 @@ export default function CreditoPage() {
       }
       if (conciliacaoFetchRef.current !== requestId) return
       setConciliacaoData(data as NonNullable<typeof conciliacaoData>)
+      setConciliacaoLoadedAtIso((data as any)?.lastUpdatedAt ?? null)
       setConciliacaoSelectedPairId(null)
       setConciliacaoSelectedPersonKey(null)
     } finally {
@@ -1479,6 +1734,7 @@ export default function CreditoPage() {
 
     setConciliacaoExportingXlsx(true)
     setConciliacaoError(null)
+    const toastId = toast.loading('Exportando XLSX...')
     try {
       const query = new URLSearchParams({
         month: conciliacaoMonth,
@@ -1498,6 +1754,7 @@ export default function CreditoPage() {
       const navAny = navigator as any
       if (typeof navAny?.msSaveOrOpenBlob === 'function') {
         navAny.msSaveOrOpenBlob(blob, fileName)
+        toast.success('XLSX pronto para download.', { id: toastId })
         return
       }
       const url = URL.createObjectURL(blob)
@@ -1508,13 +1765,160 @@ export default function CreditoPage() {
       a.click()
       a.remove()
       URL.revokeObjectURL(url)
+      toast.success('XLSX pronto para download.', { id: toastId })
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Falha ao exportar XLSX.'
       setConciliacaoError(msg)
+      toast.error(msg, { id: toastId })
     } finally {
       setConciliacaoExportingXlsx(false)
     }
   }
+
+  const exportConciliacaoPdf = async () => {
+    if (!canExportConciliacaoXlsx) {
+      setConciliacaoError('Nenhuma conciliação carregada para exportar.')
+      return
+    }
+    if (!conciliacaoOrgao.trim()) {
+      setConciliacaoError('Selecione um órgão para exportar.')
+      return
+    }
+    if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) {
+      setConciliacaoError('Selecione uma competência válida para exportar.')
+      return
+    }
+
+    setConciliacaoExportingPdf(true)
+    setConciliacaoError(null)
+    const toastId = toast.loading('Exportando PDF...')
+    try {
+      const query = new URLSearchParams({
+        month: conciliacaoMonth,
+        orgao: conciliacaoOrgao.trim(),
+      })
+      const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/export.pdf?${query}`)
+      if (!res.ok) {
+        const json = (await res.json().catch(() => null)) as null | { message?: string }
+        throw new Error(json?.message || `Falha ao exportar PDF (HTTP ${res.status}).`)
+      }
+      const blob = await res.blob()
+      const dispo = String(res.headers.get('content-disposition') ?? '')
+      const fileName =
+        dispo.match(/filename="([^"]+)"/i)?.[1] ||
+        `CONSIGNADOS_CONFERENCIA_${conciliacaoOrgao.trim()}_${conciliacaoMonth}.pdf`
+      const navAny = navigator as any
+      if (typeof navAny?.msSaveOrOpenBlob === 'function') {
+        navAny.msSaveOrOpenBlob(blob, fileName)
+        toast.success('PDF pronto para download.', { id: toastId })
+        return
+      }
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success('PDF pronto para download.', { id: toastId })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao exportar PDF.'
+      setConciliacaoError(msg)
+      toast.error(msg, { id: toastId })
+    } finally {
+      setConciliacaoExportingPdf(false)
+    }
+  }
+
+  const commandActions = useMemo(() => {
+    const items: Array<{
+      id: string
+      label: string
+      hint?: string
+      shortcut?: string
+      enabled?: boolean
+      run: () => void | Promise<void>
+    }> = [
+      {
+        id: 'go-home',
+        label: 'Home',
+        shortcut: 'H',
+        run: () => setHash('home'),
+      },
+      {
+        id: 'go-dashboard',
+        label: 'Dashboard',
+        shortcut: 'D',
+        run: () => setHash('dashboard'),
+      },
+      {
+        id: 'open-conciliacao',
+        label: 'Abrir conciliação',
+        hint: 'Conciliação • Extratos',
+        shortcut: 'Enter',
+        run: () => setHash('conciliacao-extratos'),
+      },
+      {
+        id: 'export-xlsx',
+        label: 'Exportar XLSX',
+        hint: 'Recurso x Relatório Sisbr',
+        shortcut: 'X',
+        enabled:
+          Boolean(canExportConciliacaoXlsx) &&
+          Boolean(conciliacaoOrgao.trim()) &&
+          conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth),
+        run: () => void exportConciliacaoXlsx(),
+      },
+      {
+        id: 'settings-automacao',
+        label: 'Configurações • Automação',
+        shortcut: 'A',
+        run: () => {
+          setSettingsOpen(true)
+          setReportsOpen(false)
+          setHash('configuracoes-automacao')
+        },
+      },
+      {
+        id: 'settings-acessos',
+        label: 'Configurações • Acessos',
+        shortcut: 'I',
+        enabled: userRole === 'admin',
+        run: () => {
+          setSettingsOpen(true)
+          setReportsOpen(false)
+          setHash('configuracoes-acessos')
+        },
+      },
+    ]
+    return items
+  }, [
+    canExportConciliacaoXlsx,
+    conciliacaoMonth,
+    conciliacaoMonthOptions,
+    conciliacaoOrgao,
+    exportConciliacaoXlsx,
+    setHash,
+    setReportsOpen,
+    setSettingsOpen,
+    userRole,
+  ])
+
+  const commandFilteredActions = useMemo(() => {
+    const q = commandQuery.trim().toLowerCase()
+    if (!q) return commandActions
+    const norm = (s: string) =>
+      s
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+    const nq = norm(q)
+    return commandActions.filter((a) => {
+      const hay = norm([a.label, a.hint].filter(Boolean).join(' '))
+      return hay.includes(nq)
+    })
+  }, [commandActions, commandQuery])
 
   useEffect(() => {
     if (!cloneSisbrModal) {
@@ -1819,6 +2223,79 @@ export default function CreditoPage() {
 
   return (
     <div className="credito-root">
+      <Toaster theme="dark" richColors position="top-right" />
+      <Dialog.Root open={commandOpen} onOpenChange={setCommandOpen}>
+        <AnimatePresence>
+          {commandOpen ? (
+            <Dialog.Portal forceMount>
+              <Dialog.Overlay asChild forceMount>
+                <motion.div
+                  className="cmd-overlay"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                />
+              </Dialog.Overlay>
+              <Dialog.Content asChild forceMount onOpenAutoFocus={(e) => e.preventDefault()}>
+                <motion.div
+                  className="cmd-content"
+                  initial={{ opacity: 0, y: 14, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 14, scale: 0.98 }}
+                  transition={{ duration: 0.16, ease: 'easeOut' }}
+                >
+                  <div className="cmd-head">
+                    <div className="cmd-title">Comandos</div>
+                    <button type="button" className="cmd-close" onClick={() => setCommandOpen(false)}>
+                      ×
+                    </button>
+                  </div>
+
+                  <div className="cmd-search">
+                    <Search size={18} />
+                    <input
+                      ref={commandInputRef}
+                      className="cmd-input"
+                      value={commandQuery}
+                      onChange={(e) => setCommandQuery(e.target.value)}
+                      placeholder="Buscar ações... (Ctrl+K)"
+                    />
+                    <span className="cmd-kbd">Esc</span>
+                  </div>
+
+                  <div className="cmd-list" role="listbox">
+                    {commandFilteredActions.length === 0 ? (
+                      <div className="cmd-empty">Nenhuma ação encontrada.</div>
+                    ) : (
+                      commandFilteredActions.map((a) => {
+                        const enabled = a.enabled !== false
+                        return (
+                          <button
+                            key={a.id}
+                            type="button"
+                            className={enabled ? 'cmd-item' : 'cmd-item cmd-item-disabled'}
+                            disabled={!enabled}
+                            onClick={async () => {
+                              setCommandOpen(false)
+                              await Promise.resolve(a.run())
+                            }}
+                          >
+                            <span className="cmd-item-main">
+                              <span className="cmd-item-label">{a.label}</span>
+                              {a.hint ? <span className="cmd-item-hint">{a.hint}</span> : null}
+                            </span>
+                            {a.shortcut ? <span className="cmd-kbd">{a.shortcut}</span> : null}
+                          </button>
+                        )
+                      })
+                    )}
+                  </div>
+                </motion.div>
+              </Dialog.Content>
+            </Dialog.Portal>
+          ) : null}
+        </AnimatePresence>
+      </Dialog.Root>
       <style>{`
         .credito-root {
           --primary: #00AE9D;
@@ -2197,6 +2674,49 @@ export default function CreditoPage() {
           .toolbar { grid-template-columns: 1.3fr 0.7fr; }
         }
 
+        @media (min-width: 900px) {
+          .toolbar-home { grid-template-columns: 0.65fr 1.35fr; }
+        }
+
+        .home-context-grid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 12px;
+          align-items: end;
+        }
+
+        @media (min-width: 900px) {
+          .home-context-grid { grid-template-columns: 150px 1fr 240px; }
+        }
+
+        .field label.home-toggle {
+          display: flex;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 10px;
+          height: 44px;
+          padding: 10px 12px;
+          border-radius: 14px;
+          border: 1px solid rgba(255,255,255,0.14);
+          background: rgba(255,255,255,0.06);
+          margin-bottom: 0;
+          min-width: 0;
+        }
+
+        .field label.home-toggle input {
+          width: 18px;
+          height: 18px;
+        }
+
+        .field label.home-toggle span {
+          font-weight: 800;
+          color: rgba(255,255,255,0.82);
+          letter-spacing: 0.02em;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
         .form-grid {
           display: grid;
           grid-template-columns: 1fr;
@@ -2372,6 +2892,17 @@ export default function CreditoPage() {
           box-shadow: 0 18px 45px rgba(0,0,0,0.18);
         }
 
+        .home-search-card {
+          min-height: 92px;
+          align-items: center;
+          padding: 16px 16px;
+        }
+
+        .home-context-card {
+          padding: 12px 12px;
+          align-items: stretch;
+        }
+
         .search input {
           width: 100%;
           background: transparent;
@@ -2444,6 +2975,28 @@ export default function CreditoPage() {
           grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
         }
 
+        .stats-home {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 12px;
+        }
+
+        @media (min-width: 900px) {
+          .stats-home { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+        }
+
+        .stat-icon {
+          width: 28px;
+          height: 28px;
+          border-radius: 12px;
+          display: grid;
+          place-items: center;
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.12);
+          color: rgba(255,255,255,0.88);
+          flex-shrink: 0;
+        }
+
         .stat {
           border-radius: 18px;
           padding: 14px 14px;
@@ -2453,6 +3006,26 @@ export default function CreditoPage() {
             rgba(255,255,255,0.05);
           position: relative;
           overflow: hidden;
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          gap: 8px;
+          min-height: 96px;
+        }
+
+        .stat-good {
+          border-color: rgba(0,174,157,0.28);
+          box-shadow: 0 18px 50px rgba(0,174,157,0.08);
+        }
+
+        .stat-warn {
+          border-color: rgba(245,197,66,0.30);
+          box-shadow: 0 18px 50px rgba(245,197,66,0.06);
+        }
+
+        .stat-bad {
+          border-color: rgba(255, 99, 132, 0.30);
+          box-shadow: 0 18px 50px rgba(255, 99, 132, 0.06);
         }
 
         .stat::after {
@@ -2469,24 +3042,60 @@ export default function CreditoPage() {
 
         .stat .kpi {
           display: flex;
-          align-items: center;
+          align-items: baseline;
           justify-content: space-between;
           gap: 12px;
         }
 
         .stat .label {
-          font-size: 0.78rem;
-          letter-spacing: 0.08em;
+          font-size: 0.72rem;
+          letter-spacing: 0.10em;
           text-transform: uppercase;
-          color: rgba(255,255,255,0.65);
-          font-weight: 800;
+          color: rgba(255,255,255,0.68);
+          font-weight: 850;
         }
 
         .stat .value {
-          margin-top: 10px;
-          font-size: 1.5rem;
-          font-weight: 820;
-          letter-spacing: 0.02em;
+          margin-top: 2px;
+          font-size: 1.18rem;
+          font-weight: 900;
+          letter-spacing: 0.01em;
+          line-height: 1.15;
+          color: rgba(255,255,255,0.92);
+          font-variant-numeric: tabular-nums;
+        }
+
+        @media (min-width: 1250px) {
+          .stat .value { font-size: 1.24rem; }
+        }
+
+        .stat-meter {
+          height: 6px;
+          border-radius: 999px;
+          overflow: hidden;
+          border: 1px solid rgba(255,255,255,0.10);
+          background:
+            repeating-linear-gradient(
+              135deg,
+              rgba(255,255,255,0.10) 0,
+              rgba(255,255,255,0.10) 6px,
+              rgba(255,255,255,0.02) 6px,
+              rgba(255,255,255,0.02) 12px
+            );
+        }
+
+        .stat-meter-fill {
+          height: 100%;
+          width: 0%;
+          background: linear-gradient(90deg, rgba(0,174,157,0.95), rgba(0,174,157,0.35));
+        }
+
+        .stat-bad .stat-meter-fill {
+          background: linear-gradient(90deg, rgba(255, 99, 132, 0.95), rgba(255, 99, 132, 0.35));
+        }
+
+        .stat-warn .stat-meter-fill {
+          background: linear-gradient(90deg, rgba(245,197,66,0.98), rgba(245,197,66,0.35));
         }
 
         .chip {
@@ -2554,6 +3163,177 @@ export default function CreditoPage() {
           color: rgba(255,255,255,0.78);
           font-weight: 750;
           font-size: 0.85rem;
+        }
+
+        .cmd-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0,0,0,0.55);
+          backdrop-filter: blur(6px);
+          z-index: 999999;
+        }
+
+        .cmd-content {
+          position: fixed;
+          left: 50%;
+          top: 18%;
+          transform: translateX(-50%);
+          width: min(720px, calc(100vw - 28px));
+          border-radius: 20px;
+          background: linear-gradient(180deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.06) 100%);
+          border: 1px solid rgba(255,255,255,0.16);
+          box-shadow: 0 30px 120px rgba(0,0,0,0.55);
+          overflow: hidden;
+          z-index: 1000000;
+        }
+
+        .cmd-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 14px 16px;
+          border-bottom: 1px solid rgba(255,255,255,0.10);
+          background: rgba(0,0,0,0.10);
+        }
+
+        .cmd-title {
+          font-weight: 900;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          font-size: 0.82rem;
+          color: rgba(255,255,255,0.86);
+        }
+
+        .cmd-close {
+          width: 34px;
+          height: 34px;
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.12);
+          background: rgba(255,255,255,0.06);
+          color: rgba(255,255,255,0.92);
+          cursor: pointer;
+          font-size: 18px;
+          line-height: 1;
+        }
+
+        .cmd-search {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 12px 16px;
+          border-bottom: 1px solid rgba(255,255,255,0.10);
+        }
+
+        .cmd-input {
+          flex: 1;
+          background: transparent;
+          border: 0;
+          outline: none;
+          color: rgba(255,255,255,0.92);
+          font-size: 0.98rem;
+        }
+
+        .cmd-list {
+          padding: 10px;
+          display: grid;
+          gap: 8px;
+          max-height: min(50vh, 420px);
+          overflow: auto;
+        }
+
+        .cmd-item {
+          width: 100%;
+          text-align: left;
+          border-radius: 16px;
+          padding: 12px 12px;
+          border: 1px solid rgba(255,255,255,0.10);
+          background: rgba(255,255,255,0.04);
+          color: rgba(255,255,255,0.92);
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
+        }
+
+        .cmd-item:hover {
+          transform: translateY(-1px);
+          background: rgba(255,255,255,0.06);
+          border-color: rgba(255,255,255,0.16);
+        }
+
+        .cmd-item-disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
+        .cmd-item-main {
+          display: grid;
+          gap: 2px;
+          min-width: 0;
+        }
+
+        .cmd-item-label {
+          font-weight: 850;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .cmd-item-hint {
+          color: rgba(255,255,255,0.60);
+          font-size: 0.86rem;
+          font-weight: 650;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .cmd-empty {
+          padding: 18px 14px;
+          color: rgba(255,255,255,0.70);
+          font-weight: 700;
+        }
+
+        .cmd-kbd {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 6px 10px;
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.14);
+          background: rgba(0,0,0,0.22);
+          color: rgba(255,255,255,0.86);
+          font-size: 0.78rem;
+          font-weight: 850;
+          white-space: nowrap;
+        }
+
+        @keyframes shimmer {
+          0% { background-position: 100% 0; }
+          100% { background-position: -100% 0; }
+        }
+
+        .skeleton {
+          background: linear-gradient(
+            90deg,
+            rgba(255,255,255,0.06) 0%,
+            rgba(255,255,255,0.12) 25%,
+            rgba(255,255,255,0.06) 50%,
+            rgba(255,255,255,0.06) 100%
+          );
+          background-size: 220% 100%;
+          animation: shimmer 1.15s ease-in-out infinite;
+          border-radius: 12px;
+        }
+
+        .stat-skeleton {
+          border-color: rgba(255,255,255,0.10);
+        }
+
+        .stat-skeleton .kpi {
+          justify-content: space-between;
         }
       `}</style>
 
@@ -2673,7 +3453,7 @@ export default function CreditoPage() {
                   }}
                 >
                   <Sparkles size={18} />
-                  <strong>Valores</strong>
+                  <strong>Conciliação</strong>
                   <span>novo</span>
                 </button>
                 <button
@@ -2870,47 +3650,330 @@ export default function CreditoPage() {
             </header>
 
             {isMain ? (
-              <section className="toolbar">
-              <div className="search">
-                <Search size={18} />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Buscar por contrato, CPF (mascarado), cooperado, produto..."
-                />
-              </div>
-              <div className="panel">
-                <div className="panel-head">
-                  <h2>Modo Operação</h2>
-                  <span className="chip">
-                    <ShieldCheck size={16} />
-                    Governança
-                  </span>
-                </div>
-                <div className="panel-body">
-                  <div style={{ display: 'grid', gap: 10 }}>
-                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                      <span className="chip">
-                        <Zap size={16} />
-                        Alta Prioridade
-                      </span>
-                      <span className="chip">
-                        <Sparkles size={16} />
-                        UX First
-                      </span>
-                      <span className="chip">
-                        <BadgeDollarSign size={16} />
-                        Crédito
-                      </span>
-                    </div>
-                    <div style={{ color: 'rgba(255,255,255,0.72)', fontWeight: 600, lineHeight: 1.5 }}>
-                      Página inicial do módulo (sem integração). A estrutura já está pronta para evoluir
-                      com dados, filtros e ações de negociação.
-                    </div>
+              <>
+                <section className={view === 'home' ? 'toolbar toolbar-home' : 'toolbar'}>
+                  <div className={view === 'home' ? 'search home-search-card' : 'search'}>
+                    <Search size={18} />
+                    <input
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Buscar por contrato, CPF, cooperado, produto..."
+                    />
                   </div>
-                </div>
-              </div>
-              </section>
+
+                  {view === 'home' ? (
+                    <div className="search home-context-card">
+                      <div style={{ width: '100%', display: 'grid', gap: 12 }}>
+                        <div className="home-context-grid">
+                          <div className="field">
+                            <label>Competência</label>
+                            <select
+                              className="control month-select"
+                              value={conciliacaoMonth}
+                              onChange={(e) => setConciliacaoMonth(e.target.value)}
+                              disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
+                              style={{ height: 44 }}
+                            >
+                              {conciliacaoMonthOptions.map((o) => (
+                                <option key={o.value} value={o.value}>
+                                  {o.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="field">
+                            <label>Órgão</label>
+                            <select
+                              className="control month-select"
+                              value={conciliacaoOrgao}
+                              onChange={(e) => setConciliacaoOrgao(e.target.value)}
+                              disabled={orgaoDeParaLoading}
+                              style={{ height: 44 }}
+                            >
+                              <option value="">Selecione...</option>
+                              {conciliacaoOrgaoOptions.map((o) => (
+                                <option key={o} value={o}>
+                                  {o}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="field">
+                            <label>Exibir</label>
+                            <label className="home-toggle">
+                              <input
+                                type="checkbox"
+                                checked={conciliacaoOnlyDiff}
+                                onChange={(e) => setConciliacaoOnlyDiff(e.target.checked)}
+                              />
+                              <span>Somente divergências</span>
+                            </label>
+                          </div>
+                        </div>
+
+                        {conciliacaoError ? (
+                          <div className="help" style={{ marginTop: -2, color: 'rgba(255, 99, 132, 0.95)' }}>
+                            {conciliacaoError}
+                          </div>
+                        ) : null}
+
+                        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => setHash('conciliacao-extratos')}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                          >
+                            <BadgeDollarSign size={18} />
+                            Abrir conciliação
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={
+                              !canExportConciliacaoXlsx ||
+                              conciliacaoExportingXlsx ||
+                              !conciliacaoOrgao.trim() ||
+                              !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                            }
+                            onClick={() => void exportConciliacaoXlsx()}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                          >
+                            <FileSpreadsheet size={18} />
+                            {conciliacaoExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
+                          </button>
+                          {conciliacaoData ? (
+                            <span
+                              className="chip"
+                              style={{ alignSelf: 'center', marginLeft: 'auto' }}
+                              title={
+                                conciliacaoLoadedAtIso ? `Última atualização: ${formatIsoToPtBrDateTime(conciliacaoLoadedAtIso)}` : ''
+                              }
+                            >
+                              <Clock size={16} />
+                              Última atualização:{' '}
+                              {conciliacaoLoadedAtIso ? formatIsoToPtBrDateTime(conciliacaoLoadedAtIso).slice(0, 10) : '—'}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+
+                {view === 'home' ? (
+                  <section className="grid">
+                    <div className="panel" style={{ gridColumn: '1 / -1' }}>
+                      <div className="panel-head">
+                        <h2>Indicadores</h2>
+                        <span className="chip">
+                          <Sparkles size={16} />
+                          Conciliação
+                        </span>
+                      </div>
+                      <div className="panel-body">
+                        {conciliacaoLoading && !conciliacaoData ? (
+                          <div className="stats-home" style={{ marginTop: 2 }}>
+                            {Array.from({ length: 8 }).map((_, i) => (
+                              <div className="stat stat-skeleton" key={i}>
+                                <div className="kpi">
+                                  <div className="skeleton" style={{ height: 10, width: '56%' }} />
+                                  <div className="skeleton" style={{ width: 28, height: 28, borderRadius: 12 }} />
+                                </div>
+                                <div className="skeleton" style={{ height: 18, width: '80%', marginTop: 10 }} />
+                                <div className="skeleton" style={{ height: 6, width: '100%', marginTop: 12, borderRadius: 999 }} />
+                              </div>
+                            ))}
+                          </div>
+                        ) : conciliacaoData ? (
+                          <div className="stats-home" style={{ marginTop: 2 }}>
+                            {(() => {
+                              const totals = conciliacaoData.totals
+                              const recursoCents = Number(totals?.recurso?.cents ?? 0) || 0
+                              const extratosCents = Number(totals?.extratos?.cents ?? 0) || 0
+                              const tarifasCents =
+                                (Number(totals?.tarifaLinha?.cents ?? 0) || 0) +
+                                (Number(totals?.tarifaTed?.cents ?? 0) || 0)
+                              const diffCents = extratosCents - recursoCents
+
+                              const recursoPend = Array.isArray(conciliacaoData?.recurso)
+                                ? conciliacaoData.recurso.filter((x: any) => x?.status === 'pendencia').length
+                                : 0
+                              const relatorioPend = Array.isArray(conciliacaoData?.relatorio)
+                                ? conciliacaoData.relatorio.filter((x: any) => x?.status === 'pendencia').length
+                                : 0
+                              const pendTotal = recursoPend + relatorioPend
+                              const recursoOk = Array.isArray(conciliacaoData?.recurso)
+                                ? conciliacaoData.recurso.filter((x: any) => x?.status === 'conciliado').length
+                                : 0
+                              const relatorioOk = Array.isArray(conciliacaoData?.relatorio)
+                                ? conciliacaoData.relatorio.filter((x: any) => x?.status === 'conciliado').length
+                                : 0
+                              const okTotal = recursoOk + relatorioOk
+                              const totalRegs = okTotal + pendTotal
+                              const pctOk = totalRegs > 0 ? Math.round((okTotal / totalRegs) * 100) : 0
+
+                              const fmt = (cents: number) => `R$ ${centsToPtBr(Math.abs(cents))}`
+                              const fmtSigned = (cents: number) => (cents < 0 ? `- ${fmt(cents)}` : fmt(cents))
+
+                              const statusLabel = conciliacaoData.closed?.isClosed ? 'Fechada' : 'Aberta'
+                              const statusTone = conciliacaoData.closed?.isClosed ? 'warn' : 'good'
+                              const pctTone = pctOk >= 90 ? 'good' : pctOk >= 60 ? 'warn' : 'bad'
+                              const diffTone = diffCents === 0 ? 'good' : diffCents < 0 ? 'bad' : 'warn'
+                              const pendTone = pendTotal === 0 ? 'good' : 'warn'
+
+                              const items = [
+                                {
+                                  label: 'Status',
+                                  value: statusLabel,
+                                  icon: conciliacaoData.closed?.isClosed ? <Lock size={18} /> : <Unlock size={18} />,
+                                  tone: statusTone,
+                                  meterPct: 100,
+                                },
+                                { label: 'Conciliação pronta', value: `${pctOk}%`, icon: <Sparkles size={18} />, tone: pctTone, meterPct: pctOk },
+                                { label: 'Conciliados', value: String(okTotal), icon: <ShieldCheck size={18} />, tone: pctTone, meterPct: pctOk },
+                                { label: 'Recurso (débito)', value: fmt(recursoCents), icon: <BadgeDollarSign size={18} />, tone: 'good', meterPct: 100 },
+                                { label: 'Extrato (crédito)', value: fmt(extratosCents), icon: <FileText size={18} />, tone: 'good', meterPct: 100 },
+                                { label: 'Diferença', value: fmtSigned(diffCents), icon: diffCents < 0 ? <TrendingDown size={18} /> : <TrendingUp size={18} />, tone: diffTone, meterPct: 100 },
+                                { label: 'Tarifas', value: fmt(tarifasCents), icon: <Zap size={18} />, tone: 'warn', meterPct: 100 },
+                                { label: 'Pendências', value: String(pendTotal), icon: <ShieldCheck size={18} />, tone: pendTone, meterPct: 100 },
+                              ]
+
+                              return items.map((it, idx) => (
+                                <motion.div
+                                  initial={{ opacity: 0, y: 8 }}
+                                  animate={{ opacity: 1, y: 0 }}
+                                  transition={{ duration: 0.18, ease: 'easeOut', delay: idx * 0.02 }}
+                                  whileHover={{ y: -2, scale: 1.01 }}
+                                  className={['stat', (it as any).tone ? `stat-${(it as any).tone}` : '']
+                                    .filter(Boolean)
+                                    .join(' ')}
+                                  key={it.label}
+                                >
+                                  <div className="kpi">
+                                    <div className="label">{it.label}</div>
+                                    <div className="stat-icon">{(it as any).icon}</div>
+                                  </div>
+                                  <div className="value">{it.value}</div>
+                                  <div className="stat-meter" style={{ marginTop: 10 }}>
+                                    <div
+                                      className="stat-meter-fill"
+                                      style={{
+                                        width: `${Math.max(0, Math.min(100, Number((it as any).meterPct ?? 100)))}%`,
+                                      }}
+                                    />
+                                  </div>
+                                </motion.div>
+                              ))
+                            })()}
+                          </div>
+                        ) : (
+                          <div className="help">
+                            Selecione uma competência e um órgão para ver os indicadores.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="panel" style={{ gridColumn: '1 / -1' }}>
+                      <div className="panel-head">
+                        <h2>Pendências prioritárias</h2>
+                        <span className="chip">
+                          <Zap size={16} />
+                          Foco
+                        </span>
+                      </div>
+                      <div className="panel-body">
+                        {conciliacaoData ? (
+                          <div className="list">
+                            {(() => {
+                              const recurso = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
+                              const relatorio = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
+                              const searchText = normalizeSearchText(search)
+                              const searchDigits = normalizeSearchDigits(search)
+                              const pend = [
+                                ...recurso
+                                  .filter((x: any) => x?.status === 'pendencia')
+                                  .map((x: any) => ({ ...x, __src: 'Recurso' as const })),
+                                ...relatorio
+                                  .filter((x: any) => x?.status === 'pendencia')
+                                  .map((x: any) => ({ ...x, __src: 'Relatório Sisbr' as const })),
+                              ]
+                              const filtered = searchText || searchDigits
+                                ? pend.filter((p: any) => {
+                                    const cpfDigits = normalizeSearchDigits(p?.cpf)
+                                    const nome = normalizeSearchText(p?.nome)
+                                    if (searchDigits && cpfDigits.includes(searchDigits)) return true
+                                    if (searchText && nome.includes(searchText)) return true
+                                    return false
+                                  })
+                                : pend
+                              const ordered = filtered.slice().sort((a: any, b: any) => {
+                                const av = Math.abs(ptBrMoneyToCents(String(a?.value ?? '0')))
+                                const bv = Math.abs(ptBrMoneyToCents(String(b?.value ?? '0')))
+                                return bv - av
+                              })
+                              const top = ordered.slice(0, 8)
+                              if (top.length === 0) {
+                                return (
+                                  <div className="row" style={{ gridTemplateColumns: '72px 1fr', padding: 18 }}>
+                                    <div className="bubble" style={{ width: 72, height: 72, borderRadius: 20, position: 'relative', overflow: 'hidden' }}>
+                                      <motion.div
+                                        aria-hidden="true"
+                                        style={{
+                                          position: 'absolute',
+                                          inset: -18,
+                                          background:
+                                            'radial-gradient(circle at 50% 50%, rgba(0,174,157,0.30) 0%, rgba(0,174,157,0.00) 60%)',
+                                        }}
+                                        initial={{ opacity: 0.35, scale: 0.92 }}
+                                        animate={{ opacity: [0.25, 0.5, 0.25], scale: [0.92, 1.06, 0.92] }}
+                                        transition={{ duration: 1.6, ease: 'easeInOut', repeat: Infinity }}
+                                      />
+                                      <div style={{ position: 'relative' }}>
+                                        <Megaphone size={28} />
+                                      </div>
+                                    </div>
+                                    <div style={{ display: 'grid', gap: 6, alignContent: 'center' }}>
+                                      <strong style={{ fontSize: '1.05rem' }}>Tudo em ordem por aqui!</strong>
+                                      <small style={{ fontSize: '0.9rem' }}>Nenhuma pendência para o filtro atual.</small>
+                                    </div>
+                                  </div>
+                                )
+                              }
+                              return top.map((p: any, idx: number) => (
+                                <div
+                                  key={`${p.__src}-${p.cpf}-${p.value}-${idx}`}
+                                  className="row"
+                                  onClick={() => setHash('conciliacao-extratos')}
+                                  style={{ cursor: 'pointer' }}
+                                >
+                                  <div className="bubble">
+                                    <ShieldCheck size={18} />
+                                  </div>
+                                  <div style={{ minWidth: 0 }}>
+                                    <strong style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                      {String(p.nome ?? '').trim() || '-'}
+                                    </strong>
+                                    <small>
+                                      {p.__src} • CPF {String(p.cpf ?? '').trim() || '-'}
+                                    </small>
+                                  </div>
+                                  <div className="right">{withCurrency(String(p.value ?? '0,00'))}</div>
+                                </div>
+                              ))
+                            })()}
+                          </div>
+                        ) : (
+                          <div className="help">
+                            Carregue uma conciliação para visualizar pendências.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                ) : null}
+              </>
             ) : null}
 
             {view === 'configuracoes-automacao' ? (
@@ -4169,19 +5232,200 @@ export default function CreditoPage() {
 
             {view === 'relatorios-valores' ? (
               <section className="grid">
-                <div className="panel">
+                <div className="panel" style={{ gridColumn: '1 / -1' }}>
                   <div className="panel-head">
-                    <h2>Valores a Descontar</h2>
+                    <h2>Conciliação</h2>
                     <span className="chip">
                       <FileText size={16} />
                       Relatório
                     </span>
                   </div>
                   <div className="panel-body">
-                    <div className="help">
-                      Tela pronta para receber a tabela/visão de valores importados
-                      do SharePoint.
+                    <div className="home-toolbar" style={{ marginBottom: 10 }}>
+                      <div className="grid" style={{ gridTemplateColumns: '180px 1fr 220px', gap: 12 }}>
+                        <div className="field">
+                          <label>Competência</label>
+                          <select
+                            className="control month-select"
+                            value={conciliacaoMonth}
+                            onChange={(e) => setConciliacaoMonth(e.target.value)}
+                            disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
+                            style={{ height: 44 }}
+                          >
+                            {conciliacaoMonthOptions.map((o) => (
+                              <option key={o.value} value={o.value}>
+                                {o.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="field">
+                          <label>Órgão</label>
+                          <select
+                            className="control month-select"
+                            value={conciliacaoOrgao}
+                            onChange={(e) => setConciliacaoOrgao(e.target.value)}
+                            disabled={orgaoDeParaLoading}
+                            style={{ height: 44 }}
+                          >
+                            <option value="">Selecione...</option>
+                            {conciliacaoOrgaoOptions.map((o) => (
+                              <option key={o} value={o}>
+                                {o}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="field">
+                          <label>Exibir</label>
+                          <label className="home-toggle">
+                            <input
+                              type="checkbox"
+                              checked={conciliacaoOnlyDiff}
+                              onChange={(e) => setConciliacaoOnlyDiff(e.target.checked)}
+                            />
+                            <span>Somente divergências</span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {conciliacaoError ? (
+                        <div className="help" style={{ marginTop: 10, color: 'rgba(255, 99, 132, 0.95)' }}>
+                          {conciliacaoError}
+                        </div>
+                      ) : null}
+
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={() => void exportConciliacaoPdf()}
+                          disabled={
+                            !canExportConciliacaoXlsx ||
+                            conciliacaoExportingPdf ||
+                            !conciliacaoOrgao.trim() ||
+                            !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                          }
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                        >
+                          <FileText size={18} />
+                          {conciliacaoExportingPdf ? 'Exportando...' : 'Exportar PDF'}
+                        </button>
+
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={
+                            !canExportConciliacaoXlsx ||
+                            conciliacaoExportingXlsx ||
+                            !conciliacaoOrgao.trim() ||
+                            !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                          }
+                          onClick={() => void exportConciliacaoXlsx()}
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                        >
+                          <FileSpreadsheet size={18} />
+                          {conciliacaoExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
+                        </button>
+                      </div>
                     </div>
+                  </div>
+                </div>
+
+                <div className="panel" style={{ gridColumn: '1 / -1' }}>
+                  <div className="panel-head">
+                    <h2>Lista da conciliação</h2>
+                    <span className="chip">
+                      <Sparkles size={16} />
+                      Recurso x Relatório Sisbr
+                    </span>
+                  </div>
+                  <div className="panel-body">
+                    {conciliacaoLoading && !conciliacaoData ? (
+                      <div className="help">Carregando conciliação...</div>
+                    ) : conciliacaoData ? (
+                      (() => {
+                        const recursoAll = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
+                        const relatorioAll = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
+                        const recursoRows = conciliacaoOnlyDiff ? recursoAll.filter((x: any) => x?.status === 'pendencia') : recursoAll
+                        const relatorioRows = conciliacaoOnlyDiff ? relatorioAll.filter((x: any) => x?.status === 'pendencia') : relatorioAll
+                        const rows = [
+                          ...recursoRows.map((r: any) => ({ ...r, __src: 'Recurso' as const, __occ: null as any })),
+                          ...relatorioRows.map((r: any) => ({ ...r, __src: 'Relatório Sisbr' as const, __occ: r?.ocorrencia ?? null })),
+                        ]
+                        const shown = rows.slice(0, 500)
+
+                        return (
+                          <>
+                            <div className="help" style={{ marginBottom: 10 }}>
+                              Mostrando {shown.length} de {rows.length} linha(s).
+                            </div>
+                            <div style={{ overflow: 'auto' }}>
+                              <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
+                                <thead>
+                                  <tr>
+                                    {['Origem', 'CPF', 'Nome', 'Valor', 'Status', 'Ocorrência'].map((h) => (
+                                      <th
+                                        key={h}
+                                        style={{
+                                          textAlign: 'left',
+                                          padding: '10px 12px',
+                                          fontSize: '0.78rem',
+                                          letterSpacing: '0.08em',
+                                          textTransform: 'uppercase',
+                                          color: 'rgba(255,255,255,0.62)',
+                                          borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                          whiteSpace: 'nowrap',
+                                        }}
+                                      >
+                                        {h}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {shown.map((r: any, idx: number) => {
+                                    const status = r?.status === 'conciliado' ? 'Conciliado' : 'Pendente'
+                                    const occ =
+                                      r.__src === 'Relatório Sisbr' && r.__occ
+                                        ? [r.__occ.action, r.__occ.justification].filter(Boolean).join(' • ')
+                                        : ''
+                                    return (
+                                      <tr key={`${r.__src}-${r.cpf}-${r.value}-${idx}`}>
+                                        <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                          {r.__src}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                          {String(r?.cpf ?? '').trim() || '-'}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 260 }}>
+                                          {String(r?.nome ?? '').trim() || '-'}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                                          {withCurrency(String(r?.value ?? '0,00'))}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                          <span className="chip" style={{ borderColor: r?.status === 'conciliado' ? 'rgba(22,163,74,0.35)' : 'rgba(245,158,11,0.35)' }}>
+                                            {status}
+                                          </span>
+                                        </td>
+                                        <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 260 }}>
+                                          {occ || '—'}
+                                        </td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
+                        )
+                      })()
+                    ) : (
+                      <div className="help">Selecione uma competência e um órgão para listar a conciliação.</div>
+                    )}
                   </div>
                 </div>
               </section>
@@ -4189,7 +5433,7 @@ export default function CreditoPage() {
 
             {view === 'relatorios-auditoria' ? (
               <section className="grid">
-                <div className="panel">
+                <div className="panel" style={{ gridColumn: '1 / -1' }}>
                   <div className="panel-head">
                     <h2>Auditoria Sistêmica</h2>
                     <span className="chip">
@@ -4198,10 +5442,199 @@ export default function CreditoPage() {
                     </span>
                   </div>
                   <div className="panel-body">
-                    <div className="help">
-                      Tela pronta para mostrar logs de importação, erros e
-                      validações.
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                        gap: 10,
+                        alignItems: 'end',
+                      }}
+                    >
+                      <div className="field">
+                        <label>Competência</label>
+                        <select
+                          className="control orgao-select"
+                          value={auditoriaMonth}
+                          onChange={(e) => setAuditoriaMonth(e.target.value)}
+                          disabled={conciliacaoMonthsLoading}
+                        >
+                          <option value="">Todas</option>
+                          {conciliacaoMonthOptions.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="field">
+                        <label>Órgão</label>
+                        <select
+                          className="control orgao-select"
+                          value={auditoriaOrgao}
+                          onChange={(e) => setAuditoriaOrgao(e.target.value)}
+                          disabled={orgaoDeParaLoading}
+                        >
+                          <option value="">Todos</option>
+                          {conciliacaoOrgaoOptions.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="field">
+                        <label>Tipo</label>
+                        <select
+                          className="control orgao-select"
+                          value={auditoriaGroup}
+                          onChange={(e) => setAuditoriaGroup(e.target.value)}
+                        >
+                          <option value="">Todos</option>
+                          <option value="ocorrencias">Ocorrências</option>
+                          <option value="tarifas">Tarifas</option>
+                          <option value="fechamentos">Fechamentos</option>
+                          <option value="contabilidade">Contabilidade</option>
+                        </select>
+                      </div>
                     </div>
+
+                    {auditoriaError ? (
+                      <div className="help" style={{ marginTop: 10, color: 'rgba(255, 99, 132, 0.95)' }}>
+                        {auditoriaError}
+                      </div>
+                    ) : null}
+
+                    {auditoriaLoading && !auditoriaData ? (
+                      <div className="help" style={{ marginTop: 10 }}>
+                        Carregando auditoria...
+                      </div>
+                    ) : auditoriaData ? (
+                      (() => {
+                        const total = Number.isFinite(auditoriaData.total) ? auditoriaData.total : 0
+                        const offset = Number.isFinite(auditoriaData.offset) ? auditoriaData.offset : 0
+                        const limit = Number.isFinite(auditoriaData.limit) ? auditoriaData.limit : 100
+                        const shown = Array.isArray(auditoriaData.items) ? auditoriaData.items : []
+                        const canPrev = offset > 0
+                        const canNext = offset + shown.length < total
+
+                        const groupLabel = (g: string) => {
+                          if (g === 'ocorrencias') return 'Ocorrências'
+                          if (g === 'tarifas') return 'Tarifas'
+                          if (g === 'fechamentos') return 'Fechamentos'
+                          if (g === 'contabilidade') return 'Contabilidade'
+                          return g || '—'
+                        }
+
+                        return (
+                          <>
+                            <div
+                              style={{
+                                marginTop: 12,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 10,
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <div className="help" style={{ margin: 0 }}>
+                                Mostrando {shown.length} de {total} evento(s).
+                              </div>
+                              <div style={{ display: 'flex', gap: 10 }}>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  disabled={!canPrev || auditoriaLoading}
+                                  onClick={() => setAuditoriaOffset(Math.max(0, offset - limit))}
+                                >
+                                  Anterior
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  disabled={!canNext || auditoriaLoading}
+                                  onClick={() => setAuditoriaOffset(offset + limit)}
+                                >
+                                  Próxima
+                                </button>
+                              </div>
+                            </div>
+
+                            <div style={{ marginTop: 12, overflow: 'auto' }}>
+                              <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
+                                <thead>
+                                  <tr>
+                                    {['Data/Hora', 'Tipo', 'Competência', 'Órgão', 'Ação', 'Usuário', 'Detalhe', 'CPF', 'Nome', 'Valor'].map(
+                                      (h) => (
+                                        <th
+                                          key={h}
+                                          style={{
+                                            textAlign: 'left',
+                                            padding: '10px 12px',
+                                            fontSize: '0.78rem',
+                                            letterSpacing: '0.08em',
+                                            textTransform: 'uppercase',
+                                            color: 'rgba(255,255,255,0.62)',
+                                            borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                            whiteSpace: 'nowrap',
+                                          }}
+                                        >
+                                          {h}
+                                        </th>
+                                      ),
+                                    )}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {shown.map((ev) => (
+                                    <tr key={ev.id}>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                        {formatIsoToPtBrDateTime(ev.occurredAt)}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                        <span className="chip">{groupLabel(String(ev.group ?? ''))}</span>
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                        {String(ev.month ?? '').trim() || '—'}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 220 }}>
+                                        {String(ev.orgao ?? '').trim() || '—'}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 220 }}>
+                                        {String(ev.action ?? '').trim() || '—'}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                        {String(ev.user ?? '').trim() || '—'}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 320 }}>
+                                        {String(ev.detail ?? '').trim() || '—'}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                        {String(ev.cpf ?? '').trim() || '—'}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 240 }}>
+                                        {String(ev.nome ?? '').trim() || '—'}
+                                      </td>
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap', textAlign: 'right' }}>
+                                        {String(ev.value ?? '').trim()
+                                          ? withCurrency(String(ev.value ?? ''))
+                                          : '—'}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
+                        )
+                      })()
+                    ) : (
+                      <div className="help" style={{ marginTop: 10 }}>
+                        Ajuste os filtros para listar os eventos de auditoria.
+                      </div>
+                    )}
                   </div>
                 </div>
               </section>
@@ -4709,12 +6142,28 @@ export default function CreditoPage() {
                                 conciliacaoSelectedPairId ??
                                 (conciliacaoSelectedPersonKey ? null : conciliacaoAutoPairId)
 
-                              const recursoRows = conciliacaoOnlyDiff
+                              const searchText = normalizeSearchText(search)
+                              const searchDigits = normalizeSearchDigits(search)
+                              const matchesSearch = (x: { cpf: string; nome: string }) => {
+                                const cpfDigits = normalizeSearchDigits(x?.cpf)
+                                const nome = normalizeSearchText(x?.nome)
+                                if (searchDigits && cpfDigits.includes(searchDigits)) return true
+                                if (searchText && nome.includes(searchText)) return true
+                                return false
+                              }
+
+                              const recursoBase = conciliacaoOnlyDiff
                                 ? conciliacaoData.recurso.filter((x) => x.status === 'pendencia')
                                 : conciliacaoData.recurso
-                              const relatorioRows = conciliacaoOnlyDiff
+                              const relatorioBase = conciliacaoOnlyDiff
                                 ? conciliacaoData.relatorio.filter((x) => x.status === 'pendencia')
                                 : conciliacaoData.relatorio
+                              const recursoRows = searchText || searchDigits
+                                ? recursoBase.filter((x) => matchesSearch(x))
+                                : recursoBase
+                              const relatorioRows = searchText || searchDigits
+                                ? relatorioBase.filter((x) => matchesSearch(x))
+                                : relatorioBase
 
                               const eligibleGroupKeys = (() => {
                                 const countByCents = (items: Array<{ value: string }>) => {
@@ -6744,136 +8193,1123 @@ export default function CreditoPage() {
               </section>
             ) : null}
 
-            {isMain ? (
-              <section className="panel">
-              <div className="panel-head">
-                <h2>Indicadores</h2>
-                <span className="chip">
-                  <Sparkles size={16} />
-                  Live Widgets
-                </span>
-              </div>
-              <div className="panel-body">
-                <div className="stats">
-                  {[
-                    { label: 'Contratos em atraso', value: '—', icon: <BadgeDollarSign size={18} /> },
-                    { label: 'Carteira em aberto', value: '—', icon: <Zap size={18} /> },
-                    { label: 'Negociações ativas', value: '—', icon: <Sparkles size={18} /> },
-                    { label: 'Risco operacional', value: '—', icon: <ShieldCheck size={18} /> },
-                  ].map((s) => (
-                    <div className="stat" key={s.label}>
-                      <div className="kpi">
-                        <div className="label">{s.label}</div>
-                        <div style={{ opacity: 0.85 }}>{s.icon}</div>
+            {view === 'dashboard' ? (
+              <>
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>Contexto</h2>
+                    {conciliacaoLoading ? (
+                      <span className="chip">
+                        <Clock size={16} />
+                        Carregando
+                      </span>
+                    ) : conciliacaoData?.closed?.isClosed ? (
+                      <span className="chip">
+                        <Lock size={16} />
+                        Fechada
+                      </span>
+                    ) : conciliacaoOrgao.trim() ? (
+                      <span className="chip">
+                        <Unlock size={16} />
+                        Aberta
+                      </span>
+                    ) : (
+                      <span className="chip">
+                        <Info size={16} />
+                        Selecione
+                      </span>
+                    )}
+                  </div>
+                  <div className="panel-body">
+                    <div className="form-grid form-grid-3">
+                      <div className="field">
+                        <label>Competência</label>
+                        <select
+                          className="control month-select"
+                          value={conciliacaoMonth}
+                          onChange={(e) => setConciliacaoMonth(e.target.value)}
+                          disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
+                          style={{ height: 44 }}
+                        >
+                          {conciliacaoMonthOptions.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
                       </div>
-                      <div className="value">{s.value}</div>
-                      <div style={{ marginTop: 8 }}>
-                        <span className="chip">
-                          <Sparkles size={16} />
-                          pronto p/ dados
-                        </span>
+                      <div className="field">
+                        <label>Órgão</label>
+                        <select
+                          className="control month-select"
+                          value={conciliacaoOrgao}
+                          onChange={(e) => setConciliacaoOrgao(e.target.value)}
+                          disabled={orgaoDeParaLoading}
+                          style={{ height: 44 }}
+                        >
+                          <option value="">Selecione...</option>
+                          {conciliacaoOrgaoOptions.map((o) => (
+                            <option key={o} value={o}>
+                              {o}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label>Exibir</label>
+                        <label
+                          className="day"
+                          style={{
+                            width: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'flex-start',
+                            gap: 10,
+                            height: 44,
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={conciliacaoOnlyDiff}
+                            onChange={(e) => setConciliacaoOnlyDiff(e.target.checked)}
+                          />
+                          <span>Somente divergências</span>
+                        </label>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-              </section>
-            ) : null}
 
-            {isMain ? (
-              <section className="grid">
-              <div className="panel">
-                <div className="panel-head">
-                  <h2>Atalhos</h2>
-                  <span className="chip">
-                    <Zap size={16} />
-                    Ultra Rápido
-                  </span>
-                </div>
-                <div className="panel-body">
-                  <div className="list">
-                    {[
-                      {
-                        icon: <LayoutDashboard size={18} />,
-                        title: 'Abrir Dashboard',
-                        desc: 'KPIs, alertas e cards dinâmicos',
-                        tag: 'ui',
-                        action: () => setHash('dashboard'),
-                      },
-                      {
-                        icon: <FileText size={18} />,
-                        title: 'Relatórios',
-                        desc: 'Exportações e visões gerenciais',
-                        tag: 'beta',
-                        action: () => setHash('relatorios-valores'),
-                      },
-                      {
-                        icon: <ShieldCheck size={18} />,
-                        title: 'Configurações',
-                        desc: 'Regras, acessos e integrações',
-                        tag: 'iam',
-                        action: () => setHash('configuracoes-automacao'),
-                      },
-                    ].map((r) => (
-                      <button
-                        key={r.title}
-                        type="button"
-                        className="row"
-                        onClick={r.action}
-                        style={{ width: '100%', cursor: 'pointer' }}
-                      >
-                        <span className="bubble">{r.icon}</span>
-                        <span style={{ textAlign: 'left' }}>
-                          <strong>{r.title}</strong>
-                          <small>{r.desc}</small>
-                        </span>
-                        <span className="right">{r.tag.toUpperCase()}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="panel">
-                <div className="panel-head">
-                  <h2>Feed Operacional</h2>
-                  <span className="chip">
-                    <Sparkles size={16} />
-                    Em tempo real
-                  </span>
-                </div>
-                <div className="panel-body">
-                  <div className="list" style={{ opacity: 0.98 }}>
-                    {[
-                      { icon: <Zap size={18} />, title: 'Nova fila de negociações', desc: 'Pronta para conectar na API', right: 'AGORA' },
-                      { icon: <ShieldCheck size={18} />, title: 'Políticas de acesso', desc: 'Estrutura desenhada para IAM', right: 'HOJE' },
-                      { icon: <Sparkles size={18} />, title: 'Componentização moderna', desc: 'Layout inspirado no plano-saúde, repaginado', right: 'OK' },
-                    ].map((e) => (
-                      <div className="row" key={e.title}>
-                        <span className="bubble">{e.icon}</span>
-                        <span>
-                          <strong>{e.title}</strong>
-                          <small>{e.desc}</small>
-                        </span>
-                        <span className="right">{e.right}</span>
-                      </div>
-                    ))}
-                    {search ? (
-                      <div className="row">
-                        <span className="bubble">
-                          <Search size={18} />
-                        </span>
-                        <span>
-                          <strong>Busca</strong>
-                          <small>{search}</small>
-                        </span>
-                        <span className="right">FILTRAR</span>
+                    {conciliacaoError ? (
+                      <div className="help" style={{ marginTop: 12, color: 'rgba(255, 99, 132, 0.95)' }}>
+                        {conciliacaoError}
                       </div>
                     ) : null}
+
+                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 14 }}>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => setHash('conciliacao-extratos')}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                      >
+                        <BadgeDollarSign size={18} />
+                        Abrir conciliação
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={
+                          !canExportConciliacaoXlsx ||
+                          conciliacaoExportingXlsx ||
+                          !conciliacaoOrgao.trim() ||
+                          !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                        }
+                        onClick={() => void exportConciliacaoXlsx()}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                      >
+                        <FileSpreadsheet size={18} />
+                        {conciliacaoExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
+                      </button>
+                      {conciliacaoData ? (
+                        <span
+                          className="chip"
+                          style={{ alignSelf: 'center' }}
+                          title={
+                            conciliacaoLoadedAtIso ? `Última atualização: ${formatIsoToPtBrDateTime(conciliacaoLoadedAtIso)}` : ''
+                          }
+                        >
+                          <Clock size={16} />
+                          Última atualização:{' '}
+                          {conciliacaoLoadedAtIso ? formatIsoToPtBrDateTime(conciliacaoLoadedAtIso).slice(0, 10) : '—'}
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              </div>
-            </section>
+                </section>
+
+                <section className="grid">
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Status da Conciliação</h2>
+                      <span className="chip">
+                        <Sparkles size={16} />
+                        Visão rápida
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const recurso = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
+                          const relatorio = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
+                          const recOk = recurso.filter((x: any) => x?.status === 'conciliado').length
+                          const recPend = recurso.filter((x: any) => x?.status === 'pendencia').length
+                          const relOk = relatorio.filter((x: any) => x?.status === 'conciliado').length
+                          const relPend = relatorio.filter((x: any) => x?.status === 'pendencia').length
+
+                          const totalRec = recOk + recPend
+                          const totalRel = relOk + relPend
+                          const recPct = totalRec > 0 ? Math.round((recOk / totalRec) * 100) : 0
+                          const relPct = totalRel > 0 ? Math.round((relOk / totalRel) * 100) : 0
+                          const statusOption = {
+                            backgroundColor: 'transparent',
+                            tooltip: { trigger: 'item' },
+                            legend: { show: false },
+                            title: [
+                              {
+                                text: 'Recurso',
+                                left: '25%',
+                                top: 12,
+                                textAlign: 'center',
+                                textStyle: {
+                                  color: 'rgba(255,255,255,0.75)',
+                                  fontSize: 12,
+                                  fontWeight: 800,
+                                },
+                              },
+                              {
+                                text: `${recPct}%`,
+                                left: '25%',
+                                top: '38%',
+                                textAlign: 'center',
+                                textStyle: {
+                                  color: 'rgba(255,255,255,0.94)',
+                                  fontSize: 28,
+                                  fontWeight: 900,
+                                },
+                              },
+                              {
+                                text: 'conciliado',
+                                left: '25%',
+                                top: '56%',
+                                textAlign: 'center',
+                                textStyle: {
+                                  color: 'rgba(255,255,255,0.58)',
+                                  fontSize: 11,
+                                  fontWeight: 750,
+                                },
+                              },
+                              {
+                                text: 'Relatório Sisbr',
+                                left: '75%',
+                                top: 12,
+                                textAlign: 'center',
+                                textStyle: {
+                                  color: 'rgba(255,255,255,0.75)',
+                                  fontSize: 12,
+                                  fontWeight: 800,
+                                },
+                              },
+                              {
+                                text: `${relPct}%`,
+                                left: '75%',
+                                top: '38%',
+                                textAlign: 'center',
+                                textStyle: {
+                                  color: 'rgba(255,255,255,0.94)',
+                                  fontSize: 28,
+                                  fontWeight: 900,
+                                },
+                              },
+                              {
+                                text: 'conciliado',
+                                left: '75%',
+                                top: '56%',
+                                textAlign: 'center',
+                                textStyle: {
+                                  color: 'rgba(255,255,255,0.58)',
+                                  fontSize: 11,
+                                  fontWeight: 750,
+                                },
+                              },
+                            ],
+                            series: [
+                              {
+                                name: 'Recurso',
+                                type: 'pie',
+                                radius: ['60%', '78%'],
+                                center: ['25%', '58%'],
+                                avoidLabelOverlap: true,
+                                label: { show: false },
+                                labelLine: { show: false },
+                                itemStyle: {
+                                  borderColor: 'rgba(255,255,255,0.04)',
+                                  borderWidth: 2,
+                                },
+                                data: [
+                                  { value: recOk, name: 'Conciliado', itemStyle: { color: '#00AE9D' } },
+                                  { value: recPend, name: 'Pendência', itemStyle: { color: '#F5C542' } },
+                                ],
+                              },
+                              {
+                                name: 'Relatório Sisbr',
+                                type: 'pie',
+                                radius: ['60%', '78%'],
+                                center: ['75%', '58%'],
+                                avoidLabelOverlap: true,
+                                label: { show: false },
+                                labelLine: { show: false },
+                                itemStyle: {
+                                  borderColor: 'rgba(255,255,255,0.04)',
+                                  borderWidth: 2,
+                                },
+                                data: [
+                                  { value: relOk, name: 'Conciliado', itemStyle: { color: '#00AE9D' } },
+                                  { value: relPend, name: 'Pendência', itemStyle: { color: '#F5C542' } },
+                                ],
+                              },
+                            ],
+                          }
+
+                          return (
+                            <div style={{ display: 'grid', gap: 12 }}>
+                              <ReactECharts
+                                option={statusOption}
+                                style={{ height: 260, width: '100%' }}
+                                opts={{ renderer: 'canvas' }}
+                              />
+                              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between' }}>
+                                <span className="chip">
+                                  <Sparkles size={16} />
+                                  Recurso: {recOk} OK • {recPend} pend.
+                                </span>
+                                <span className="chip">
+                                  <Sparkles size={16} />
+                                  Relatório Sisbr: {relOk} OK • {relPend} pend.
+                                </span>
+                                <span className="chip">
+                                  {(conciliacaoData as any)?.closed?.isClosed ? <Lock size={16} /> : <Unlock size={16} />}
+                                  {(conciliacaoData as any)?.closed?.isClosed ? 'Fechada' : 'Aberta'}
+                                </span>
+                              </div>
+                            </div>
+                          )
+                        })()
+                      ) : (
+                        <div className="help">
+                          Selecione um órgão/competência na Home para carregar o painel.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Valores (R$)</h2>
+                      <span className="chip">
+                        <BadgeDollarSign size={16} />
+                        Totais
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const totals = conciliacaoData.totals
+                          const recursoCents = Number(totals?.recurso?.cents ?? 0) || 0
+                          const extratosCents = Number(totals?.extratos?.cents ?? 0) || 0
+                          const relatorioCents = Number(totals?.relatorio?.cents ?? 0) || 0
+                          const tarifasCents =
+                            (Number(totals?.tarifaLinha?.cents ?? 0) || 0) +
+                            (Number(totals?.tarifaTed?.cents ?? 0) || 0)
+                          const diffCents = extratosCents - recursoCents
+                          const seriesData = [
+                            { name: 'Recurso', value: recursoCents },
+                            { name: 'Extrato', value: extratosCents },
+                            { name: 'Relatório Sisbr', value: relatorioCents },
+                            { name: 'Tarifas', value: tarifasCents },
+                            { name: 'Diferença', value: diffCents },
+                          ]
+                          const maxAbs = Math.max(...seriesData.map((x) => Math.abs(x.value)), 1)
+                          const limit = Math.ceil(maxAbs * 1.15)
+                          const fmtSigned = (cents: number) => {
+                            const sign = cents < 0 ? '- ' : ''
+                            return `${sign}R$ ${centsToPtBr(Math.abs(cents))}`
+                          }
+                          const colorOf = (name: string) => {
+                            if (name === 'Extrato') return '#00AE9D'
+                            if (name === 'Recurso') return '#F5C542'
+                            if (name === 'Tarifas') return 'rgba(255, 99, 132, 0.85)'
+                            if (name === 'Diferença') return diffCents === 0 ? '#00AE9D' : '#F5C542'
+                            return 'rgba(255,255,255,0.70)'
+                          }
+                          const valuesOption = {
+                            backgroundColor: 'transparent',
+                            grid: { left: 120, right: 18, top: 18, bottom: 18 },
+                            tooltip: {
+                              trigger: 'item',
+                              formatter: (p: any) => `${p?.name}: ${fmtSigned(Number(p?.value ?? 0))}`,
+                            },
+                            xAxis: {
+                              type: 'value',
+                              min: -limit,
+                              max: limit,
+                              axisLabel: {
+                                color: 'rgba(255,255,255,0.55)',
+                                formatter: (v: number) => `R$ ${centsToPtBr(Math.abs(Number(v) || 0))}`,
+                              },
+                              splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+                              axisLine: { lineStyle: { color: 'rgba(255,255,255,0.10)' } },
+                            },
+                            yAxis: {
+                              type: 'category',
+                              data: seriesData.map((x) => x.name),
+                              axisLabel: { color: 'rgba(255,255,255,0.78)', fontWeight: 800 },
+                              axisTick: { show: false },
+                              axisLine: { show: false },
+                            },
+                            series: [
+                              {
+                                type: 'bar',
+                                barWidth: 14,
+                                data: seriesData.map((x) => ({
+                                  name: x.name,
+                                  value: x.value,
+                                  itemStyle: {
+                                    color: colorOf(x.name),
+                                    borderRadius: [999, 999, 999, 999],
+                                    shadowColor: 'rgba(0,0,0,0.18)',
+                                    shadowBlur: 10,
+                                  },
+                                })),
+                                emphasis: {
+                                  itemStyle: {
+                                    shadowColor: 'rgba(0,0,0,0.35)',
+                                    shadowBlur: 18,
+                                  },
+                                },
+                              },
+                            ],
+                          }
+                          return (
+                            <ReactECharts
+                              option={valuesOption}
+                              style={{ height: 260, width: '100%' }}
+                              opts={{ renderer: 'canvas' }}
+                            />
+                          )
+                        })()
+                      ) : (
+                        <div className="help">
+                          Carregue uma conciliação para visualizar os gráficos.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Pendências (Top)</h2>
+                      <span className="chip">
+                        <Zap size={16} />
+                        Prioridade
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const recurso = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
+                          const relatorio = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
+                          const pend = [
+                            ...recurso
+                              .filter((x: any) => x?.status === 'pendencia')
+                              .map((x: any) => ({ ...x, __src: 'Recurso' as const })),
+                            ...relatorio
+                              .filter((x: any) => x?.status === 'pendencia')
+                              .map((x: any) => ({ ...x, __src: 'Relatório Sisbr' as const })),
+                          ]
+                          const ordered = pend
+                            .slice()
+                            .sort((a: any, b: any) => Math.abs(ptBrMoneyToCents(String(b?.value ?? '0'))) - Math.abs(ptBrMoneyToCents(String(a?.value ?? '0'))))
+                          const top = ordered.slice(0, 8)
+                          if (top.length === 0) {
+                            return <div className="help">Nenhuma pendência para o contexto atual.</div>
+                          }
+                          const labels = top.map((p: any) => `${String(p.nome ?? '').trim() || '-'} • ${String(p.__src ?? '')}`)
+                          const values = top.map((p: any) => Math.abs(ptBrMoneyToCents(String(p?.value ?? '0'))))
+                          const maxAbs = Math.max(...values, 1)
+                          const fmt = (cents: number) => `R$ ${centsToPtBr(Math.abs(cents))}`
+                          const pendOption = {
+                            backgroundColor: 'transparent',
+                            grid: { left: 160, right: 18, top: 18, bottom: 18 },
+                            tooltip: {
+                              trigger: 'item',
+                              formatter: (p: any) => `${labels[p?.dataIndex] ?? ''}<br/>${fmt(Number(p?.value ?? 0))}`,
+                            },
+                            xAxis: {
+                              type: 'value',
+                              min: 0,
+                              max: Math.ceil(maxAbs * 1.15),
+                              axisLabel: {
+                                color: 'rgba(255,255,255,0.55)',
+                                formatter: (v: number) => `R$ ${centsToPtBr(Number(v) || 0)}`,
+                              },
+                              splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+                              axisLine: { lineStyle: { color: 'rgba(255,255,255,0.10)' } },
+                            },
+                            yAxis: {
+                              type: 'category',
+                              data: labels,
+                              axisLabel: {
+                                color: 'rgba(255,255,255,0.78)',
+                                fontWeight: 800,
+                                formatter: (v: string) => (String(v).length > 28 ? `${String(v).slice(0, 28)}…` : String(v)),
+                              },
+                              axisTick: { show: false },
+                              axisLine: { show: false },
+                            },
+                            series: [
+                              {
+                                type: 'bar',
+                                barWidth: 14,
+                                data: values.map((v, idx) => ({
+                                  value: v,
+                                  itemStyle: {
+                                    color: idx % 2 === 0 ? '#F5C542' : 'rgba(245,197,66,0.72)',
+                                    borderRadius: [999, 999, 999, 999],
+                                    shadowColor: 'rgba(0,0,0,0.18)',
+                                    shadowBlur: 10,
+                                  },
+                                })),
+                                emphasis: {
+                                  itemStyle: {
+                                    shadowColor: 'rgba(0,0,0,0.35)',
+                                    shadowBlur: 18,
+                                  },
+                                },
+                              },
+                            ],
+                          }
+                          return (
+                            <div onClick={() => setHash('conciliacao-extratos')} style={{ cursor: 'pointer' }}>
+                              <ReactECharts
+                                option={pendOption}
+                                style={{ height: 260, width: '100%' }}
+                                opts={{ renderer: 'canvas' }}
+                              />
+                            </div>
+                          )
+                        })()
+                      ) : (
+                        <div className="help">
+                          Carregue uma conciliação para visualizar pendências.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Pareto de pendências</h2>
+                      <span className="chip">
+                        <Zap size={16} />
+                        80/20
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const recursoPend = (conciliacaoData.recurso ?? [])
+                            .filter((x: any) => x?.status === 'pendencia')
+                            .map((x: any) => ({ ...x, __src: 'Recurso' as const }))
+                          const relatorioPend = (conciliacaoData.relatorio ?? [])
+                            .filter((x: any) => x?.status === 'pendencia')
+                            .map((x: any) => ({ ...x, __src: 'Relatório Sisbr' as const }))
+                          const pend = [...recursoPend, ...relatorioPend]
+                          const byKey = new Map<string, { nome: string; cpf: string; cents: number }>()
+                          for (const p of pend) {
+                            const key = normalizeLinkKey(String(p?.cpf ?? ''), String(p?.nome ?? ''))
+                            const current = byKey.get(key)
+                            const add = Math.abs(ptBrMoneyToCents(String(p?.value ?? '0')))
+                            if (current) current.cents += add
+                            else
+                              byKey.set(key, {
+                                nome: String(p?.nome ?? '').trim(),
+                                cpf: String(p?.cpf ?? '').trim(),
+                                cents: add,
+                              })
+                          }
+                          const ordered = Array.from(byKey.values()).sort((a, b) => b.cents - a.cents)
+                          const top = ordered.slice(0, 10)
+                          const total = ordered.reduce((acc, x) => acc + x.cents, 0) || 1
+                          const labels = top.map((x) => {
+                            const name = x.nome || '-'
+                            return name.length > 22 ? `${name.slice(0, 22)}…` : name
+                          })
+                          const values = top.map((x) => x.cents)
+                          let running = 0
+                          const pct = top.map((x) => {
+                            running += x.cents
+                            return Math.round((running / total) * 100)
+                          })
+                          const option = {
+                            backgroundColor: 'transparent',
+                            tooltip: {
+                              trigger: 'axis',
+                              axisPointer: { type: 'shadow' },
+                              formatter: (params: any[]) => {
+                                const idx = Number(params?.[0]?.dataIndex ?? 0)
+                                const row = top[idx]
+                                if (!row) return ''
+                                return [
+                                  `<b>${row.nome || '-'}</b>`,
+                                  `CPF: ${row.cpf || '-'}`,
+                                  `Valor: R$ ${centsToPtBr(row.cents)}`,
+                                  `Acumulado: ${pct[idx]}%`,
+                                ].join('<br/>')
+                              },
+                            },
+                            grid: { left: 44, right: 44, top: 18, bottom: 40, containLabel: true },
+                            xAxis: {
+                              type: 'category',
+                              data: labels,
+                              axisLabel: {
+                                color: 'rgba(255,255,255,0.62)',
+                                fontWeight: 800,
+                                interval: 0,
+                                rotate: 25,
+                              },
+                              axisTick: { show: false },
+                              axisLine: { lineStyle: { color: 'rgba(255,255,255,0.10)' } },
+                            },
+                            yAxis: [
+                              {
+                                type: 'value',
+                                axisLabel: {
+                                  color: 'rgba(255,255,255,0.55)',
+                                  formatter: (v: number) => `R$ ${centsToPtBr(Math.abs(Number(v) || 0))}`,
+                                },
+                                splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+                              },
+                              {
+                                type: 'value',
+                                min: 0,
+                                max: 100,
+                                axisLabel: { color: 'rgba(255,255,255,0.55)', formatter: '{value}%' },
+                                splitLine: { show: false },
+                              },
+                            ],
+                            series: [
+                              {
+                                name: 'Valor',
+                                type: 'bar',
+                                data: values,
+                                barWidth: 14,
+                                itemStyle: { color: '#F5C542', borderRadius: [10, 10, 0, 0] },
+                              },
+                              {
+                                name: 'Acumulado',
+                                type: 'line',
+                                yAxisIndex: 1,
+                                data: pct,
+                                smooth: true,
+                                symbol: 'circle',
+                                symbolSize: 7,
+                                lineStyle: { color: '#00AE9D', width: 2 },
+                                itemStyle: { color: '#00AE9D' },
+                                areaStyle: { color: 'rgba(0,174,157,0.12)' },
+                              },
+                            ],
+                          }
+                          return (
+                            <ReactECharts option={option} style={{ height: 260, width: '100%' }} opts={{ renderer: 'canvas' }} />
+                          )
+                        })()
+                      ) : (
+                        <div className="help">Carregue uma conciliação para visualizar o pareto.</div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="grid">
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Conciliação pronta</h2>
+                      <span className="chip">
+                        <Sparkles size={16} />
+                        Gauge
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const recurso = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
+                          const relatorio = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
+                          const total = recurso.length + relatorio.length
+                          const ok =
+                            recurso.filter((x: any) => x?.status === 'conciliado').length +
+                            relatorio.filter((x: any) => x?.status === 'conciliado').length
+                          const pct = total > 0 ? Math.round((ok / total) * 100) : 0
+                          const option = {
+                            backgroundColor: 'transparent',
+                            series: [
+                              {
+                                type: 'gauge',
+                                startAngle: 210,
+                                endAngle: -30,
+                                radius: '100%',
+                                progress: { show: true, width: 16 },
+                                axisLine: {
+                                  lineStyle: {
+                                    width: 16,
+                                    color: [
+                                      [0.6, '#F5C542'],
+                                      [0.9, '#00AE9D'],
+                                      [1, '#00AE9D'],
+                                    ],
+                                  },
+                                },
+                                axisTick: { show: false },
+                                splitLine: { show: false },
+                                axisLabel: { show: false },
+                                pointer: { show: true, length: '65%', width: 6 },
+                                anchor: { show: true, size: 10, itemStyle: { color: '#00AE9D' } },
+                                detail: {
+                                  valueAnimation: true,
+                                  formatter: `{value}%`,
+                                  color: 'rgba(255,255,255,0.92)',
+                                  fontSize: 18,
+                                  fontWeight: 900,
+                                  offsetCenter: [0, '12%'],
+                                },
+                                title: {
+                                  show: true,
+                                  offsetCenter: [0, '48%'],
+                                  color: 'rgba(255,255,255,0.65)',
+                                  fontSize: 12,
+                                  fontWeight: 800,
+                                },
+                                data: [{ value: pct, name: `${ok}/${total} conciliados` }],
+                              },
+                            ],
+                          }
+                          return (
+                            <div style={{ display: 'grid', gap: 10 }}>
+                              <ReactECharts option={option} style={{ height: 260, width: '100%' }} opts={{ renderer: 'canvas' }} />
+                              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between' }}>
+                                <span className="chip">
+                                  <Sparkles size={16} />
+                                  {ok} conciliados
+                                </span>
+                                <span className="chip">
+                                  <Zap size={16} />
+                                  {total - ok} pendências
+                                </span>
+                              </div>
+                            </div>
+                          )
+                        })()
+                      ) : (
+                        <div className="help">Carregue uma conciliação para visualizar o gauge.</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Matriz de totais</h2>
+                      <span className="chip">
+                        <BadgeDollarSign size={16} />
+                        Radar
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const totals = conciliacaoData.totals
+                          const recurso = Math.abs(Number(totals?.recurso?.cents ?? 0) || 0)
+                          const extrato = Math.abs(Number(totals?.extratos?.cents ?? 0) || 0)
+                          const relatorio = Math.abs(Number(totals?.relatorio?.cents ?? 0) || 0)
+                          const tarifas =
+                            Math.abs(Number(totals?.tarifaLinha?.cents ?? 0) || 0) +
+                            Math.abs(Number(totals?.tarifaTed?.cents ?? 0) || 0)
+                          const diff = Math.abs(Number(totals?.diff?.cents ?? 0) || 0)
+                          const max = Math.max(recurso, extrato, relatorio, tarifas, diff, 1)
+                          const option = {
+                            backgroundColor: 'transparent',
+                            radar: {
+                              radius: '70%',
+                              indicator: [
+                                { name: 'Recurso', max: Math.ceil(max * 1.2) },
+                                { name: 'Extrato', max: Math.ceil(max * 1.2) },
+                                { name: 'Relatório Sisbr', max: Math.ceil(max * 1.2) },
+                                { name: 'Tarifas', max: Math.ceil(max * 1.2) },
+                                { name: 'Diferença', max: Math.ceil(max * 1.2) },
+                              ],
+                              splitNumber: 4,
+                              axisName: { color: 'rgba(255,255,255,0.78)', fontWeight: 800 },
+                              splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+                              splitArea: { areaStyle: { color: ['rgba(255,255,255,0.02)', 'rgba(255,255,255,0.00)'] } },
+                              axisLine: { lineStyle: { color: 'rgba(255,255,255,0.12)' } },
+                            },
+                            tooltip: {
+                              trigger: 'item',
+                              formatter: () =>
+                                [
+                                  `Recurso: R$ ${centsToPtBr(recurso)}`,
+                                  `Extrato: R$ ${centsToPtBr(extrato)}`,
+                                  `Relatório Sisbr: R$ ${centsToPtBr(relatorio)}`,
+                                  `Tarifas: R$ ${centsToPtBr(tarifas)}`,
+                                  `Diferença: R$ ${centsToPtBr(diff)}`,
+                                ].join('<br/>'),
+                            },
+                            series: [
+                              {
+                                type: 'radar',
+                                data: [
+                                  {
+                                    value: [recurso, extrato, relatorio, tarifas, diff],
+                                    name: 'Totais',
+                                    areaStyle: { color: 'rgba(0,174,157,0.22)' },
+                                    lineStyle: { color: '#00AE9D', width: 2 },
+                                    itemStyle: { color: '#00AE9D' },
+                                  },
+                                ],
+                              },
+                            ],
+                          }
+                          return <ReactECharts option={option} style={{ height: 260, width: '100%' }} opts={{ renderer: 'canvas' }} />
+                        })()
+                      ) : (
+                        <div className="help">Carregue uma conciliação para visualizar a matriz.</div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="grid">
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Distribuição por faixa</h2>
+                      <span className="chip">
+                        <Sparkles size={16} />
+                        Histograma
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const bins = [
+                            { label: '0–100', min: 0, max: 10000 },
+                            { label: '100–500', min: 10000, max: 50000 },
+                            { label: '500–1k', min: 50000, max: 100000 },
+                            { label: '1k–5k', min: 100000, max: 500000 },
+                            { label: '5k–10k', min: 500000, max: 1000000 },
+                            { label: '10k+', min: 1000000, max: Infinity },
+                          ]
+                          const recursoPend = (conciliacaoData.recurso ?? []).filter((x: any) => x?.status === 'pendencia')
+                          const relatorioPend = (conciliacaoData.relatorio ?? []).filter((x: any) => x?.status === 'pendencia')
+                          const countRecurso = bins.map(() => 0)
+                          const countRelatorio = bins.map(() => 0)
+                          const sumRecurso = bins.map(() => 0)
+                          const sumRelatorio = bins.map(() => 0)
+                          const put = (arr: any[], count: number[], sum: number[]) => {
+                            for (const it of arr) {
+                              const cents = Math.abs(ptBrMoneyToCents(String(it?.value ?? '0')))
+                              const idx = bins.findIndex((b) => cents >= b.min && cents < b.max)
+                              const safe = idx >= 0 ? idx : bins.length - 1
+                              count[safe] += 1
+                              sum[safe] += cents
+                            }
+                          }
+                          put(recursoPend, countRecurso, sumRecurso)
+                          put(relatorioPend, countRelatorio, sumRelatorio)
+                          const option = {
+                            backgroundColor: 'transparent',
+                            tooltip: {
+                              trigger: 'axis',
+                              axisPointer: { type: 'shadow' },
+                              formatter: (params: any[]) => {
+                                const idx = Number(params?.[0]?.dataIndex ?? 0)
+                                const title = bins[idx]?.label ?? ''
+                                return [
+                                  `<b>R$ ${title}</b>`,
+                                  `Recurso: ${countRecurso[idx]} (${`R$ ${centsToPtBr(sumRecurso[idx])}`})`,
+                                  `Relatório Sisbr: ${countRelatorio[idx]} (${`R$ ${centsToPtBr(sumRelatorio[idx])}`})`,
+                                ].join('<br/>')
+                              },
+                            },
+                            legend: {
+                              top: 0,
+                              textStyle: { color: 'rgba(255,255,255,0.72)', fontWeight: 800 },
+                            },
+                            grid: { left: 34, right: 18, top: 36, bottom: 18, containLabel: true },
+                            xAxis: {
+                              type: 'category',
+                              data: bins.map((b) => b.label),
+                              axisLabel: { color: 'rgba(255,255,255,0.62)', fontWeight: 800 },
+                              axisTick: { show: false },
+                              axisLine: { lineStyle: { color: 'rgba(255,255,255,0.10)' } },
+                            },
+                            yAxis: {
+                              type: 'value',
+                              axisLabel: { color: 'rgba(255,255,255,0.55)' },
+                              splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+                            },
+                            series: [
+                              {
+                                name: 'Recurso',
+                                type: 'bar',
+                                stack: 'count',
+                                barWidth: 16,
+                                data: countRecurso,
+                                itemStyle: { color: '#F5C542', borderRadius: [10, 10, 0, 0] },
+                              },
+                              {
+                                name: 'Relatório Sisbr',
+                                type: 'bar',
+                                stack: 'count',
+                                barWidth: 16,
+                                data: countRelatorio,
+                                itemStyle: { color: '#00AE9D', borderRadius: [10, 10, 0, 0] },
+                              },
+                            ],
+                          }
+                          return <ReactECharts option={option} style={{ height: 260, width: '100%' }} opts={{ renderer: 'canvas' }} />
+                        })()
+                      ) : (
+                        <div className="help">Carregue uma conciliação para visualizar a distribuição.</div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="panel">
+                    <div className="panel-head">
+                      <h2>Ocorrências no tempo</h2>
+                      <span className="chip">
+                        <ShieldCheck size={16} />
+                        Trilha
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const rel = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
+                          const events = rel
+                            .filter((x: any) => x?.ocorrencia && x.ocorrencia?.createdAt)
+                            .map((x: any) => ({
+                              day: String(x.ocorrencia.createdAt).slice(0, 10),
+                              action: String(x.ocorrencia.action ?? 'outros'),
+                            }))
+                          if (events.length === 0) {
+                            return <div className="help">Nenhuma ocorrência registrada para o contexto atual.</div>
+                          }
+                          const countByAction = new Map<string, number>()
+                          const countByDayAction = new Map<string, number>()
+                          for (const e of events) {
+                            countByAction.set(e.action, (countByAction.get(e.action) ?? 0) + 1)
+                            const k = `${e.day}||${e.action}`
+                            countByDayAction.set(k, (countByDayAction.get(k) ?? 0) + 1)
+                          }
+                          const topActions = Array.from(countByAction.entries())
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 4)
+                            .map(([k]) => k)
+                          const actions = [...topActions, 'Outros']
+                          const days = Array.from(new Set(events.map((e) => e.day))).sort()
+                          const fmtDay = (d: string) => {
+                            const dd = d.slice(8, 10)
+                            const mm = d.slice(5, 7)
+                            return `${dd}/${mm}`
+                          }
+                          const series = actions.map((a) => {
+                            const data = days.map((day) => {
+                              const key = `${day}||${a}`
+                              if (a === 'Outros') {
+                                let sum = 0
+                                for (const e of events) {
+                                  if (e.day !== day) continue
+                                  if (topActions.includes(e.action)) continue
+                                  sum += 1
+                                }
+                                return sum
+                              }
+                              return countByDayAction.get(key) ?? 0
+                            })
+                            return {
+                              name: a,
+                              type: 'bar',
+                              stack: 'occ',
+                              barWidth: 14,
+                              emphasis: { focus: 'series' },
+                              data,
+                            }
+                          })
+                          const totals = days.map((day) => events.filter((e) => e.day === day).length)
+                          const option = {
+                            backgroundColor: 'transparent',
+                            tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                            legend: { top: 0, textStyle: { color: 'rgba(255,255,255,0.70)', fontWeight: 800 } },
+                            grid: { left: 34, right: 18, top: 36, bottom: 18, containLabel: true },
+                            xAxis: {
+                              type: 'category',
+                              data: days.map(fmtDay),
+                              axisLabel: { color: 'rgba(255,255,255,0.62)', fontWeight: 800 },
+                              axisTick: { show: false },
+                              axisLine: { lineStyle: { color: 'rgba(255,255,255,0.10)' } },
+                            },
+                            yAxis: {
+                              type: 'value',
+                              axisLabel: { color: 'rgba(255,255,255,0.55)' },
+                              splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)' } },
+                            },
+                            series: [
+                              ...series.map((s: any, idx: number) => ({
+                                ...s,
+                                itemStyle: {
+                                  color:
+                                    idx === 0
+                                      ? '#00AE9D'
+                                      : idx === 1
+                                        ? '#F5C542'
+                                        : idx === 2
+                                          ? 'rgba(255,255,255,0.55)'
+                                          : idx === 3
+                                            ? 'rgba(255, 99, 132, 0.75)'
+                                            : 'rgba(255,255,255,0.25)',
+                                  borderRadius: [10, 10, 0, 0],
+                                },
+                              })),
+                              {
+                                name: 'Total',
+                                type: 'line',
+                                data: totals,
+                                smooth: true,
+                                symbol: 'circle',
+                                symbolSize: 7,
+                                lineStyle: { color: 'rgba(255,255,255,0.70)', width: 2 },
+                                itemStyle: { color: 'rgba(255,255,255,0.80)' },
+                              },
+                            ],
+                          }
+                          return <ReactECharts option={option} style={{ height: 260, width: '100%' }} opts={{ renderer: 'canvas' }} />
+                        })()
+                      ) : (
+                        <div className="help">Carregue uma conciliação para visualizar as ocorrências.</div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                <section className="grid">
+                  <div className="panel" style={{ gridColumn: '1 / -1' }}>
+                    <div className="panel-head">
+                      <h2>Empresa × Modalidade</h2>
+                      <span className="chip">
+                        <Sparkles size={16} />
+                        Heatmap
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {conciliacaoData ? (
+                        (() => {
+                          const rel = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
+                          const relPend = rel.filter((x: any) => x?.status === 'pendencia')
+                          const base = relPend.length > 0 ? relPend : rel
+                          const countEmpresa = new Map<string, number>()
+                          const countModalidade = new Map<string, number>()
+                          const getKey = (v: any) => String(v ?? '').trim() || '—'
+                          for (const it of base) {
+                            const e = getKey((it as any)?.empresa)
+                            const m = getKey((it as any)?.modalidade)
+                            countEmpresa.set(e, (countEmpresa.get(e) ?? 0) + 1)
+                            countModalidade.set(m, (countModalidade.get(m) ?? 0) + 1)
+                          }
+                          const topEmpresas = Array.from(countEmpresa.entries())
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 12)
+                            .map(([k]) => k)
+                          const topModalidades = Array.from(countModalidade.entries())
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 8)
+                            .map(([k]) => k)
+                          const empresas = topEmpresas.includes('Outros') ? topEmpresas : [...topEmpresas, 'Outros']
+                          const modalidades = topModalidades.includes('Outros') ? topModalidades : [...topModalidades, 'Outros']
+                          const idxE = new Map(empresas.map((v, i) => [v, i]))
+                          const idxM = new Map(modalidades.map((v, i) => [v, i]))
+                          const matrix = new Map<string, number>()
+                          const key = (xi: number, yi: number) => `${xi}||${yi}`
+                          for (const it of base) {
+                            const e0 = getKey((it as any)?.empresa)
+                            const m0 = getKey((it as any)?.modalidade)
+                            const e = idxE.has(e0) ? e0 : 'Outros'
+                            const m = idxM.has(m0) ? m0 : 'Outros'
+                            const xi = idxM.get(m) ?? 0
+                            const yi = idxE.get(e) ?? 0
+                            const k = key(xi, yi)
+                            matrix.set(k, (matrix.get(k) ?? 0) + 1)
+                          }
+                          const data: Array<[number, number, number]> = []
+                          let max = 0
+                          for (let yi = 0; yi < empresas.length; yi++) {
+                            for (let xi = 0; xi < modalidades.length; xi++) {
+                              const v = matrix.get(key(xi, yi)) ?? 0
+                              max = Math.max(max, v)
+                              data.push([xi, yi, v])
+                            }
+                          }
+                          const option = {
+                            backgroundColor: 'transparent',
+                            tooltip: {
+                              position: 'top',
+                              formatter: (p: any) => {
+                                const [xi, yi, v] = p?.value ?? []
+                                const m = modalidades[xi] ?? ''
+                                const e = empresas[yi] ?? ''
+                                return `${e}<br/>${m}: <b>${v ?? 0}</b>`
+                              },
+                            },
+                            grid: { left: 150, right: 18, top: 18, bottom: 18 },
+                            xAxis: {
+                              type: 'category',
+                              data: modalidades,
+                              axisLabel: { color: 'rgba(255,255,255,0.62)', fontWeight: 800 },
+                              axisLine: { lineStyle: { color: 'rgba(255,255,255,0.10)' } },
+                              axisTick: { show: false },
+                              splitArea: { show: true, areaStyle: { color: ['rgba(255,255,255,0.00)', 'rgba(255,255,255,0.02)'] } },
+                            },
+                            yAxis: {
+                              type: 'category',
+                              data: empresas,
+                              axisLabel: {
+                                color: 'rgba(255,255,255,0.78)',
+                                fontWeight: 800,
+                                formatter: (v: string) => (String(v).length > 22 ? `${String(v).slice(0, 22)}…` : String(v)),
+                              },
+                              axisLine: { show: false },
+                              axisTick: { show: false },
+                              splitArea: { show: true, areaStyle: { color: ['rgba(255,255,255,0.00)', 'rgba(255,255,255,0.02)'] } },
+                            },
+                            visualMap: {
+                              min: 0,
+                              max: Math.max(max, 1),
+                              calculable: false,
+                              orient: 'horizontal',
+                              left: 'center',
+                              bottom: 0,
+                              inRange: {
+                                color: ['rgba(255,255,255,0.06)', 'rgba(0,174,157,0.25)', '#00AE9D'],
+                              },
+                              textStyle: { color: 'rgba(255,255,255,0.65)', fontWeight: 800 },
+                            },
+                            series: [
+                              {
+                                type: 'heatmap',
+                                data,
+                                label: { show: false },
+                                emphasis: {
+                                  itemStyle: { shadowBlur: 12, shadowColor: 'rgba(0,0,0,0.35)' },
+                                },
+                              },
+                            ],
+                          }
+                          return <ReactECharts option={option} style={{ height: 300, width: '100%' }} opts={{ renderer: 'canvas' }} />
+                        })()
+                      ) : (
+                        <div className="help">Carregue uma conciliação para visualizar o heatmap.</div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              </>
             ) : null}
           </div>
         </main>

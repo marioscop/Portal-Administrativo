@@ -3046,6 +3046,98 @@ function getConciliacaoFechamentoInfo(
   }
 }
 
+function getConciliacaoLastUpdatedAt(db: Database, opts: { monthKey: string; orgaoRaw: string }): string | null {
+  const orgaoKey = normalizeExtratosOrgaoForMatch(opts.orgaoRaw);
+  if (!orgaoKey) return null;
+
+  const candidates: string[] = [];
+
+  if (tableExists(db, 'orgao_depara')) {
+    const stmt = db.prepare(`SELECT extratos_value, created_at FROM orgao_depara;`);
+    try {
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as { extratos_value?: unknown; created_at?: unknown };
+        const raw = typeof row.extratos_value === 'string' ? row.extratos_value.trim() : '';
+        if (!raw) continue;
+        const k = normalizeExtratosOrgaoForMatch(raw);
+        if (!k || k !== orgaoKey) continue;
+        const createdAt = typeof row.created_at === 'string' ? row.created_at.trim() : '';
+        if (createdAt) candidates.push(createdAt);
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  if (tableExists(db, 'conciliacao_tarifas')) {
+    const stmt = db.prepare(
+      `SELECT MAX(updated_at) as v FROM conciliacao_tarifas WHERE month_key=? AND orgao_extratos_key=?;`,
+    );
+    try {
+      stmt.bind([opts.monthKey, orgaoKey] as unknown as any[]);
+      if (stmt.step()) {
+        const row = stmt.getAsObject() as { v?: unknown };
+        const v = typeof row.v === 'string' ? row.v.trim() : '';
+        if (v) candidates.push(v);
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  if (tableExists(db, 'conciliacao_pendencia_actions')) {
+    const stmt = db.prepare(
+      `SELECT orgao, created_at, undone_at
+       FROM conciliacao_pendencia_actions
+       WHERE month=?;`,
+    );
+    try {
+      stmt.bind([opts.monthKey] as unknown as any[]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as { orgao?: unknown; created_at?: unknown; undone_at?: unknown };
+        const orgaoRaw = typeof row.orgao === 'string' ? row.orgao.trim() : '';
+        if (!orgaoRaw) continue;
+        const k = normalizeExtratosOrgaoForMatch(orgaoRaw);
+        if (!k || k !== orgaoKey) continue;
+        const createdAt = typeof row.created_at === 'string' ? row.created_at.trim() : '';
+        const undoneAt = typeof row.undone_at === 'string' ? row.undone_at.trim() : '';
+        if (createdAt) candidates.push(createdAt);
+        if (undoneAt) candidates.push(undoneAt);
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  if (tableExists(db, 'conciliacao_fechamentos')) {
+    const stmt = db.prepare(
+      `SELECT closed_at, reopened_at, sent_to_contabilidade_at
+       FROM conciliacao_fechamentos
+       WHERE month_key=? AND orgao_extratos_key=?
+       LIMIT 1;`,
+    );
+    try {
+      stmt.bind([opts.monthKey, orgaoKey] as unknown as any[]);
+      if (stmt.step()) {
+        const row = stmt.getAsObject() as Record<string, unknown>;
+        const closedAt = typeof row.closed_at === 'string' ? row.closed_at.trim() : '';
+        const reopenedAt = typeof row.reopened_at === 'string' ? row.reopened_at.trim() : '';
+        const sentAt =
+          typeof row.sent_to_contabilidade_at === 'string' ? row.sent_to_contabilidade_at.trim() : '';
+        if (closedAt) candidates.push(closedAt);
+        if (reopenedAt) candidates.push(reopenedAt);
+        if (sentAt) candidates.push(sentAt);
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort();
+  return candidates[candidates.length - 1] || null;
+}
+
 function assertConciliacaoAberta(db: Database, opts: { monthKey: string; orgaoRaw: string }) {
   const info = getConciliacaoFechamentoInfo(db, opts);
   if (info.isClosed) {
@@ -4593,6 +4685,347 @@ export async function listarMesesConcilicacaoDisponiveis() {
   return { months, dbFilePath };
 }
 
+export async function listarAuditoriaSistemica(opts: {
+  month?: string | null;
+  orgao?: string | null;
+  group?: string | null;
+  limit?: number | null;
+  offset?: number | null;
+}) {
+  dotenv.config();
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+
+  const monthRaw = String(opts.month ?? '').trim();
+  const monthKey = monthRaw ? (() => {
+    const { year, month } = parseMonthInput(monthRaw);
+    return `${year}-${String(month).padStart(2, '0')}`;
+  })() : null;
+
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  const orgaoKey = orgaoRaw ? normalizeExtratosOrgaoForMatch(orgaoRaw) : '';
+  const wantedOrgaoKey = orgaoRaw ? (orgaoKey ? orgaoKey : '__INVALID__') : '';
+
+  const groupRaw = String(opts.group ?? '').trim().toLowerCase();
+  const group =
+    groupRaw === 'ocorrencias' ||
+    groupRaw === 'tarifas' ||
+    groupRaw === 'fechamentos' ||
+    groupRaw === 'contabilidade'
+      ? groupRaw
+      : '';
+
+  const limit =
+    typeof opts.limit === 'number' && Number.isFinite(opts.limit) && opts.limit > 0
+      ? Math.min(500, Math.floor(opts.limit))
+      : 100;
+  const offset =
+    typeof opts.offset === 'number' && Number.isFinite(opts.offset) && opts.offset > 0
+      ? Math.floor(opts.offset)
+      : 0;
+
+  const items: Array<{
+    id: string;
+    occurredAt: string;
+    group: 'ocorrencias' | 'tarifas' | 'fechamentos' | 'contabilidade';
+    action: string;
+    month: string | null;
+    orgao: string | null;
+    user: string | null;
+    detail: string | null;
+    cpf: string | null;
+    nome: string | null;
+    value: string | null;
+  }> = [];
+
+  const pushIfOk = (row: {
+    id: string;
+    occurredAt: string;
+    group: 'ocorrencias' | 'tarifas' | 'fechamentos' | 'contabilidade';
+    action: string;
+    month: string | null;
+    orgao: string | null;
+    user: string | null;
+    detail: string | null;
+    cpf?: string | null;
+    nome?: string | null;
+    value?: string | null;
+  }) => {
+    if (group && row.group !== group) return;
+    if (!row.occurredAt) return;
+    items.push({
+      id: row.id,
+      occurredAt: row.occurredAt,
+      group: row.group,
+      action: row.action,
+      month: row.month ?? null,
+      orgao: row.orgao ?? null,
+      user: row.user ?? null,
+      detail: row.detail ?? null,
+      cpf: row.cpf ?? null,
+      nome: row.nome ?? null,
+      value: row.value ?? null,
+    });
+  };
+
+  if (tableExists(db, 'conciliacao_pendencia_actions')) {
+    const stmt = db.prepare(
+      `SELECT id, created_at, month, orgao, cpf, nome, value, action, justification, error, undone_at, undo_justification
+       FROM conciliacao_pendencia_actions
+       ${monthKey ? 'WHERE month=?' : ''};`,
+    );
+    try {
+      if (monthKey) stmt.bind([monthKey] as unknown as any[]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as Record<string, unknown>;
+        const id = String(row.id ?? '').trim();
+        const createdAt = typeof row.created_at === 'string' ? row.created_at.trim() : '';
+        const month = typeof row.month === 'string' ? row.month.trim() : '';
+        const orgao = typeof row.orgao === 'string' ? row.orgao.trim() : '';
+        if (wantedOrgaoKey) {
+          const k = normalizeExtratosOrgaoForMatch(orgao);
+          if (!k || k !== wantedOrgaoKey) continue;
+        }
+        const cpf = typeof row.cpf === 'string' ? row.cpf.trim() : '';
+        const nome = typeof row.nome === 'string' ? row.nome.trim() : '';
+        const value = typeof row.value === 'string' ? row.value.trim() : '';
+        const action = typeof row.action === 'string' ? row.action.trim() : '';
+        const justification =
+          typeof row.justification === 'string' ? row.justification.trim() : '';
+        const error = typeof row.error === 'string' ? row.error.trim() : '';
+        const undoneAt = typeof row.undone_at === 'string' ? row.undone_at.trim() : '';
+        const undoJustification =
+          typeof row.undo_justification === 'string'
+            ? row.undo_justification.trim()
+            : '';
+
+        if (createdAt) {
+          pushIfOk({
+            id: `occ-${id || createdAt}`,
+            occurredAt: createdAt,
+            group: 'ocorrencias',
+            action: action || 'ocorrencia',
+            month: month || null,
+            orgao: orgao || null,
+            user: null,
+            cpf: cpf || null,
+            nome: nome || null,
+            value: value || null,
+            detail: [justification, error ? `Erro: ${error}` : ''].filter(Boolean).join(' • ') || null,
+          });
+        }
+
+        if (undoneAt) {
+          pushIfOk({
+            id: `occ-undo-${id || undoneAt}`,
+            occurredAt: undoneAt,
+            group: 'ocorrencias',
+            action: `desfazer: ${action || 'ocorrencia'}`,
+            month: month || null,
+            orgao: orgao || null,
+            user: null,
+            cpf: cpf || null,
+            nome: nome || null,
+            value: value || null,
+            detail: undoJustification || null,
+          });
+        }
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  if (tableExists(db, 'conciliacao_tarifas')) {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (monthKey) {
+      where.push('month_key=?');
+      params.push(monthKey);
+    }
+    if (wantedOrgaoKey) {
+      where.push('orgao_extratos_key=?');
+      params.push(wantedOrgaoKey);
+    }
+    const stmt = db.prepare(
+      `SELECT month_key, orgao_extratos_raw, tarifa_type, tarifa_cents, created_at, updated_at
+       FROM conciliacao_tarifas
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''};`,
+    );
+    try {
+      if (params.length) stmt.bind(params as unknown as any[]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as Record<string, unknown>;
+        const mk = typeof row.month_key === 'string' ? row.month_key.trim() : '';
+        const orgao = typeof row.orgao_extratos_raw === 'string' ? row.orgao_extratos_raw.trim() : '';
+        const type = typeof row.tarifa_type === 'string' ? row.tarifa_type.trim() : '';
+        const cents = typeof row.tarifa_cents === 'number' ? row.tarifa_cents : Number(row.tarifa_cents);
+        const updatedAt = typeof row.updated_at === 'string' ? row.updated_at.trim() : '';
+        const createdAt = typeof row.created_at === 'string' ? row.created_at.trim() : '';
+        const occurredAt = updatedAt || createdAt;
+        pushIfOk({
+          id: `tarifa-${mk}-${wantedOrgaoKey || orgao}-${type}-${occurredAt}`,
+          occurredAt,
+          group: 'tarifas',
+          action: `tarifa: ${type || 'linha'}`,
+          month: mk || null,
+          orgao: orgao || (orgaoRaw || null),
+          user: null,
+          detail: Number.isFinite(cents) ? centsToPtBr(Number(cents)) : null,
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  if (tableExists(db, 'conciliacao_fechamentos')) {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (monthKey) {
+      where.push('month_key=?');
+      params.push(monthKey);
+    }
+    if (wantedOrgaoKey) {
+      where.push('orgao_extratos_key=?');
+      params.push(wantedOrgaoKey);
+    }
+    const stmt = db.prepare(
+      `SELECT month_key, orgao_extratos_raw, closed_at, closed_by, reopened_at, reopened_by,
+              contabilidade_email, sent_to_contabilidade_at, sent_to_contabilidade_by
+       FROM conciliacao_fechamentos
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''};`,
+    );
+    try {
+      if (params.length) stmt.bind(params as unknown as any[]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as Record<string, unknown>;
+        const mk = typeof row.month_key === 'string' ? row.month_key.trim() : '';
+        const orgao = typeof row.orgao_extratos_raw === 'string' ? row.orgao_extratos_raw.trim() : '';
+        const closedAt = typeof row.closed_at === 'string' ? row.closed_at.trim() : '';
+        const closedBy = typeof row.closed_by === 'string' ? row.closed_by.trim() : '';
+        const reopenedAt = typeof row.reopened_at === 'string' ? row.reopened_at.trim() : '';
+        const reopenedBy = typeof row.reopened_by === 'string' ? row.reopened_by.trim() : '';
+        const contabEmail =
+          typeof row.contabilidade_email === 'string' ? row.contabilidade_email.trim() : '';
+        const sentAt =
+          typeof row.sent_to_contabilidade_at === 'string'
+            ? row.sent_to_contabilidade_at.trim()
+            : '';
+        const sentBy =
+          typeof row.sent_to_contabilidade_by === 'string'
+            ? row.sent_to_contabilidade_by.trim()
+            : '';
+
+        if (closedAt) {
+          pushIfOk({
+            id: `fechamento-${mk}-${wantedOrgaoKey || orgao}-${closedAt}`,
+            occurredAt: closedAt,
+            group: 'fechamentos',
+            action: 'fechar conciliação',
+            month: mk || null,
+            orgao: orgao || null,
+            user: closedBy || null,
+            detail: contabEmail ? `Contabilidade: ${contabEmail}` : null,
+          });
+        }
+
+        if (reopenedAt) {
+          pushIfOk({
+            id: `reabertura-${mk}-${wantedOrgaoKey || orgao}-${reopenedAt}`,
+            occurredAt: reopenedAt,
+            group: 'fechamentos',
+            action: 'reabrir conciliação',
+            month: mk || null,
+            orgao: orgao || null,
+            user: reopenedBy || null,
+            detail: null,
+          });
+        }
+
+        if (sentAt) {
+          pushIfOk({
+            id: `sent-${mk}-${wantedOrgaoKey || orgao}-${sentAt}`,
+            occurredAt: sentAt,
+            group: 'contabilidade',
+            action: 'enviar para contabilidade',
+            month: mk || null,
+            orgao: orgao || null,
+            user: sentBy || null,
+            detail: contabEmail ? `Contabilidade: ${contabEmail}` : null,
+          });
+        }
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  if (tableExists(db, 'contabilidade_relatorios_outbox')) {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (monthKey) {
+      where.push('month_key=?');
+      params.push(monthKey);
+    }
+    if (wantedOrgaoKey) {
+      where.push('orgao_extratos_key=?');
+      params.push(wantedOrgaoKey);
+    }
+    const stmt = db.prepare(
+      `SELECT id, created_at, created_by, to_email, month_key, orgao_extratos_raw, pdf_file_name
+       FROM contabilidade_relatorios_outbox
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''};`,
+    );
+    try {
+      if (params.length) stmt.bind(params as unknown as any[]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as Record<string, unknown>;
+        const id = String(row.id ?? '').trim();
+        const createdAt = typeof row.created_at === 'string' ? row.created_at.trim() : '';
+        const createdBy = typeof row.created_by === 'string' ? row.created_by.trim() : '';
+        const toEmail = typeof row.to_email === 'string' ? row.to_email.trim() : '';
+        const mk = typeof row.month_key === 'string' ? row.month_key.trim() : '';
+        const orgao = typeof row.orgao_extratos_raw === 'string' ? row.orgao_extratos_raw.trim() : '';
+        const pdfFile = typeof row.pdf_file_name === 'string' ? row.pdf_file_name.trim() : '';
+
+        pushIfOk({
+          id: `outbox-${id || createdAt}`,
+          occurredAt: createdAt,
+          group: 'contabilidade',
+          action: 'outbox contabilidade',
+          month: mk || null,
+          orgao: orgao || null,
+          user: createdBy || null,
+          detail: [toEmail ? `Para: ${toEmail}` : '', pdfFile ? `Arquivo: ${pdfFile}` : '']
+            .filter(Boolean)
+            .join(' • ') || null,
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+  }
+
+  items.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+  const total = items.length;
+  const pageItems = items.slice(offset, offset + limit);
+
+  return {
+    items: pageItems,
+    total,
+    limit,
+    offset,
+    filters: {
+      month: monthKey,
+      orgao: orgaoRaw || null,
+      group: group || null,
+    },
+    dbFilePath,
+  };
+}
+
 function formatDatePtBr(d: Date): string {
   const dd = String(d.getDate()).padStart(2, '0');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -5729,6 +6162,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     month: wantedMonthKey,
     orgao: orgaoInput,
     recursoTable,
+    lastUpdatedAt: getConciliacaoLastUpdatedAt(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoInput }),
     closed: getConciliacaoFechamentoInfo(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoInput }),
     consolidadoPorVencimento,
     totals: {
@@ -8346,6 +8780,81 @@ export async function exportConcilicacaoRecursoVsRelatorioXlsx(opts: {
   const buf = Buffer.isBuffer(bufRaw) ? bufRaw : Buffer.from(bufRaw as any);
   const fileName = sanitizeFileName(`Conciliação_Extratos_${monthKey}_${orgaoRaw}.xlsx`);
   return { fileName, buffer: buf };
+}
+
+export async function exportConcilicacaoRecursoVsRelatorioPdf(opts: {
+  month: string;
+  orgao: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  if (!orgaoRaw) throw new Error('Informe o órgão.');
+
+  const conciliacao = (await conciliarRecursoOrgaoRelatorio({
+    month: monthKey,
+    orgao: orgaoRaw,
+  })) as any;
+
+  const closedInfo =
+    conciliacao?.closed && typeof conciliacao.closed === 'object' ? conciliacao.closed : null;
+
+  const ocorrencias = Array.isArray(conciliacao?.relatorio)
+    ? conciliacao.relatorio
+        .map((r: any) => ({
+          cpf: typeof r?.cpf === 'string' ? r.cpf : '',
+          nome: typeof r?.nome === 'string' ? r.nome : '',
+          value: typeof r?.value === 'string' ? r.value : '',
+          ocorrencia: r?.ocorrencia ?? null,
+        }))
+        .filter((r: any) => r.ocorrencia && typeof r.ocorrencia === 'object')
+        .map((r: any) => ({
+          cpf: r.cpf,
+          nome: r.nome,
+          value: r.value,
+          action: typeof r.ocorrencia?.action === 'string' ? r.ocorrencia.action : '',
+          justification:
+            typeof r.ocorrencia?.justification === 'string' ? r.ocorrencia.justification : '',
+          createdAt: typeof r.ocorrencia?.createdAt === 'string' ? r.ocorrencia.createdAt : '',
+        }))
+        .filter((o: any) => Boolean(o.cpf && o.value))
+    : [];
+
+  const vencimento = buildVencimentosCellText(conciliacao?.relatorio);
+  const consolidadoPorVencimento = Array.isArray(conciliacao?.consolidadoPorVencimento)
+    ? conciliacao.consolidadoPorVencimento
+        .map((v: any) => ({
+          vencimento: String(v?.vencimento ?? '').trim(),
+          recursoCents: Number(v?.recursoCents ?? 0) || 0,
+          relatorioCents: Number(v?.relatorioCents ?? 0) || 0,
+          extratosCents: Number(v?.extratosCents ?? 0) || 0,
+          saldoCents: Number(v?.saldoCents ?? 0) || 0,
+        }))
+        .filter((v: any) => Boolean(v.vencimento))
+    : [];
+
+  const pdfFileName = sanitizeFileName(
+    `CONSIGNADOS_CONFERENCIA_${orgaoRaw}_${monthKey}.pdf`,
+  );
+  const pdfBuffer = await createConciliacaoPdfBuffer({
+    monthKey,
+    orgao: orgaoRaw,
+    vencimento,
+    evidencePng: null,
+    consolidadoPorVencimento,
+    totals: {
+      extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
+      recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
+      tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+      tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+    },
+    closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
+    closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
+    ocorrencias,
+  });
+
+  return { fileName: pdfFileName, buffer: pdfBuffer };
 }
 
 export async function importRelatoriosTemporario(opts: {

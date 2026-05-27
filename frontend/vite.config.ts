@@ -1,10 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import basicSsl from '@vitejs/plugin-basic-ssl'
 import fs from 'node:fs'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), ...(process.env.VITE_BASIC_SSL === '1' ? [basicSsl()] : [])],
   server: {
     host: true,
     port: 5173,
@@ -14,7 +15,9 @@ export default defineConfig({
             key: fs.readFileSync(process.env.VITE_HTTPS_KEY),
             cert: fs.readFileSync(process.env.VITE_HTTPS_CERT),
           }
-        : undefined,
+        : process.env.VITE_BASIC_SSL === '1'
+          ? true
+          : undefined,
     proxy: {
       '/api': {
         target: 'http://localhost:3000',

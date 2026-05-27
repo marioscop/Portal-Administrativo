@@ -28,6 +28,7 @@ import {
   deleteOrgaoDePara,
   exportConcilicacaoTemporarioXlsx,
   exportConcilicacaoRecursoVsRelatorioXlsx,
+  exportConcilicacaoRecursoVsRelatorioPdf,
   getConsignadoAutomationConfig,
   getConsignadoAccessEmails,
   getModalidades,
@@ -41,6 +42,7 @@ import {
   importRelatoriosTemporarioFromBuffer,
   listarFiltrosTemporario,
   listarMesesConcilicacaoDisponiveis,
+  listarAuditoriaSistemica,
   runImportConsignado,
   saveConsignadoAutomationConfig,
   upsertOrgaoDePara,
@@ -356,6 +358,30 @@ export class ConsignadoController {
     }
   }
 
+  @Get('auditoria')
+  async listarAuditoria(
+    @Query('month') month?: string,
+    @Query('orgao') orgao?: string,
+    @Query('group') group?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    try {
+      const parsedLimit = Number(String(limit ?? '').trim() || '100');
+      const parsedOffset = Number(String(offset ?? '').trim() || '0');
+      return await listarAuditoriaSistemica({
+        month: String(month ?? '').trim() || null,
+        orgao: String(orgao ?? '').trim() || null,
+        group: String(group ?? '').trim() || null,
+        limit: Number.isFinite(parsedLimit) ? parsedLimit : 100,
+        offset: Number.isFinite(parsedOffset) ? parsedOffset : 0,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao listar auditoria.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
   @Get('conciliacao/extratos/detalhe')
   async conciliarExtratosDetalhe(
     @Query('month') month?: string,
@@ -427,6 +453,29 @@ export class ConsignadoController {
       res.status(200).send(out.buffer);
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Falha ao exportar XLSX.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Get('conciliacao/recurso-vs-relatorio/export.pdf')
+  async exportConciliacaoRecursoVsRelatorioPdfNow(
+    @Res() res: Response,
+    @Query('month') month?: string,
+    @Query('orgao') orgao?: string,
+  ) {
+    if (!month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!orgao || !orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    try {
+      const out = await exportConcilicacaoRecursoVsRelatorioPdf({ month, orgao });
+      res.setHeader('content-type', 'application/pdf');
+      res.setHeader('content-disposition', `attachment; filename="${out.fileName}"`);
+      res.status(200).send(out.buffer);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao exportar PDF.';
       throw new InternalServerErrorException(message);
     }
   }
