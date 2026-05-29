@@ -16,11 +16,11 @@ export default defineConfig({
             cert: fs.readFileSync(process.env.VITE_HTTPS_CERT),
           }
         : process.env.VITE_BASIC_SSL === '1'
-          ? true
+          ? {}
           : undefined,
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: process.env.VITE_API_TARGET || 'http://localhost:3000',
         changeOrigin: true,
         timeout: 600_000,
         proxyTimeout: 600_000,
