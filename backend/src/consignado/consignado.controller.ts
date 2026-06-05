@@ -18,7 +18,12 @@ import {
   conciliarExtratoRelatorioDetalhe,
   conciliarTemporario,
   clonarParaRelatorioSisbrFromExtratos,
+  liquidacaoCcsExcluirRelatorioSisbr,
+  naoPossuiRecursoRelatorioSisbr,
+  liquidacaoForaDoVencimentoRelatorioSisbr,
+  recursoJudicialValorAMenorRelatorioSisbr,
   alterarOrgaoRelatorioSisbr,
+  repactuacaoRelatorioSisbr,
   desfazerOcorrenciaRelatorioSisbr,
   getOcorrenciaCloneParaSisbrContext,
   upsertConciliacaoTarifa,
@@ -45,6 +50,9 @@ import {
   listarAuditoriaSistemica,
   runImportConsignado,
   saveConsignadoAutomationConfig,
+  startTeamsDelegatedDeviceCodeLogin,
+  finishTeamsDelegatedDeviceCodeLogin,
+  disconnectTeamsDelegatedLogin,
   upsertOrgaoDePara,
   upsertExtratosConsolidacaoRecurso,
   saveOrgaoColumnsConfig,
@@ -100,6 +108,36 @@ export class ConsignadoController {
     } catch (e) {
       const message =
         e instanceof Error ? e.message : 'Falha ao salvar configuração.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('teams/delegated/start')
+  async startTeamsDelegated() {
+    try {
+      return await startTeamsDelegatedDeviceCodeLogin();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao iniciar login do Teams.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('teams/delegated/finish')
+  async finishTeamsDelegated() {
+    try {
+      return await finishTeamsDelegatedDeviceCodeLogin();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao concluir login do Teams.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('teams/delegated/disconnect')
+  async disconnectTeamsDelegated() {
+    try {
+      return await disconnectTeamsDelegatedLogin();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao desconectar login do Teams.';
       throw new InternalServerErrorException(message);
     }
   }
@@ -492,6 +530,7 @@ export class ConsignadoController {
       recursoTable?: string;
       action?: string;
       justification?: string;
+      devolucaoDate?: string | null;
     },
   ) {
     if (!body.month) {
@@ -522,6 +561,7 @@ export class ConsignadoController {
         recursoTable: body.recursoTable,
         action: body.action,
         justification: body.justification,
+        devolucaoDate: body.devolucaoDate,
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Falha ao clonar para o SISBR.';
@@ -641,12 +681,279 @@ export class ConsignadoController {
     }
   }
 
+  @Post('conciliacao/recurso-vs-relatorio/repactuacao-relatorio')
+  async repactuacaoRelatorio(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      cpf?: string;
+      nome?: string;
+      value?: string;
+      status?: string;
+      gerenteEmail?: string;
+      action?: string;
+      justification?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    if (!body.cpf || !body.cpf.trim()) {
+      throw new InternalServerErrorException('Informe o CPF.');
+    }
+    if (!body.nome || !body.nome.trim()) {
+      throw new InternalServerErrorException('Informe o nome.');
+    }
+    if (!body.value || !body.value.trim()) {
+      throw new InternalServerErrorException('Informe o valor.');
+    }
+    if (!body.justification || !body.justification.trim()) {
+      throw new InternalServerErrorException('Informe a justificativa.');
+    }
+    try {
+      return await repactuacaoRelatorioSisbr({
+        month: body.month,
+        orgao: body.orgao,
+        cpf: body.cpf,
+        nome: body.nome,
+        value: body.value,
+        status: body.status,
+        gerenteEmail: body.gerenteEmail,
+        action: body.action,
+        justification: body.justification,
+      });
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : 'Falha ao registrar repactuação no Relatório SISBR.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('conciliacao/recurso-vs-relatorio/liquidacao-ccs-excluir-relatorio')
+  async liquidacaoCcsExcluirRelatorio(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      cpf?: string;
+      nome?: string;
+      value?: string;
+      fromEmpresa?: string | null;
+      action?: string;
+      justification?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    if (!body.cpf || !body.cpf.trim()) {
+      throw new InternalServerErrorException('Informe o CPF.');
+    }
+    if (!body.nome || !body.nome.trim()) {
+      throw new InternalServerErrorException('Informe o nome.');
+    }
+    if (!body.value || !body.value.trim()) {
+      throw new InternalServerErrorException('Informe o valor.');
+    }
+    if (!body.justification || !body.justification.trim()) {
+      throw new InternalServerErrorException('Informe a justificativa.');
+    }
+    try {
+      return await liquidacaoCcsExcluirRelatorioSisbr({
+        month: body.month,
+        orgao: body.orgao,
+        cpf: body.cpf,
+        nome: body.nome,
+        value: body.value,
+        fromEmpresa: body.fromEmpresa ?? null,
+        action: body.action,
+        justification: body.justification,
+      });
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : 'Falha ao excluir do Relatório SISBR.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('conciliacao/recurso-vs-relatorio/nao-possui-recurso')
+  async naoPossuiRecursoRelatorio(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      cpf?: string;
+      nome?: string;
+      value?: string;
+      fromEmpresa?: string | null;
+      gerenteEmail?: string;
+      message?: string;
+      action?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    if (!body.cpf || !body.cpf.trim()) {
+      throw new InternalServerErrorException('Informe o CPF.');
+    }
+    if (!body.nome || !body.nome.trim()) {
+      throw new InternalServerErrorException('Informe o nome.');
+    }
+    if (!body.value || !body.value.trim()) {
+      throw new InternalServerErrorException('Informe o valor.');
+    }
+    if (!body.gerenteEmail || !body.gerenteEmail.trim()) {
+      throw new InternalServerErrorException('Informe o e-mail do gerente responsável.');
+    }
+    if (!body.message || !body.message.trim()) {
+      throw new InternalServerErrorException('Informe a mensagem.');
+    }
+    try {
+      return await naoPossuiRecursoRelatorioSisbr({
+        month: body.month,
+        orgao: body.orgao,
+        cpf: body.cpf,
+        nome: body.nome,
+        value: body.value,
+        fromEmpresa: body.fromEmpresa ?? null,
+        gerenteEmail: body.gerenteEmail,
+        message: body.message,
+        action: body.action,
+      });
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : 'Falha ao registrar Não possui Recurso.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('conciliacao/recurso-vs-relatorio/liquidacao-fora-vencimento')
+  async liquidacaoForaVencimento(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      cpf?: string;
+      nome?: string;
+      value?: string;
+      fromEmpresa?: string | null;
+      liquidationDate?: string;
+      action?: string;
+      justification?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    if (!body.cpf || !body.cpf.trim()) {
+      throw new InternalServerErrorException('Informe o CPF.');
+    }
+    if (!body.nome || !body.nome.trim()) {
+      throw new InternalServerErrorException('Informe o nome.');
+    }
+    if (!body.value || !body.value.trim()) {
+      throw new InternalServerErrorException('Informe o valor.');
+    }
+    if (!body.liquidationDate || !body.liquidationDate.trim()) {
+      throw new InternalServerErrorException('Informe a data de liquidação (dd/mm/aaaa).');
+    }
+    try {
+      return await liquidacaoForaDoVencimentoRelatorioSisbr({
+        month: body.month,
+        orgao: body.orgao,
+        cpf: body.cpf,
+        nome: body.nome,
+        value: body.value,
+        fromEmpresa: body.fromEmpresa ?? null,
+        liquidationDate: body.liquidationDate,
+        action: body.action,
+        justification: body.justification,
+      });
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : 'Falha ao registrar Liquidação Fora do Vencimento.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('conciliacao/recurso-vs-relatorio/recurso-judicial-valor-a-menor')
+  async recursoJudicialValorAMenor(
+    @Body()
+    body: {
+      month?: string;
+      orgao?: string;
+      cpf?: string;
+      nome?: string;
+      value?: string;
+      fromEmpresa?: string | null;
+      newValue?: string;
+      action?: string;
+      justification?: string;
+    },
+  ) {
+    if (!body.month) {
+      throw new InternalServerErrorException('Informe a competência no formato YYYY-MM.');
+    }
+    if (!body.orgao || !body.orgao.trim()) {
+      throw new InternalServerErrorException('Informe o órgão.');
+    }
+    if (!body.cpf || !body.cpf.trim()) {
+      throw new InternalServerErrorException('Informe o CPF.');
+    }
+    if (!body.nome || !body.nome.trim()) {
+      throw new InternalServerErrorException('Informe o nome.');
+    }
+    if (!body.value || !body.value.trim()) {
+      throw new InternalServerErrorException('Informe o valor.');
+    }
+    if (!body.newValue || !body.newValue.trim()) {
+      throw new InternalServerErrorException('Informe o novo valor.');
+    }
+    if (!body.justification || !body.justification.trim()) {
+      throw new InternalServerErrorException('Informe a justificativa.');
+    }
+    try {
+      return await recursoJudicialValorAMenorRelatorioSisbr({
+        month: body.month,
+        orgao: body.orgao,
+        cpf: body.cpf,
+        nome: body.nome,
+        value: body.value,
+        fromEmpresa: body.fromEmpresa ?? null,
+        newValue: body.newValue,
+        action: body.action,
+        justification: body.justification,
+      });
+    } catch (e) {
+      const message =
+        e instanceof Error
+          ? e.message
+          : 'Falha ao registrar Recurso Judicial - Valor a Menor.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
   @Post('conciliacao/recurso-vs-relatorio/fechar')
   async fecharConciliacao(
     @Body()
     body: {
       month?: string;
       orgao?: string;
+      vencimento?: string;
       closedBy?: string;
       contabilidadeEmail?: string;
       evidencePngBase64?: string;
@@ -662,6 +969,7 @@ export class ConsignadoController {
       return await fecharConciliacaoRecursoVsRelatorio({
         month: body.month,
         orgao: body.orgao,
+        vencimento: body.vencimento,
         closedBy: body.closedBy,
         contabilidadeEmail: body.contabilidadeEmail,
         evidencePngBase64: body.evidencePngBase64,
@@ -678,6 +986,7 @@ export class ConsignadoController {
     body: {
       month?: string;
       orgao?: string;
+      vencimento?: string;
       password?: string;
       reopenedBy?: string;
     },
@@ -695,6 +1004,7 @@ export class ConsignadoController {
       return await reabrirConciliacaoRecursoVsRelatorio({
         month: body.month,
         orgao: body.orgao,
+        vencimento: body.vencimento,
         password: body.password,
         reopenedBy: body.reopenedBy,
       });
@@ -710,6 +1020,7 @@ export class ConsignadoController {
     body: {
       month?: string;
       orgao?: string;
+      vencimento?: string;
       requestedBy?: string;
       contabilidadeEmail?: string;
       evidencePngBase64?: string;
@@ -725,6 +1036,7 @@ export class ConsignadoController {
       return await reenviarFechamentoConciliacaoParaContabilidade({
         month: body.month,
         orgao: body.orgao,
+        vencimento: body.vencimento,
         requestedBy: body.requestedBy,
         contabilidadeEmail: body.contabilidadeEmail,
         evidencePngBase64: body.evidencePngBase64,

@@ -169,6 +169,81 @@ async function getGraphToken(opts: {
   return data.access_token;
 }
 
+async function getGraphDelegatedTokenFromRefreshToken(opts: {
+  tenantId: string;
+  clientId: string;
+  clientSecret?: string;
+  refreshToken: string;
+}): Promise<string> {
+  const refreshToken = String(opts.refreshToken ?? '').trim();
+  if (!refreshToken) throw new Error('Refresh token do Teams não configurado.');
+  const clientSecret = String(opts.clientSecret ?? '').trim();
+  const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(opts.tenantId)}/oauth2/v2.0/token`;
+
+  const exchange = async (withSecret: boolean) => {
+    const params = new URLSearchParams();
+    params.set('client_id', opts.clientId);
+    if (withSecret && clientSecret) params.set('client_secret', clientSecret);
+    params.set('grant_type', 'refresh_token');
+    params.set('refresh_token', refreshToken);
+    params.set('scope', 'https://graph.microsoft.com/Chat.ReadWrite offline_access');
+
+    const res = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: params,
+    });
+    const data = (await res.json().catch(() => null)) as null | {
+      access_token?: unknown;
+      refresh_token?: unknown;
+      error_description?: unknown;
+    };
+    if (!res.ok) {
+      const msg =
+        (typeof data?.error_description === 'string' && data.error_description.trim()) ||
+        `Falha ao obter token delegado do Graph (HTTP ${res.status})`;
+      throw new Error(msg);
+    }
+    const accessToken = typeof data?.access_token === 'string' ? data.access_token.trim() : '';
+    if (!accessToken) throw new Error('Falha ao obter token delegado do Graph');
+    const nextRefresh = typeof data?.refresh_token === 'string' ? data.refresh_token.trim() : '';
+    return { accessToken, nextRefresh };
+  };
+
+  let accessToken = '';
+  let nextRefresh = '';
+  try {
+    const r = await exchange(false);
+    accessToken = r.accessToken;
+    nextRefresh = r.nextRefresh;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e ?? '');
+    if (clientSecret && msg.includes('AADSTS7000218')) {
+      const r = await exchange(true);
+      accessToken = r.accessToken;
+      nextRefresh = r.nextRefresh;
+    } else if (msg.includes('AADSTS700025')) {
+      const r = await exchange(false);
+      accessToken = r.accessToken;
+      nextRefresh = r.nextRefresh;
+    } else {
+      throw e;
+    }
+  }
+  if (nextRefresh && nextRefresh !== refreshToken) {
+    try {
+      const dbFilePath = getSqlitePath();
+      const db = await openDatabase(dbFilePath);
+      ensureSchema(db);
+      setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN, nextRefresh);
+      persistDatabase(db, dbFilePath);
+    } catch {
+      void 0;
+    }
+  }
+  return accessToken;
+}
+
 async function graphGet<T>(token: string, url: string): Promise<T> {
   const res = await fetch(url, {
     headers: { authorization: `Bearer ${token}` },
@@ -200,64 +275,287 @@ async function resolveDriveItemFromShareUrl(
   itemName: string;
   specificFile: null | { id: string; name: string };
 }> {
-  const shareId = toShareId(folderUrl);
-  const data = await graphGet<{
+  const isGraphShareResolutionError = (message: string): boolean => {
+    const t = String(message ?? '');
+    if (!t) return false;
+    const parsed = parseGraphErrorText(t);
+    const code = (parsed.code ?? '').toLowerCase();
+    const inner = (parsed.innerCode ?? '').toLowerCase();
+    return (
+      code === 'accessdenied' ||
+      inner === 'sharesaccessdenied' ||
+      /sharesAccessDenied/i.test(t) ||
+      /0x80070002/i.test(t) ||
+      /cannot find the file specified/i.test(t)
+    );
+  };
+
+  const isGraphPathNotFound = (message: string): boolean => {
+    const t = String(message ?? '');
+    if (!t) return false;
+    const parsed = parseGraphErrorText(t);
+    const code = (parsed.code ?? '').toLowerCase();
+    const inner = (parsed.innerCode ?? '').toLowerCase();
+    return (
+      code === 'itemnotfound' ||
+      inner === 'itemnotfound' ||
+      /itemNotFound/i.test(t) ||
+      /0x80070002/i.test(t) ||
+      /cannot find the file specified/i.test(t) ||
+      /The resource could not be found/i.test(t)
+    );
+  };
+
+  const normalizeSegmentForPathMatch = (input: string): string => {
+    return normalizeNameForMatch(input).replace(/\s*([._-])\s*/g, '$1');
+  };
+
+  const resolveFromDriveItem = async (driveId: string, data: {
     id: string;
     name?: string;
     folder?: unknown;
     file?: unknown;
-    parentReference?: { driveId?: string };
-  }>(
-    token,
-    `https://graph.microsoft.com/v1.0/shares/${encodeURIComponent(
-      shareId,
-    )}/driveItem?$select=id,name,folder,file,parentReference`,
-  );
+    parentReference?: { driveId?: string; id?: string };
+  }) => {
+    if (!driveId) throw new Error('Não foi possível resolver o driveId do SharePoint');
+    if (!data.id) throw new Error('Não foi possível resolver o itemId do SharePoint');
+    const name = typeof data.name === 'string' ? data.name.trim() : '';
+    if (data.folder) {
+      return { driveId, itemId: data.id, itemName: name, specificFile: null };
+    }
 
-  const driveId = data.parentReference?.driveId;
-  if (!driveId)
-    throw new Error('Não foi possível resolver o driveId do SharePoint');
-  if (!data.id)
-    throw new Error('Não foi possível resolver o itemId do SharePoint');
-  const name = typeof data.name === 'string' ? data.name.trim() : '';
-  if (data.folder) {
-    return { driveId, itemId: data.id, itemName: name, specificFile: null };
-  }
+    if (data.file) {
+      const fileId = data.id;
+      const fileName = name;
+      const parentId = data.parentReference?.id
+        ? String(data.parentReference.id).trim()
+        : '';
+      const resolvedParentId = parentId
+        ? parentId
+        : (await (async () => {
+            const item = await graphGet<{ parentReference?: { id?: string } }>(
+              token,
+              `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(
+                driveId,
+              )}/items/${encodeURIComponent(fileId)}?$select=parentReference`,
+            );
+            return String(item.parentReference?.id ?? '').trim();
+          })());
+      if (!resolvedParentId) {
+        throw new Error('Não foi possível resolver a pasta do arquivo no SharePoint');
+      }
+      const parent = await graphGet<{ name?: string; folder?: unknown }>(
+        token,
+        `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(
+          driveId,
+        )}/items/${encodeURIComponent(resolvedParentId)}?$select=name,folder`,
+      );
+      if (!parent.folder) {
+        throw new Error('A URL informada não aponta para uma pasta');
+      }
+      const parentName = typeof parent.name === 'string' ? parent.name.trim() : '';
+      return {
+        driveId,
+        itemId: resolvedParentId,
+        itemName: parentName,
+        specificFile: fileId && fileName ? { id: fileId, name: fileName } : null,
+      };
+    }
 
-  if (data.file) {
-    const fileId = data.id;
-    const fileName = name;
-    const item = await graphGet<{
-      parentReference?: { id?: string };
+    throw new Error('A URL informada não aponta para uma pasta');
+  };
+
+  const resolveFromSitePathUrl = async () => {
+    let u: URL;
+    try {
+      u = new URL(folderUrl);
+    } catch {
+      throw new Error('URL do SharePoint inválida.');
+    }
+
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 3 || parts[0].toLowerCase() !== 'sites') {
+      throw new Error(
+        'Não foi possível resolver a URL. Use "Copiar link" do SharePoint (arquivo ou pasta).',
+      );
+    }
+
+    const siteName = decodeURIComponent(parts[1] ?? '').trim();
+    const libraryName = decodeURIComponent(parts[2] ?? '').trim();
+    const restParts = parts.slice(3).map((p) => decodeURIComponent(p));
+    const restPath = restParts.join('/');
+
+    const site = await graphGet<{ id?: string }>(
+      token,
+      `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(
+        u.hostname,
+      )}:/sites/${encodeURIComponent(siteName)}?$select=id`,
+    );
+    const siteId = typeof site.id === 'string' ? site.id.trim() : '';
+    if (!siteId) throw new Error('Não foi possível resolver o siteId do SharePoint.');
+
+    const drives = await graphGet<{ value?: Array<{ id?: string; name?: string; webUrl?: string }> }>(
+      token,
+      `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(siteId)}/drives?$select=id,name,webUrl`,
+    );
+    const driveList = Array.isArray(drives.value) ? drives.value : [];
+    const libraryKey = libraryName.toLowerCase();
+    const pickedDrive = driveList.find((d) => String(d?.name ?? '').trim().toLowerCase() === libraryKey)
+      ?? driveList.find((d) => {
+        const web = String(d?.webUrl ?? '').toLowerCase();
+        return Boolean(web) && web.includes(`/${encodeURIComponent(libraryName).toLowerCase()}`.replace(/%20/g, ' '));
+      })
+      ?? null;
+
+    const resolveByTraversal = async (driveId: string, pathToResolve: string) => {
+      const segs = pathToResolve
+        .split('/')
+        .map((s) => String(s ?? '').trim())
+        .filter(Boolean);
+
+      const root = await graphGet<{ id?: string; name?: string; folder?: unknown }>(
+        token,
+        `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(
+          driveId,
+        )}/root?$select=id,name,folder`,
+      );
+      const rootId = typeof root.id === 'string' ? root.id.trim() : '';
+      if (!rootId) throw new Error('Não foi possível resolver a raiz do drive do SharePoint.');
+
+      let currentId = rootId;
+      for (let i = 0; i < segs.length; i += 1) {
+        const seg = segs[i]!;
+        const wanted = normalizeSegmentForPathMatch(seg);
+        const children = await listDriveItemChildren(token, driveId, currentId);
+        const exact = children.find(
+          (c) => normalizeSegmentForPathMatch(String(c?.name ?? '')) === wanted,
+        );
+        const fuzzyMatches = exact
+          ? [exact]
+          : children.filter((c) => {
+              const k = normalizeSegmentForPathMatch(String(c?.name ?? ''));
+              if (!k) return false;
+              return k.includes(wanted) || wanted.includes(k);
+            });
+        const picked = exact ?? (fuzzyMatches.length === 1 ? fuzzyMatches[0]! : null);
+        if (!picked) {
+          const available = children
+            .filter((c) => Boolean(c.folder))
+            .slice(0, 40)
+            .map((c) => c.name)
+            .join(', ');
+          throw new Error(
+            `Não encontrei a pasta/arquivo "${seg}" no SharePoint. Pastas disponíveis: ${available || '-'}`,
+          );
+        }
+
+        const isLast = i === segs.length - 1;
+        if (isLast) {
+          return {
+            id: picked.id,
+            name: picked.name,
+            folder: picked.folder,
+            file: picked.file,
+            parentReference: { driveId, id: currentId },
+          };
+        }
+
+        if (!picked.folder) {
+          throw new Error(`O caminho do SharePoint aponta para um arquivo antes do final: ${picked.name}`);
+        }
+        currentId = picked.id;
+      }
+
+      throw new Error('Falha ao resolver caminho do SharePoint.');
+    };
+
+    const resolvePath = async (driveId: string, pathToResolve: string) => {
+      const encoded = pathToResolve
+        .split('/')
+        .map((seg) => encodeURIComponent(seg))
+        .join('/');
+      try {
+        return await graphGet<{
+          id: string;
+          name?: string;
+          folder?: unknown;
+          file?: unknown;
+          parentReference?: { driveId?: string; id?: string };
+        }>(
+          token,
+          `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(
+            driveId,
+          )}/root:/${encoded}?$select=id,name,folder,file,parentReference`,
+        );
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!isGraphPathNotFound(msg)) throw e;
+        return await resolveByTraversal(driveId, pathToResolve);
+      }
+    };
+
+    const driveId = typeof pickedDrive?.id === 'string' ? pickedDrive.id.trim() : '';
+    if (!driveId) {
+      const defaultDrive = await graphGet<{ id?: string }>(
+        token,
+        `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(siteId)}/drive?$select=id`,
+      );
+      const defId = typeof defaultDrive.id === 'string' ? defaultDrive.id.trim() : '';
+      if (!defId) throw new Error('Não foi possível resolver o driveId do SharePoint.');
+      const tryPaths = [restPath, [libraryName, restPath].filter(Boolean).join('/')].filter(Boolean);
+      let lastErr: unknown = null;
+      for (const p of tryPaths) {
+        try {
+          const data = await resolvePath(defId, p);
+          return await resolveFromDriveItem(defId, data);
+        } catch (e: unknown) {
+          lastErr = e;
+          continue;
+        }
+      }
+      throw lastErr instanceof Error ? lastErr : new Error('Falha ao resolver pasta do SharePoint.');
+    }
+
+    if (!restPath) {
+      const root = await graphGet<{ id?: string; name?: string; folder?: unknown }>(
+        token,
+        `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(
+          driveId,
+        )}/root?$select=id,name,folder`,
+      );
+      if (!root.folder || !root.id) {
+        throw new Error('A URL informada não aponta para uma pasta');
+      }
+      const rootName = typeof root.name === 'string' ? root.name.trim() : '';
+      return { driveId, itemId: String(root.id), itemName: rootName, specificFile: null };
+    }
+
+    const data = await resolvePath(driveId, restPath);
+    return await resolveFromDriveItem(driveId, data);
+  };
+
+  try {
+    const shareId = toShareId(folderUrl);
+    const data = await graphGet<{
+      id: string;
+      name?: string;
+      folder?: unknown;
+      file?: unknown;
+      parentReference?: { driveId?: string; id?: string };
     }>(
       token,
-      `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(
-        driveId,
-      )}/items/${encodeURIComponent(fileId)}?$select=parentReference`,
+      `https://graph.microsoft.com/v1.0/shares/${encodeURIComponent(
+        shareId,
+      )}/driveItem?$select=id,name,folder,file,parentReference`,
     );
-    const parentId = item.parentReference?.id;
-    if (!parentId) {
-      throw new Error('Não foi possível resolver a pasta do arquivo no SharePoint');
-    }
-    const parent = await graphGet<{ name?: string; folder?: unknown }>(
-      token,
-      `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(
-        driveId,
-      )}/items/${encodeURIComponent(parentId)}?$select=name,folder`,
-    );
-    if (!parent.folder) {
-      throw new Error('A URL informada não aponta para uma pasta');
-    }
-    const parentName = typeof parent.name === 'string' ? parent.name.trim() : '';
-    return {
-      driveId,
-      itemId: parentId,
-      itemName: parentName,
-      specificFile: fileId && fileName ? { id: fileId, name: fileName } : null,
-    };
-  }
 
-  throw new Error('A URL informada não aponta para uma pasta');
+    const driveId = data.parentReference?.driveId;
+    return await resolveFromDriveItem(String(driveId ?? '').trim(), data);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (!isGraphShareResolutionError(message)) throw e;
+    return await resolveFromSitePathUrl();
+  }
 }
 
 async function listDriveItemChildren(
@@ -283,6 +581,59 @@ async function listDriveItemChildren(
   return data.value;
 }
 
+function normalizeNameForMatch(input: string): string {
+  return String(input ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function resolveRecursoMpgoFolderId(opts: {
+  token: string;
+  driveId: string;
+  baseFolderId: string;
+}): Promise<string> {
+  const baseChildren = await listDriveItemChildren(opts.token, opts.driveId, opts.baseFolderId);
+  const years = baseChildren
+    .filter((c) => Boolean(c.folder) && /^\d{4}$/.test(String(c.name ?? '').trim()))
+    .sort((a, b) => (b.lastModifiedDateTime ?? '').localeCompare(a.lastModifiedDateTime ?? ''));
+
+  const isRelatorioOrgaoFolder = (name: string) => {
+    const k = normalizeNameForMatch(name);
+    return k === 'relatorio orgao';
+  };
+
+  const isMpgoFolder = (name: string) => {
+    const k = normalizeNameForMatch(name);
+    return k === 'mpgo' || k.endsWith(' mpgo') || k.includes('mpgo');
+  };
+
+  for (const y of years) {
+    const yearChildren = await listDriveItemChildren(opts.token, opts.driveId, y.id);
+    const months = yearChildren
+      .filter((c) => Boolean(c.folder))
+      .sort((a, b) => (b.lastModifiedDateTime ?? '').localeCompare(a.lastModifiedDateTime ?? ''));
+
+    for (const m of months) {
+      const monthChildren = await listDriveItemChildren(opts.token, opts.driveId, m.id);
+      const relFolder = monthChildren.find((c) => c.folder && isRelatorioOrgaoFolder(c.name));
+      if (!relFolder) continue;
+
+      const relChildren = await listDriveItemChildren(opts.token, opts.driveId, relFolder.id);
+      const mpgo = relChildren
+        .filter((c) => c.folder && isMpgoFolder(c.name))
+        .sort((a, b) => (b.lastModifiedDateTime ?? '').localeCompare(a.lastModifiedDateTime ?? ''))[0];
+      if (mpgo) return mpgo.id;
+    }
+  }
+
+  throw new Error(
+    'Não encontrei a pasta "Relatório Orgão/MPGO" dentro do caminho informado (anos/meses).',
+  );
+}
+
 function findFolderChildId(
   children: Array<{ name: string; id: string; folder?: unknown }>,
   variants: string[],
@@ -292,6 +643,27 @@ function findFolderChildId(
     (c) => c.folder && normalized.includes(c.name.trim().toLowerCase()),
   );
   return found?.id ?? null;
+}
+
+function findFolderChild(
+  children: Array<{
+    name: string;
+    id: string;
+    folder?: unknown;
+    lastModifiedDateTime?: string;
+  }>,
+  variants: string[],
+): null | { name: string; id: string; lastModifiedDateTime: string } {
+  const normalized = variants.map((v) => v.trim().toLowerCase());
+  const found = children.find(
+    (c) => c.folder && normalized.includes(c.name.trim().toLowerCase()),
+  );
+  if (!found) return null;
+  return {
+    name: found.name,
+    id: found.id,
+    lastModifiedDateTime: String(found.lastModifiedDateTime ?? ''),
+  };
 }
 
 async function resolveContainerWithSubfolders(opts: {
@@ -337,10 +709,16 @@ async function resolveContainerWithSubfolders(opts: {
       ),
     );
 
-  const queue: Array<{ id: string; path: string; depth: number }> = folders.map(
-    (f) => ({ id: f.id, path: f.name, depth: 1 }),
+  const queue: Array<{ id: string; path: string; depth: number; lastModifiedDateTime: string }> = folders.map(
+    (f) => ({ id: f.id, path: f.name, depth: 1, lastModifiedDateTime: String(f.lastModifiedDateTime ?? '') }),
   );
   const visited = new Set<string>();
+  const candidates: Array<{
+    containerName: string;
+    extratoFolderId: string;
+    relatorioFolderId: string;
+    lastModifiedDateTime: string;
+  }> = [];
 
   while (queue.length > 0) {
     const current = queue.shift();
@@ -354,14 +732,19 @@ async function resolveContainerWithSubfolders(opts: {
       current.id,
     );
 
-    const extrato = findFolderChildId(children, opts.extratoCandidates);
-    const relatorio = findFolderChildId(children, opts.relatorioCandidates);
+    const extrato = findFolderChild(children, opts.extratoCandidates);
+    const relatorio = findFolderChild(children, opts.relatorioCandidates);
     if (extrato && relatorio) {
-      return {
+      const lastModifiedDateTime = [current.lastModifiedDateTime, extrato.lastModifiedDateTime, relatorio.lastModifiedDateTime]
+        .filter(Boolean)
+        .sort()
+        .pop() ?? '';
+      candidates.push({
         containerName: current.path,
-        extratoFolderId: extrato,
-        relatorioFolderId: relatorio,
-      };
+        extratoFolderId: extrato.id,
+        relatorioFolderId: relatorio.id,
+        lastModifiedDateTime,
+      });
     }
 
     if (current.depth >= maxDepth) continue;
@@ -378,8 +761,20 @@ async function resolveContainerWithSubfolders(opts: {
         id: cf.id,
         path: `${current.path}/${cf.name}`,
         depth: current.depth + 1,
+        lastModifiedDateTime: String(cf.lastModifiedDateTime ?? ''),
       });
     }
+  }
+
+  if (candidates.length > 0) {
+    const picked = candidates.sort((a, b) =>
+      (b.lastModifiedDateTime ?? '').localeCompare(a.lastModifiedDateTime ?? ''),
+    )[0]!;
+    return {
+      containerName: picked.containerName,
+      extratoFolderId: picked.extratoFolderId,
+      relatorioFolderId: picked.relatorioFolderId,
+    };
   }
 
   const available = folders.map((f) => f.name).join(', ');
@@ -416,10 +811,11 @@ async function resolveFolderIdRecursive(opts: {
       (b.lastModifiedDateTime ?? '').localeCompare(a.lastModifiedDateTime ?? ''),
     );
 
-  const queue: Array<{ id: string; path: string; depth: number }> = folders.map(
-    (f) => ({ id: f.id, path: f.name, depth: 1 }),
+  const queue: Array<{ id: string; path: string; depth: number; lastModifiedDateTime: string }> = folders.map(
+    (f) => ({ id: f.id, path: f.name, depth: 1, lastModifiedDateTime: String(f.lastModifiedDateTime ?? '') }),
   );
   const visited = new Set<string>();
+  const candidates: Array<{ containerName: string; folderId: string; lastModifiedDateTime: string }> = [];
 
   while (queue.length > 0) {
     const current = queue.shift();
@@ -428,9 +824,13 @@ async function resolveFolderIdRecursive(opts: {
     visited.add(current.id);
 
     const children = await listDriveItemChildren(opts.token, opts.driveId, current.id);
-    const found = findFolderChildId(children, opts.wantedCandidates);
+    const found = findFolderChild(children, opts.wantedCandidates);
     if (found) {
-      return { containerName: current.path, folderId: found };
+      candidates.push({
+        containerName: current.path,
+        folderId: found.id,
+        lastModifiedDateTime: found.lastModifiedDateTime || current.lastModifiedDateTime,
+      });
     }
 
     if (current.depth >= maxDepth) continue;
@@ -444,8 +844,16 @@ async function resolveFolderIdRecursive(opts: {
         id: cf.id,
         path: `${current.path}/${cf.name}`,
         depth: current.depth + 1,
+        lastModifiedDateTime: String(cf.lastModifiedDateTime ?? ''),
       });
     }
+  }
+
+  if (candidates.length > 0) {
+    const picked = candidates.sort((a, b) =>
+      (b.lastModifiedDateTime ?? '').localeCompare(a.lastModifiedDateTime ?? ''),
+    )[0]!;
+    return { containerName: picked.containerName, folderId: picked.folderId };
   }
 
   const available = folders.map((f) => f.name).join(', ');
@@ -1104,6 +1512,10 @@ async function readRelatorioPdfTable(
   const pages = Array.isArray(parsed.pages) && parsed.pages.length > 0
     ? parsed.pages
     : [{ num: 1, text: String(parsed.text ?? ''), tables: [] as string[][][] }];
+
+  // #region debug-point A:relatorio-pdf-extract
+  ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'sisbr-pdf-import'; try { const e = fs.readFileSync('.dbg/sisbr-pdf-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } const joined = pages.map((p) => String((p as any)?.text ?? '')).join('\n'); const tableCount = pages.reduce((acc, p) => acc + (Array.isArray((p as any)?.tables) ? (p as any).tables.length : 0), 0); const tableRows = pages.reduce((acc, p) => { const t = Array.isArray((p as any)?.tables) ? (p as any).tables : []; const first = Array.isArray(t[0]) ? t[0] : []; return acc + (Array.isArray(first) ? first.length : 0); }, 0); fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'A', location: 'import-consignado.ts:readRelatorioPdfTable', msg: '[DEBUG] relatorio_pdf_extracted', data: { fileName, bytes: file.length, pages: pages.length, textChars: joined.length, tables: tableCount, tableRows, head: joined.replace(/\s+/g, ' ').slice(0, 420) }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+  // #endregion
 
   const parseRelatorioLiquidacaoRows = (rawPages: string[]) => {
     const content = rawPages.map((t) => String(t ?? '')).join('\n').replace(/\r/g, '\n');
@@ -1917,6 +2329,9 @@ async function readRelatorioPdfTable(
     }
 
     const joined = pages.map((p) => String(p.text ?? '')).join('\n');
+      // #region debug-point B:relatorio-pdf-empty
+      ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'sisbr-pdf-import'; try { const e = fs.readFileSync('.dbg/sisbr-pdf-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } const normalizedLines = joined.replace(/\r/g, '\n').split('\n').map((l) => l.trim().replace(/\s+/g, ' ')).filter(Boolean); const hasTotals = /total\s*(cliente|empresa|cooperativa|central|geral)\s*:/i.test(joined) || /\bEMP-\d+\b/i.test(joined) || /\btotal\s+receber\b/i.test(joined); const cpfMatches = joined.match(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}/g) ?? []; const liquidacaoMarker = normalizedLines.some((l) => /movimento\s+de\s+liquida[cç][õo]es\s+em\s+folha/i.test(l)); const empresaLines = normalizedLines.filter((l) => /\bEMPRESA\b/i.test(l)).slice(0, 12); const dashUnique = Array.from(new Set(normalizedLines.filter((l) => /^\d{1,5}\s*-\s*/.test(l)).map((l) => l.slice(0, 220).trim()))).slice(0, 20); fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'B', location: 'import-consignado.ts:readRelatorioPdfTable', msg: '[DEBUG] relatorio_pdf_no_rows', data: { fileName, lines: normalizedLines.length, head: normalizedLines.slice(0, 40).join(' || ').slice(0, 1200), hasTotals, cpfMatches: cpfMatches.length, liquidacaoMarker, empresaHits: empresaLines, codigoUnique: dashUnique }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+      // #endregion
     if (process.env.RELATORIO_PDF_DEBUG === '1') {
       const normalizedLines = joined
         .replace(/\r/g, '\n')
@@ -2708,6 +3123,8 @@ function ensureSchema(db: Database) {
       value TEXT NOT NULL,
       action TEXT NOT NULL,
       justification TEXT NOT NULL,
+      status TEXT,
+      gerente_email TEXT,
       inserted_rows INTEGER NOT NULL DEFAULT 0,
       skipped_rows INTEGER NOT NULL DEFAULT 0,
       error TEXT,
@@ -2734,6 +3151,22 @@ function ensureSchema(db: Database) {
     );
   `);
   db.run(`
+    CREATE TABLE IF NOT EXISTS conciliacao_fechamentos_vencimento (
+      month_key TEXT NOT NULL,
+      orgao_extratos_key TEXT NOT NULL,
+      orgao_extratos_raw TEXT NOT NULL,
+      vencimento TEXT NOT NULL,
+      closed_at TEXT,
+      closed_by TEXT,
+      reopened_at TEXT,
+      reopened_by TEXT,
+      contabilidade_email TEXT,
+      sent_to_contabilidade_at TEXT,
+      sent_to_contabilidade_by TEXT,
+      PRIMARY KEY (month_key, orgao_extratos_key, vencimento)
+    );
+  `);
+  db.run(`
     CREATE TABLE IF NOT EXISTS contabilidade_relatorios_outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at TEXT NOT NULL,
@@ -2742,12 +3175,16 @@ function ensureSchema(db: Database) {
       month_key TEXT NOT NULL,
       orgao_extratos_key TEXT NOT NULL,
       orgao_extratos_raw TEXT NOT NULL,
+      vencimento TEXT,
       payload_json TEXT NOT NULL,
       pdf_file_name TEXT,
       pdf_base64 TEXT
     );
   `);
   const outboxCols = getTableColumns(db, 'contabilidade_relatorios_outbox');
+  if (!outboxCols.includes('vencimento')) {
+    db.run(`ALTER TABLE contabilidade_relatorios_outbox ADD COLUMN vencimento TEXT;`);
+  }
   if (!outboxCols.includes('pdf_file_name')) {
     db.run(`ALTER TABLE contabilidade_relatorios_outbox ADD COLUMN pdf_file_name TEXT;`);
   }
@@ -2755,6 +3192,12 @@ function ensureSchema(db: Database) {
     db.run(`ALTER TABLE contabilidade_relatorios_outbox ADD COLUMN pdf_base64 TEXT;`);
   }
   const occCols = getTableColumns(db, 'conciliacao_pendencia_actions');
+  if (!occCols.includes('status')) {
+    db.run(`ALTER TABLE conciliacao_pendencia_actions ADD COLUMN status TEXT;`);
+  }
+  if (!occCols.includes('gerente_email')) {
+    db.run(`ALTER TABLE conciliacao_pendencia_actions ADD COLUMN gerente_email TEXT;`);
+  }
   if (!occCols.includes('previous_value')) {
     db.run(`ALTER TABLE conciliacao_pendencia_actions ADD COLUMN previous_value TEXT;`);
   }
@@ -2968,7 +3411,43 @@ type ConciliacaoFechamentoInfo = {
   contabilidadeEmail: string | null;
   sentToContabilidadeAt: string | null;
   sentToContabilidadeBy: string | null;
+  closedVencimentos: string[];
 };
+
+function normalizeVencimentoLabel(value: unknown): string {
+  return String(value ?? '').trim() || '-';
+}
+
+function getConciliacaoClosedVencimentos(
+  db: Database,
+  opts: { monthKey: string; orgaoRaw: string },
+): string[] {
+  if (!tableExists(db, 'conciliacao_fechamentos_vencimento')) return [];
+  const orgaoKey = normalizeExtratosOrgaoForMatch(opts.orgaoRaw);
+  if (!orgaoKey) return [];
+  const stmt = db.prepare(
+    `SELECT vencimento, closed_at, reopened_at
+     FROM conciliacao_fechamentos_vencimento
+     WHERE month_key=? AND orgao_extratos_key=?;`,
+  );
+  try {
+    stmt.bind([opts.monthKey, orgaoKey] as unknown as any[]);
+    const out: string[] = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as { vencimento?: unknown; closed_at?: unknown; reopened_at?: unknown };
+      const vencimento = typeof row.vencimento === 'string' ? row.vencimento.trim() : '';
+      if (!vencimento) continue;
+      const closedAt = typeof row.closed_at === 'string' ? row.closed_at.trim() : '';
+      const reopenedAt = typeof row.reopened_at === 'string' ? row.reopened_at.trim() : '';
+      const isClosed = Boolean(closedAt) && (!reopenedAt || reopenedAt < closedAt);
+      if (!isClosed) continue;
+      out.push(vencimento);
+    }
+    return out;
+  } finally {
+    stmt.free();
+  }
+}
 
 function getConciliacaoFechamentoInfo(
   db: Database,
@@ -2984,6 +3463,7 @@ function getConciliacaoFechamentoInfo(
       contabilidadeEmail: null,
       sentToContabilidadeAt: null,
       sentToContabilidadeBy: null,
+      closedVencimentos: getConciliacaoClosedVencimentos(db, opts),
     };
   }
   const orgaoKey = normalizeExtratosOrgaoForMatch(opts.orgaoRaw);
@@ -2997,6 +3477,7 @@ function getConciliacaoFechamentoInfo(
       contabilidadeEmail: null,
       sentToContabilidadeAt: null,
       sentToContabilidadeBy: null,
+      closedVencimentos: getConciliacaoClosedVencimentos(db, opts),
     };
   }
   const stmt = db.prepare(
@@ -3017,6 +3498,7 @@ function getConciliacaoFechamentoInfo(
         contabilidadeEmail: null,
         sentToContabilidadeAt: null,
         sentToContabilidadeBy: null,
+        closedVencimentos: getConciliacaoClosedVencimentos(db, opts),
       };
     }
     const row = stmt.getAsObject() as Record<string, unknown>;
@@ -3040,6 +3522,7 @@ function getConciliacaoFechamentoInfo(
       contabilidadeEmail: contabilidadeEmail || null,
       sentToContabilidadeAt: sentToContabilidadeAt || null,
       sentToContabilidadeBy: sentToContabilidadeBy || null,
+      closedVencimentos: getConciliacaoClosedVencimentos(db, opts),
     };
   } finally {
     stmt.free();
@@ -3273,28 +3756,43 @@ function upsertLearningProfile(
   }
 }
 
+function learningProfileExists(db: Database, id: string): boolean {
+  if (!tableExists(db, 'import_learning_profiles')) return false;
+  const stmt = db.prepare(`SELECT 1 as ok FROM import_learning_profiles WHERE id=? LIMIT 1;`);
+  try {
+    stmt.bind([id]);
+    return Boolean(stmt.step());
+  } finally {
+    stmt.free();
+  }
+}
+
 function ensureDefaultLearningProfiles(db: Database) {
   if (!tableExists(db, 'import_learning_profiles')) return;
-  upsertLearningProfile(db, {
-    id: 'recurso_alego',
-    kind: 'recurso_alego',
-    matchUrlContains: normalizeUrl(
-      '/99-Automações_TI/9.Recuperação de Crédito/2026/Abril/Relatório Orgão/',
-    ),
-    fileNameRegex: '^ALEGO\\s*-\\s*(?:\\d{6}|\\d{2}\\D{0,3}\\d{4})(?:\\s*\\(\\d+\\))?\\.(xlsx|xlsm|xls)$',
-    targetTable: 'Recurso ALEGO',
-    options: { mode: 'append' },
-  });
-  upsertLearningProfile(db, {
-    id: 'recurso_mpgo',
-    kind: 'recurso_mpgo',
-    matchUrlContains: normalizeUrl(
-      '/99-Automações_TI/9.Recuperação de Crédito/2026/Abril/Relatório Orgao/GOIAS MPGO',
-    ),
-    fileNameRegex: '^MPGO\\s*-\\s*.*\\.(pdf)$',
-    targetTable: 'Recurso MPGO',
-    options: { mode: 'replace' },
-  });
+  if (!learningProfileExists(db, 'recurso_alego')) {
+    upsertLearningProfile(db, {
+      id: 'recurso_alego',
+      kind: 'recurso_alego',
+      matchUrlContains: normalizeUrl(
+        '/99-Automações_TI/9.Recuperação de Crédito/2026/Abril/Relatório Orgão/',
+      ),
+      fileNameRegex: '^ALEGO\\s*-\\s*(?:\\d{6}|\\d{2}\\D{0,3}\\d{4})(?:\\s*\\(\\d+\\))?\\.(xlsx|xlsm|xls)$',
+      targetTable: 'Recurso ALEGO',
+      options: { mode: 'append' },
+    });
+  }
+  if (!learningProfileExists(db, 'recurso_mpgo')) {
+    upsertLearningProfile(db, {
+      id: 'recurso_mpgo',
+      kind: 'recurso_mpgo',
+      matchUrlContains: normalizeUrl(
+        '/99-Automações_TI/9.Recuperação de Crédito',
+      ),
+      fileNameRegex: '.*MPGO.*\\.(pdf)$',
+      targetTable: 'Recurso MPGO',
+      options: { mode: 'replace' },
+    });
+  }
 }
 
 function getConsignadoAppConfigValue(db: Database, key: string): string | null {
@@ -3673,6 +4171,28 @@ function insertExtratosRows(opts: {
   const colsSql = opts.fileColumns.map(escapeSqlIdentifier).join(', ');
   const placeholders = opts.fileColumns.map(() => '?').join(', ');
   const importedAt = new Date().toISOString();
+  const hasCopetencia = opts.fileColumns.includes('Copetencia');
+  const dataCol =
+    opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'DATA') ??
+    opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'DT') ??
+    null;
+
+  const copetenciaFromData = (raw: unknown): string => {
+    const t = String(raw ?? '').trim();
+    if (!t) return '';
+    const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (!m) return '';
+    const month = Number(m[2]);
+    const yyyyRaw = String(m[3]);
+    const yyyy = yyyyRaw.length === 2 ? `20${yyyyRaw}` : yyyyRaw;
+    if (!/^\d{4}$/.test(yyyy)) return '';
+    const year = Number(yyyy);
+    if (!Number.isFinite(month) || month < 1 || month > 12) return '';
+    if (!Number.isFinite(year) || year < 2000 || year > 2100) return '';
+    const nextMonth = month === 12 ? 1 : month + 1;
+    const nextYear = month === 12 ? year + 1 : year;
+    return `${String(nextMonth).padStart(2, '0')}/${String(nextYear)}`;
+  };
   const hashStmt = opts.db.prepare(
     `INSERT OR IGNORE INTO imported_row_hashes (kind, row_hash, imported_at) VALUES (?, ?, ?);`,
   );
@@ -3683,14 +4203,22 @@ function insertExtratosRows(opts: {
   let skippedRows = 0;
   try {
     for (const row of opts.rows) {
-      const rowHash = hashRow('extratos', opts.fileColumns, row);
+      const normalizedRow =
+        hasCopetencia && dataCol
+          ? (() => {
+              const derived = copetenciaFromData((row as any)?.[dataCol]);
+              if (!derived) return row;
+              return { ...row, Copetencia: derived };
+            })()
+          : row;
+      const rowHash = hashRow('extratos', opts.fileColumns, normalizedRow);
       hashStmt.run(['extratos', rowHash, importedAt]);
       if (opts.db.getRowsModified() === 0) {
         skippedRows += 1;
         continue;
       }
       const values = opts.fileColumns.map((col) =>
-        col in row ? row[col] : null,
+        col in normalizedRow ? (normalizedRow as any)[col] : null,
       );
       stmt.run(values as unknown as any[]);
       insertedRows += 1;
@@ -3736,24 +4264,85 @@ function insertRelatorioConsignadoRows(opts: {
   const colsSql = opts.fileColumns.map(escapeSqlIdentifier).join(', ');
   const placeholders = opts.fileColumns.map(() => '?').join(', ');
   const importedAt = new Date().toISOString();
+  const hasCopetencia = opts.fileColumns.includes('Copetencia');
+  const hasVencimento = opts.fileColumns.includes('Vencimento');
+  const hasEmpresa = opts.fileColumns.includes('EMPRESA');
+  const hasCpf = opts.fileColumns.includes('CPF');
+  const hasValorParcela = opts.fileColumns.includes('Valor Parcela');
+
+  const copetenciaFromVencimento = (raw: unknown): string => {
+    const t = String(raw ?? '').trim();
+    if (!t) return '';
+    const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (!m) return '';
+    const mm = String(Number(m[2])).padStart(2, '0');
+    const yyyyRaw = String(m[3]);
+    const yyyy = yyyyRaw.length === 2 ? `20${yyyyRaw}` : yyyyRaw;
+    if (!/^\d{4}$/.test(yyyy)) return '';
+    return `${mm}/${yyyy}`;
+  };
+
   const hashStmt = opts.db.prepare(
     `INSERT OR IGNORE INTO imported_row_hashes (kind, row_hash, imported_at) VALUES (?, ?, ?);`,
   );
   const stmt = opts.db.prepare(
     `INSERT INTO relatorio_consignado (${colsSql}) VALUES (${placeholders});`,
   );
+  const existsStmt =
+    hasCpf && hasValorParcela && hasCopetencia && hasEmpresa && hasVencimento
+      ? opts.db.prepare(
+          `SELECT COUNT(1) as c FROM relatorio_consignado
+           WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Copetencia')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('EMPRESA')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Vencimento')}, '')) = ?
+           LIMIT 1;`,
+        )
+      : null;
   let insertedRows = 0;
   let skippedRows = 0;
   try {
     for (const row of opts.rows) {
-      const rowHash = hashRow('relatorio_consignado', opts.fileColumns, row);
+      const normalizedRow =
+        hasCopetencia && hasVencimento
+          ? (() => {
+              const derived = copetenciaFromVencimento((row as any)?.Vencimento);
+              if (!derived) return row;
+              return { ...row, Copetencia: derived };
+            })()
+          : row;
+
+      const rowHash = hashRow('relatorio_consignado', opts.fileColumns, normalizedRow);
       hashStmt.run(['relatorio_consignado', rowHash, importedAt]);
       if (opts.db.getRowsModified() === 0) {
         skippedRows += 1;
         continue;
       }
+      if (existsStmt) {
+        const cpf = String((normalizedRow as any)?.CPF ?? '').trim();
+        const valorParcela = String((normalizedRow as any)?.['Valor Parcela'] ?? '').trim();
+        const copetencia = String((normalizedRow as any)?.Copetencia ?? '').trim();
+        const empresa = String((normalizedRow as any)?.EMPRESA ?? '').trim();
+        const vencimento = String((normalizedRow as any)?.Vencimento ?? '').trim();
+        if (cpf && valorParcela && copetencia && empresa && vencimento) {
+          existsStmt.bind([cpf, valorParcela, copetencia, empresa, vencimento] as unknown as any[]);
+          let exists = false;
+          if (existsStmt.step()) {
+            const obj = existsStmt.getAsObject() as { c?: unknown };
+            const c = Number((obj as any).c);
+            exists = Number.isFinite(c) && c > 0;
+          }
+          existsStmt.reset();
+          if (exists) {
+            skippedRows += 1;
+            continue;
+          }
+        }
+      }
+
       const values = opts.fileColumns.map((col) =>
-        col in row ? row[col] : null,
+        col in normalizedRow ? (normalizedRow as any)[col] : null,
       );
       stmt.run(values as unknown as any[]);
       insertedRows += 1;
@@ -3761,6 +4350,7 @@ function insertRelatorioConsignadoRows(opts: {
   } finally {
     hashStmt.free();
     stmt.free();
+    if (existsStmt) existsStmt.free();
   }
   return { insertedRows, skippedRows };
 }
@@ -5871,10 +6461,76 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     });
   }
 
+  const rjOverrideByKey = new Map<string, { id: number; newCents: number }>();
+  const orgaoKeyForRj = normalizeExtratosOrgaoForMatch(orgaoInput);
+  if (orgaoKeyForRj && tableExists(db, 'conciliacao_pendencia_actions')) {
+    const cols = new Set(getTableColumns(db, 'conciliacao_pendencia_actions'));
+    const colsToRead = [
+      'id',
+      'month',
+      'orgao',
+      'cpf',
+      'value',
+      'action',
+      'undone_at',
+      'error',
+      ...(cols.has('meta_json') ? ['meta_json'] : []),
+    ];
+    const rows = readTableRows(db, 'conciliacao_pendencia_actions', colsToRead);
+    for (const r of rows) {
+      const month = typeof r.month === 'string' ? r.month.trim() : '';
+      if (month !== wantedMonthKey) continue;
+      const orgao = typeof r.orgao === 'string' ? r.orgao.trim() : '';
+      if (!orgao) continue;
+      const okOrgao = normalizeExtratosOrgaoForMatch(orgao);
+      if (!okOrgao || okOrgao !== orgaoKeyForRj) continue;
+      const undoneAt =
+        typeof (r as any).undone_at === 'string' ? String((r as any).undone_at).trim() : '';
+      if (undoneAt) continue;
+      const error = typeof (r as any).error === 'string' ? String((r as any).error).trim() : '';
+      if (error) continue;
+      const action = typeof (r as any).action === 'string' ? String((r as any).action).trim() : '';
+      if (!action.startsWith('recurso_judicial_valor_a_menor_relatorio_sisbr')) continue;
+      const cpfDigits = normalizeCpfDigits(r.cpf);
+      if (cpfDigits.length !== 11) continue;
+      const oldCents = parseMoneyToCents(r.value);
+      if (oldCents === null) continue;
+      const id = Number((r as any).id);
+      if (!Number.isFinite(id)) continue;
+      const metaRaw = typeof (r as any).meta_json === 'string' ? String((r as any).meta_json).trim() : '';
+      if (!metaRaw) continue;
+      let newCents: number | null = null;
+      let empresaKey = '';
+      try {
+        const parsed = JSON.parse(metaRaw) as { kind?: unknown; nextValue?: unknown; empresa?: unknown };
+        const kind = typeof parsed?.kind === 'string' ? parsed.kind.trim() : '';
+        if (kind && kind !== 'recurso_judicial_valor_a_menor_relatorio') continue;
+        const nextValue = typeof parsed?.nextValue === 'string' ? parsed.nextValue.trim() : '';
+        const parsedNext = nextValue ? parseMoneyToCents(nextValue) : null;
+        if (parsedNext !== null) newCents = parsedNext;
+        const emp = typeof parsed?.empresa === 'string' ? parsed.empresa.trim() : '';
+        const empKey = emp ? normalizeRelatorioOrgaoForMatch(emp) : '';
+        empresaKey = empKey || '';
+      } catch {
+        newCents = null;
+      }
+      if (newCents === null) continue;
+      if (!(newCents > 0 && newCents < oldCents)) continue;
+      const key = `${cpfDigits}|${oldCents}|${empresaKey}`;
+      const cur = rjOverrideByKey.get(key);
+      if (!cur || id > cur.id) rjOverrideByKey.set(key, { id, newCents });
+    }
+  }
+
   const relByCpfAndCents = new Map<string, number[]>();
   for (let i = 0; i < relItems.length; i++) {
     const r = relItems[i];
-    const k = `${r.cpfDigits}\u0000${r.cents}`;
+    const empresaKey = r.empresa ? normalizeRelatorioOrgaoForMatch(r.empresa) : '';
+    const override =
+      rjOverrideByKey.get(`${r.cpfDigits}|${r.cents}|${empresaKey}`) ??
+      rjOverrideByKey.get(`${r.cpfDigits}|${r.cents}|`);
+    const matchCents = override?.newCents ?? r.cents;
+    const k = `${r.cpfDigits}\u0000${matchCents}`;
     const arr = relByCpfAndCents.get(k);
     if (arr) arr.push(i);
     else relByCpfAndCents.set(k, [i]);
@@ -5986,10 +6642,35 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
   const orgaoKeyForOcc = normalizeExtratosOrgaoForMatch(orgaoInput);
   const occByKey = new Map<
     string,
-    { id: number; createdAt: string; action: string; justification: string }
+    {
+      id: number;
+      createdAt: string;
+      action: string;
+      justification: string;
+      status?: string;
+      gerenteEmail?: string;
+      liquidationDate?: string | null;
+    }
+  >();
+  const occListByKey = new Map<
+    string,
+    Array<{
+      id: number;
+      createdAt: string;
+      action: string;
+      justification: string;
+      status?: string;
+      gerenteEmail?: string;
+      liquidationDate?: string | null;
+    }>
+  >();
+  const repactuacoesByKey = new Map<
+    string,
+    Array<{ id: number; createdAt: string; status: string; gerenteEmail: string | null; justification: string }>
   >();
   if (orgaoKeyForOcc && tableExists(db, 'conciliacao_pendencia_actions')) {
-    const rows = readTableRows(db, 'conciliacao_pendencia_actions', [
+    const occColumns = new Set(getTableColumns(db, 'conciliacao_pendencia_actions'));
+    const columnsToRead = [
       'id',
       'created_at',
       'month',
@@ -6000,7 +6681,11 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       'justification',
       'undone_at',
       'error',
-    ]);
+      ...(occColumns.has('status') ? ['status'] : []),
+      ...(occColumns.has('gerente_email') ? ['gerente_email'] : []),
+      ...(occColumns.has('meta_json') ? ['meta_json'] : []),
+    ];
+    const rows = readTableRows(db, 'conciliacao_pendencia_actions', columnsToRead);
     for (const r of rows) {
       const month = typeof r.month === 'string' ? r.month.trim() : '';
       if (month !== wantedMonthKey) continue;
@@ -6030,11 +6715,88 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       if (!action || !justification) continue;
       const error = typeof (r as any).error === 'string' ? String((r as any).error).trim() : '';
       if (error) continue;
+      const statusFromCol =
+        typeof (r as any).status === 'string' ? String((r as any).status).trim() : '';
+      const gerenteEmailFromCol =
+        typeof (r as any).gerente_email === 'string'
+          ? String((r as any).gerente_email).trim()
+          : '';
+      const metaRaw = typeof (r as any).meta_json === 'string' ? String((r as any).meta_json).trim() : '';
+      let status = statusFromCol;
+      let gerenteEmail = gerenteEmailFromCol;
+      let liquidationDate: string | null = null;
+      if ((!status || !gerenteEmail) && metaRaw) {
+        try {
+          const parsed = JSON.parse(metaRaw) as {
+            status?: unknown;
+            gerenteEmail?: unknown;
+            kind?: unknown;
+            liquidationDate?: unknown;
+          };
+          if (!status && typeof parsed?.status === 'string') status = parsed.status.trim();
+          if (!gerenteEmail && typeof parsed?.gerenteEmail === 'string')
+            gerenteEmail = parsed.gerenteEmail.trim();
+        } catch {
+          void 0;
+        }
+      }
+      if (metaRaw) {
+        try {
+          const parsed = JSON.parse(metaRaw) as { kind?: unknown; liquidationDate?: unknown };
+          const kind = typeof parsed?.kind === 'string' ? parsed.kind.trim() : '';
+          const liq = typeof parsed?.liquidationDate === 'string' ? parsed.liquidationDate.trim() : '';
+          const isLiqForaVenc =
+            action === 'liquidacao_fora_vencimento_relatorio_sisbr' ||
+            kind === 'liquidacao_fora_vencimento_relatorio';
+          if (isLiqForaVenc && liq && /^\d{2}\/\d{2}\/\d{4}$/.test(liq)) liquidationDate = liq;
+        } catch {
+          void 0;
+        }
+      }
       const key = `${cpfDigits}|${cents}`;
+      if (action.startsWith('repactuacao')) {
+        const list = repactuacoesByKey.get(key) ?? [];
+        list.push({
+          id,
+          createdAt,
+          status: status || '',
+          gerenteEmail: gerenteEmail || null,
+          justification,
+        });
+        repactuacoesByKey.set(key, list);
+      } else {
+        const list = occListByKey.get(key) ?? [];
+        list.push({
+          id,
+          createdAt,
+          action,
+          justification,
+          status: status || undefined,
+          gerenteEmail: gerenteEmail || undefined,
+          liquidationDate,
+        });
+        occListByKey.set(key, list);
+      }
       const existing = occByKey.get(key);
       if (!existing || id > existing.id) {
-        occByKey.set(key, { id, createdAt, action, justification });
+        occByKey.set(key, {
+          id,
+          createdAt,
+          action,
+          justification,
+          status: status || undefined,
+          gerenteEmail: gerenteEmail || undefined,
+          liquidationDate,
+        });
       }
+    }
+    for (const [k, list] of repactuacoesByKey.entries()) {
+      list.sort((a, b) => a.id - b.id);
+      repactuacoesByKey.set(k, list);
+    }
+    for (const [k, list] of occListByKey.entries()) {
+      list.sort((a, b) => b.id - a.id);
+      occListByKey.set(k, list);
     }
   }
 
@@ -6138,8 +6900,28 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
               createdAt: occ.createdAt,
               action: occ.action,
               justification: occ.justification,
+              status: occ.status ?? null,
+              gerenteEmail: occ.gerenteEmail ?? null,
+              liquidationDate: occ.liquidationDate ?? null,
             }
           : null;
+      })(),
+      ocorrencias: (() => {
+        const key = `${v.cpfDigits}|${v.cents}`;
+        const list = occListByKey.get(key) ?? [];
+        return list.map((occ) => ({
+          id: occ.id,
+          createdAt: occ.createdAt,
+          action: occ.action,
+          justification: occ.justification,
+          status: occ.status ?? null,
+          gerenteEmail: occ.gerenteEmail ?? null,
+          liquidationDate: occ.liquidationDate ?? null,
+        }));
+      })(),
+      repactuacoes: (() => {
+        const key = `${v.cpfDigits}|${v.cents}`;
+        return repactuacoesByKey.get(key) ?? [];
       })(),
     }))
     .sort((a, b) => {
@@ -6165,6 +6947,11 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     lastUpdatedAt: getConciliacaoLastUpdatedAt(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoInput }),
     closed: getConciliacaoFechamentoInfo(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoInput }),
     consolidadoPorVencimento,
+    extratosPorData: (() => {
+      const out: Record<string, number> = {};
+      for (const [k, v] of extratosByDate.entries()) out[k] = v;
+      return out;
+    })(),
     totals: {
       extratos: { cents: extratosTotal, text: centsToPtBr(extratosTotal) },
       recurso: { cents: recursoTotal, text: centsToPtBr(recursoTotal) },
@@ -6182,9 +6969,107 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
   };
 }
 
+function computeConsolidadoPorDataForContabilidade(opts: {
+  relatorio: any[];
+  totalsExtratosCents: number;
+  extratosPorData?: Record<string, number> | null;
+}) {
+  const relatorio = Array.isArray(opts.relatorio) ? opts.relatorio : [];
+  const totalsExtratosCents = Number(opts.totalsExtratosCents ?? 0) || 0;
+  const extratosByDate = new Map<string, number>();
+  if (opts.extratosPorData && typeof opts.extratosPorData === 'object') {
+    for (const [k, v] of Object.entries(opts.extratosPorData)) {
+      const key = String(k ?? '').trim();
+      const cents = Number(v ?? 0) || 0;
+      if (key) extratosByDate.set(key, cents);
+    }
+  }
+
+  const sortDatePtBr = (a: string, b: string) => {
+    const parseKey = (v: string) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v.trim());
+      if (!m) return v;
+      return `${m[3]}${m[2]}${m[1]}`;
+    };
+    return parseKey(a).localeCompare(parseKey(b));
+  };
+
+  const pickLiquidationDate = (r: any) => {
+    const occs = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
+    for (const o of occs) {
+      const action = typeof o?.action === 'string' ? o.action.trim() : '';
+      if (action !== 'liquidacao_fora_vencimento_relatorio_sisbr') continue;
+      const liq = typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
+      if (liq && /^\d{2}\/\d{2}\/\d{4}$/.test(liq)) return liq;
+    }
+    return null;
+  };
+
+  const relByDate = new Map<string, number>();
+  const recursoByDate = new Map<string, number>();
+  for (const r of relatorio) {
+    const baseVenc = typeof r?.vencimento === 'string' ? r.vencimento.trim() : '';
+    const liquidationDate = pickLiquidationDate(r);
+    const effDate = (liquidationDate || baseVenc || '').trim();
+    if (!effDate) continue;
+    const cents = parseMoneyToCents(r?.value);
+    if (cents === null) continue;
+    relByDate.set(effDate, (relByDate.get(effDate) ?? 0) + cents);
+    if (typeof r?.pairId === 'string' && r.pairId.trim()) {
+      recursoByDate.set(effDate, (recursoByDate.get(effDate) ?? 0) + cents);
+    }
+  }
+
+  const dates = Array.from(new Set([...relByDate.keys(), ...recursoByDate.keys()]));
+  dates.sort(sortDatePtBr);
+
+  const extratosByEffDate = new Map<string, number>();
+  for (const d of dates) {
+    const matched = extratosByDate.get(d) ?? 0;
+    if (matched !== 0) extratosByEffDate.set(d, matched);
+  }
+
+  const matchedSum = Array.from(extratosByEffDate.values()).reduce((acc, v) => acc + v, 0);
+  const remaining = totalsExtratosCents - matchedSum;
+  if (remaining !== 0 && dates.length > 0) {
+    const weights = dates.map((d) => {
+      const wRel = Math.abs(relByDate.get(d) ?? 0);
+      const wRec = Math.abs(recursoByDate.get(d) ?? 0);
+      return wRel > 0 ? wRel : wRec > 0 ? wRec : 1;
+    });
+    const totalW = weights.reduce((acc, v) => acc + v, 0);
+    let allocated = 0;
+    for (let i = 0; i < dates.length; i++) {
+      const d = dates[i];
+      const add =
+        i === dates.length - 1
+          ? remaining - allocated
+          : Math.trunc((remaining * weights[i]) / (totalW || 1));
+      extratosByEffDate.set(d, (extratosByEffDate.get(d) ?? 0) + add);
+      allocated += add;
+    }
+  }
+
+  return dates
+    .map((date) => {
+      const recursoCents = recursoByDate.get(date) ?? 0;
+      const relatorioCents = relByDate.get(date) ?? 0;
+      const extratosCents = extratosByEffDate.get(date) ?? 0;
+      return {
+        vencimento: date,
+        recursoCents,
+        relatorioCents,
+        extratosCents,
+        saldoCents: extratosCents - recursoCents,
+      };
+    })
+    .filter((x) => x.recursoCents !== 0 || x.relatorioCents !== 0 || x.extratosCents !== 0);
+}
+
 export async function fecharConciliacaoRecursoVsRelatorio(opts: {
   month: string;
   orgao: string;
+  vencimento?: string;
   closedBy?: string;
   contabilidadeEmail?: string;
   evidencePngBase64?: string;
@@ -6196,6 +7081,8 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
   if (!orgaoRaw) throw new Error('Informe o órgão.');
   const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
   if (!orgaoKey) throw new Error('Órgão inválido.');
+  const vencimentoRaw = String(opts.vencimento ?? '').trim();
+  const vencimentoLabel = vencimentoRaw ? normalizeVencimentoLabel(vencimentoRaw) : null;
 
   const closedBy = String(opts.closedBy ?? '').trim() || null;
   const contabilidadeEmailsRaw = String(opts.contabilidadeEmail ?? '').trim();
@@ -6213,42 +7100,81 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
 
+  const now = new Date().toISOString();
   const existing = getConciliacaoFechamentoInfo(db, { monthKey, orgaoRaw });
   if (existing.isClosed) {
     return { month: monthKey, orgao: orgaoRaw, closed: existing, dbFilePath };
   }
 
-  const now = new Date().toISOString();
-  db.run('BEGIN;');
-  try {
-    const stmt = db.prepare(`
-      INSERT INTO conciliacao_fechamentos
-      (month_key, orgao_extratos_key, orgao_extratos_raw, closed_at, closed_by, reopened_at, reopened_by, contabilidade_email, sent_to_contabilidade_at, sent_to_contabilidade_by)
-      VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL)
-      ON CONFLICT(month_key, orgao_extratos_key)
-      DO UPDATE SET
-        orgao_extratos_raw=excluded.orgao_extratos_raw,
-        closed_at=excluded.closed_at,
-        closed_by=excluded.closed_by,
-        reopened_at=NULL,
-        reopened_by=NULL,
-        contabilidade_email=excluded.contabilidade_email;
-    `);
-    try {
-      stmt.run([monthKey, orgaoKey, orgaoRaw, now, closedBy, contabilidadeEmail] as unknown as any[]);
-    } finally {
-      stmt.free();
+  if (vencimentoLabel) {
+    const alreadyClosed = existing.closedVencimentos.includes(vencimentoLabel);
+    if (alreadyClosed) {
+      return { month: monthKey, orgao: orgaoRaw, closed: existing, dbFilePath };
     }
-    db.run('COMMIT;');
-  } catch (e) {
+    db.run('BEGIN;');
     try {
-      db.run('ROLLBACK;');
-    } catch {
-      void 0;
+      const stmt = db.prepare(`
+        INSERT INTO conciliacao_fechamentos_vencimento
+        (month_key, orgao_extratos_key, orgao_extratos_raw, vencimento, closed_at, closed_by, reopened_at, reopened_by, contabilidade_email, sent_to_contabilidade_at, sent_to_contabilidade_by)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL)
+        ON CONFLICT(month_key, orgao_extratos_key, vencimento)
+        DO UPDATE SET
+          orgao_extratos_raw=excluded.orgao_extratos_raw,
+          closed_at=excluded.closed_at,
+          closed_by=excluded.closed_by,
+          reopened_at=NULL,
+          reopened_by=NULL,
+          contabilidade_email=excluded.contabilidade_email;
+      `);
+      try {
+        stmt.run(
+          [monthKey, orgaoKey, orgaoRaw, vencimentoLabel, now, closedBy, contabilidadeEmail] as unknown as any[],
+        );
+      } finally {
+        stmt.free();
+      }
+      db.run('COMMIT;');
+    } catch (e) {
+      try {
+        db.run('ROLLBACK;');
+      } catch {
+        void 0;
+      }
+      throw e;
     }
-    throw e;
+    persistDatabase(db, dbFilePath);
+  } else {
+    db.run('BEGIN;');
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO conciliacao_fechamentos
+        (month_key, orgao_extratos_key, orgao_extratos_raw, closed_at, closed_by, reopened_at, reopened_by, contabilidade_email, sent_to_contabilidade_at, sent_to_contabilidade_by)
+        VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL)
+        ON CONFLICT(month_key, orgao_extratos_key)
+        DO UPDATE SET
+          orgao_extratos_raw=excluded.orgao_extratos_raw,
+          closed_at=excluded.closed_at,
+          closed_by=excluded.closed_by,
+          reopened_at=NULL,
+          reopened_by=NULL,
+          contabilidade_email=excluded.contabilidade_email;
+      `);
+      try {
+        stmt.run([monthKey, orgaoKey, orgaoRaw, now, closedBy, contabilidadeEmail] as unknown as any[]);
+      } finally {
+        stmt.free();
+      }
+      db.run('COMMIT;');
+    } catch (e) {
+      try {
+        db.run('ROLLBACK;');
+      } catch {
+        void 0;
+      }
+      throw e;
+    }
+    persistDatabase(db, dbFilePath);
   }
-  persistDatabase(db, dbFilePath);
 
   if (!contabilidadeEmail) {
     throw new Error('E-mail de contabilidade não configurado.');
@@ -6258,37 +7184,78 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
     month: monthKey,
     orgao: orgaoRaw,
   })) as any;
-  const payload = JSON.stringify(conciliacao);
-  const closedInfo =
+  const allClosedInfo =
     conciliacao?.closed && typeof conciliacao.closed === 'object'
       ? conciliacao.closed
       : getConciliacaoFechamentoInfo(db, { monthKey, orgaoRaw });
 
-  const ocorrencias = Array.isArray(conciliacao?.relatorio)
-    ? conciliacao.relatorio
-        .map((r: any) => ({
-          cpf: typeof r?.cpf === 'string' ? r.cpf : '',
-          nome: typeof r?.nome === 'string' ? r.nome : '',
-          value: typeof r?.value === 'string' ? r.value : '',
-          ocorrencia: r?.ocorrencia ?? null,
-          vencimento: typeof r?.vencimento === 'string' ? r.vencimento : '',
-        }))
-        .filter((r: any) => r.ocorrencia && typeof r.ocorrencia === 'object')
-        .map((r: any) => ({
-          cpf: r.cpf,
-          nome: r.nome,
-          value: r.value,
-          action: typeof r.ocorrencia?.action === 'string' ? r.ocorrencia.action : '',
-          justification:
-            typeof r.ocorrencia?.justification === 'string' ? r.ocorrencia.justification : '',
-          createdAt: typeof r.ocorrencia?.createdAt === 'string' ? r.ocorrencia.createdAt : '',
-        }))
-        .filter((o: any) => Boolean(o.cpf && o.value))
+  const selected = vencimentoLabel;
+  const narrowedConciliacao = (() => {
+    if (!selected) return conciliacao;
+    const relatorio = Array.isArray(conciliacao?.relatorio) ? conciliacao.relatorio : [];
+    const relatorioFiltered = relatorio.filter(
+      (r: any) => normalizeVencimentoLabel(r?.vencimento) === selected,
+    );
+    if (relatorioFiltered.length === 0) {
+      throw new Error(`Nenhum lançamento encontrado para o vencimento "${selected}".`);
+    }
+    const consolidadoAll = Array.isArray(conciliacao?.consolidadoPorVencimento)
+      ? conciliacao.consolidadoPorVencimento
+      : [];
+    const consolidado = consolidadoAll
+      .map((v: any) => ({
+        vencimento: String(v?.vencimento ?? '').trim(),
+        recursoCents: Number(v?.recursoCents ?? 0) || 0,
+        relatorioCents: Number(v?.relatorioCents ?? 0) || 0,
+        extratosCents: Number(v?.extratosCents ?? 0) || 0,
+        saldoCents: Number(v?.saldoCents ?? 0) || 0,
+      }))
+      .filter((v: any) => Boolean(v.vencimento))
+      .filter((v: any) => normalizeVencimentoLabel(v.vencimento) === selected);
+    const c = consolidado[0] ?? null;
+    return {
+      ...conciliacao,
+      relatorio: relatorioFiltered,
+      consolidadoPorVencimento: consolidado,
+      totals: c
+        ? {
+            ...conciliacao?.totals,
+            extratos: { cents: c.extratosCents, text: centsToPtBr(c.extratosCents) },
+            recurso: { cents: c.recursoCents, text: centsToPtBr(c.recursoCents) },
+            relatorio: { cents: c.relatorioCents, text: centsToPtBr(c.relatorioCents) },
+            tarifaLinha: { cents: 0, text: centsToPtBr(0) },
+            tarifaTed: { cents: 0, text: centsToPtBr(0) },
+            diff: { cents: c.saldoCents, text: centsToPtBr(c.saldoCents) },
+          }
+        : conciliacao?.totals,
+    };
+  })();
+
+  const payload = JSON.stringify(narrowedConciliacao);
+  const closedInfo = allClosedInfo;
+
+  const ocorrencias = Array.isArray(narrowedConciliacao?.relatorio)
+    ? narrowedConciliacao.relatorio
+        .flatMap((r: any) => {
+          const cpf = typeof r?.cpf === 'string' ? r.cpf : '';
+          const nome = typeof r?.nome === 'string' ? r.nome : '';
+          const value = typeof r?.value === 'string' ? r.value : '';
+          const list = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
+          return list.map((o: any) => ({
+            cpf,
+            nome,
+            value,
+            action: typeof o?.action === 'string' ? o.action : '',
+            justification: typeof o?.justification === 'string' ? o.justification : '',
+            createdAt: typeof o?.createdAt === 'string' ? o.createdAt : '',
+          }));
+        })
+        .filter((o: any) => Boolean(o.cpf && o.value && o.action && o.justification))
     : [];
 
-  const vencimento = buildVencimentosCellText(conciliacao?.relatorio);
-  const consolidadoPorVencimento = Array.isArray(conciliacao?.consolidadoPorVencimento)
-    ? conciliacao.consolidadoPorVencimento
+  const vencimento = buildVencimentosCellText(narrowedConciliacao?.relatorio);
+  const consolidadoPorVencimento = Array.isArray(narrowedConciliacao?.consolidadoPorVencimento)
+    ? narrowedConciliacao.consolidadoPorVencimento
         .map((v: any) => ({
           vencimento: String(v?.vencimento ?? '').trim(),
           recursoCents: Number(v?.recursoCents ?? 0) || 0,
@@ -6298,21 +7265,31 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
         }))
         .filter((v: any) => Boolean(v.vencimento))
     : [];
+  const consolidadoPorDataForPdf = computeConsolidadoPorDataForContabilidade({
+    relatorio: narrowedConciliacao?.relatorio,
+    totalsExtratosCents: Number(narrowedConciliacao?.totals?.extratos?.cents ?? 0) || 0,
+    extratosPorData:
+      narrowedConciliacao?.extratosPorData && typeof narrowedConciliacao.extratosPorData === 'object'
+        ? (narrowedConciliacao.extratosPorData as Record<string, number>)
+        : null,
+  });
+  const consolidadoForPdf = consolidadoPorDataForPdf.length > 0 ? consolidadoPorDataForPdf : consolidadoPorVencimento;
 
+  const vencLabelForFile = vencimentoLabel ? `_VENC_${vencimentoLabel}` : '';
   const pdfFileName = sanitizeFileName(
-    `CONSIGNADOS_CONFERENCIA_${orgaoRaw}_${monthKey}.pdf`,
+    `CONSIGNADOS_CONFERENCIA_${orgaoRaw}_${monthKey}${vencLabelForFile}.pdf`,
   );
   const pdfBuffer = await createConciliacaoPdfBuffer({
     monthKey,
     orgao: orgaoRaw,
     vencimento,
     evidencePng,
-    consolidadoPorVencimento,
+    consolidadoPorVencimento: consolidadoForPdf,
     totals: {
-      extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
-      recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
-      tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
-      tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+      extratosCents: Number(narrowedConciliacao?.totals?.extratos?.cents ?? 0) || 0,
+      recursoCents: Number(narrowedConciliacao?.totals?.recurso?.cents ?? 0) || 0,
+      tarifaLinhaCents: Number(narrowedConciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+      tarifaTedCents: Number(narrowedConciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
     },
     closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
     closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
@@ -6326,8 +7303,8 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
   try {
     const outStmt = db2.prepare(
       `INSERT INTO contabilidade_relatorios_outbox
-       (created_at, created_by, to_email, month_key, orgao_extratos_key, orgao_extratos_raw, payload_json, pdf_file_name, pdf_base64)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+       (created_at, created_by, to_email, month_key, orgao_extratos_key, orgao_extratos_raw, vencimento, payload_json, pdf_file_name, pdf_base64)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
     );
     try {
       outStmt.run([
@@ -6337,6 +7314,7 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
         monthKey,
         orgaoKey,
         orgaoRaw,
+        vencimentoLabel,
         payload,
         pdfFileName,
         pdfBase64,
@@ -6365,11 +7343,12 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
   if (!notificationFrom) throw new Error('NOTIFICATION_EMAIL_FROM não configurado');
 
   const token = await getGraphToken({ tenantId, clientId, clientSecret });
+  const subjectVenc = vencimentoLabel ? ` • Vencimento ${vencimentoLabel}` : '';
   await sendGraphMail({
     token,
     from: notificationFrom,
     to: contabilidadeEmails.length > 0 ? contabilidadeEmails : contabilidadeEmail,
-    subject: `Conciliação consignados • ${orgaoRaw} • ${monthKey}`,
+    subject: `Conciliação consignados • ${orgaoRaw} • ${monthKey}${subjectVenc}`,
     html: buildConciliacaoEmailHtml({
       type: 'fechamento',
       monthKey,
@@ -6378,12 +7357,12 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
       closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
       closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
       totals: {
-        extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
-        recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
-        tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
-        tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+        extratosCents: Number(narrowedConciliacao?.totals?.extratos?.cents ?? 0) || 0,
+        recursoCents: Number(narrowedConciliacao?.totals?.recurso?.cents ?? 0) || 0,
+        tarifaLinhaCents: Number(narrowedConciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+        tarifaTedCents: Number(narrowedConciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
       },
-      consolidadoPorVencimento,
+      consolidadoPorVencimento: consolidadoForPdf,
     }),
     attachments: [
       {
@@ -6398,17 +7377,32 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
   ensureSchema(db3);
   db3.run('BEGIN;');
   try {
-    const upd = db3.prepare(
-      `UPDATE conciliacao_fechamentos
-       SET contabilidade_email=?,
-           sent_to_contabilidade_at=?,
-           sent_to_contabilidade_by=?
-       WHERE month_key=? AND orgao_extratos_key=?;`,
-    );
-    try {
-      upd.run([contabilidadeEmail, now, closedBy, monthKey, orgaoKey] as unknown as any[]);
-    } finally {
-      upd.free();
+    if (vencimentoLabel) {
+      const upd = db3.prepare(
+        `UPDATE conciliacao_fechamentos_vencimento
+         SET contabilidade_email=?,
+             sent_to_contabilidade_at=?,
+             sent_to_contabilidade_by=?
+         WHERE month_key=? AND orgao_extratos_key=? AND vencimento=?;`,
+      );
+      try {
+        upd.run([contabilidadeEmail, now, closedBy, monthKey, orgaoKey, vencimentoLabel] as unknown as any[]);
+      } finally {
+        upd.free();
+      }
+    } else {
+      const upd = db3.prepare(
+        `UPDATE conciliacao_fechamentos
+         SET contabilidade_email=?,
+             sent_to_contabilidade_at=?,
+             sent_to_contabilidade_by=?
+         WHERE month_key=? AND orgao_extratos_key=?;`,
+      );
+      try {
+        upd.run([contabilidadeEmail, now, closedBy, monthKey, orgaoKey] as unknown as any[]);
+      } finally {
+        upd.free();
+      }
     }
     db3.run('COMMIT;');
   } catch (e) {
@@ -6428,6 +7422,7 @@ export async function fecharConciliacaoRecursoVsRelatorio(opts: {
 export async function reabrirConciliacaoRecursoVsRelatorio(opts: {
   month: string;
   orgao: string;
+  vencimento?: string;
   password: string;
   reopenedBy?: string;
 }) {
@@ -6443,6 +7438,8 @@ export async function reabrirConciliacaoRecursoVsRelatorio(opts: {
   if (!orgaoRaw) throw new Error('Informe o órgão.');
   const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
   if (!orgaoKey) throw new Error('Órgão inválido.');
+  const vencimentoRaw = String(opts.vencimento ?? '').trim();
+  const vencimentoLabel = vencimentoRaw ? normalizeVencimentoLabel(vencimentoRaw) : null;
   const reopenedBy = String(opts.reopenedBy ?? '').trim() || null;
 
   const dbFilePath = getSqlitePath();
@@ -6452,15 +7449,28 @@ export async function reabrirConciliacaoRecursoVsRelatorio(opts: {
   const now = new Date().toISOString();
   db.run('BEGIN;');
   try {
-    const stmt = db.prepare(
-      `UPDATE conciliacao_fechamentos
-       SET reopened_at=?, reopened_by=?
-       WHERE month_key=? AND orgao_extratos_key=?;`,
-    );
-    try {
-      stmt.run([now, reopenedBy, monthKey, orgaoKey] as unknown as any[]);
-    } finally {
-      stmt.free();
+    if (vencimentoLabel) {
+      const stmt = db.prepare(
+        `UPDATE conciliacao_fechamentos_vencimento
+         SET reopened_at=?, reopened_by=?
+         WHERE month_key=? AND orgao_extratos_key=? AND vencimento=?;`,
+      );
+      try {
+        stmt.run([now, reopenedBy, monthKey, orgaoKey, vencimentoLabel] as unknown as any[]);
+      } finally {
+        stmt.free();
+      }
+    } else {
+      const stmt = db.prepare(
+        `UPDATE conciliacao_fechamentos
+         SET reopened_at=?, reopened_by=?
+         WHERE month_key=? AND orgao_extratos_key=?;`,
+      );
+      try {
+        stmt.run([now, reopenedBy, monthKey, orgaoKey] as unknown as any[]);
+      } finally {
+        stmt.free();
+      }
     }
     db.run('COMMIT;');
   } catch (e) {
@@ -6480,6 +7490,7 @@ export async function reabrirConciliacaoRecursoVsRelatorio(opts: {
 export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
   month: string;
   orgao: string;
+  vencimento?: string;
   requestedBy?: string;
   contabilidadeEmail?: string;
   evidencePngBase64?: string;
@@ -6491,6 +7502,8 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
   if (!orgaoRaw) throw new Error('Informe o órgão.');
   const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
   if (!orgaoKey) throw new Error('Órgão inválido.');
+  const vencimentoRaw = String(opts.vencimento ?? '').trim();
+  const vencimentoLabel = vencimentoRaw ? normalizeVencimentoLabel(vencimentoRaw) : null;
 
   const requestedBy = String(opts.requestedBy ?? '').trim() || null;
   const contabilidadeEmailsRaw = String(opts.contabilidadeEmail ?? '').trim();
@@ -6509,44 +7522,89 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
   ensureSchema(db);
 
   const info = getConciliacaoFechamentoInfo(db, { monthKey, orgaoRaw });
-  if (!info.isClosed) throw new Error('Conciliação não está fechada.');
+  if (vencimentoLabel) {
+    const closed = info.isClosed || info.closedVencimentos.includes(vencimentoLabel);
+    if (!closed) throw new Error('Conciliação não está fechada para o vencimento informado.');
+  } else {
+    if (!info.isClosed) throw new Error('Conciliação não está fechada.');
+  }
 
   const now = new Date().toISOString();
   if (!contabilidadeEmail) {
     throw new Error('E-mail de contabilidade não configurado.');
   }
   const conciliacao = (await conciliarRecursoOrgaoRelatorio({ month: monthKey, orgao: orgaoRaw })) as any;
-  const payload = JSON.stringify(conciliacao);
+  const selected = vencimentoLabel;
+  const narrowedConciliacao = (() => {
+    if (!selected) return conciliacao;
+    const relatorio = Array.isArray(conciliacao?.relatorio) ? conciliacao.relatorio : [];
+    const relatorioFiltered = relatorio.filter(
+      (r: any) => normalizeVencimentoLabel(r?.vencimento) === selected,
+    );
+    if (relatorioFiltered.length === 0) {
+      throw new Error(`Nenhum lançamento encontrado para o vencimento "${selected}".`);
+    }
+    const consolidadoAll = Array.isArray(conciliacao?.consolidadoPorVencimento)
+      ? conciliacao.consolidadoPorVencimento
+      : [];
+    const consolidado = consolidadoAll
+      .map((v: any) => ({
+        vencimento: String(v?.vencimento ?? '').trim(),
+        recursoCents: Number(v?.recursoCents ?? 0) || 0,
+        relatorioCents: Number(v?.relatorioCents ?? 0) || 0,
+        extratosCents: Number(v?.extratosCents ?? 0) || 0,
+        saldoCents: Number(v?.saldoCents ?? 0) || 0,
+      }))
+      .filter((v: any) => Boolean(v.vencimento))
+      .filter((v: any) => normalizeVencimentoLabel(v.vencimento) === selected);
+    const c = consolidado[0] ?? null;
+    return {
+      ...conciliacao,
+      relatorio: relatorioFiltered,
+      consolidadoPorVencimento: consolidado,
+      totals: c
+        ? {
+            ...conciliacao?.totals,
+            extratos: { cents: c.extratosCents, text: centsToPtBr(c.extratosCents) },
+            recurso: { cents: c.recursoCents, text: centsToPtBr(c.recursoCents) },
+            relatorio: { cents: c.relatorioCents, text: centsToPtBr(c.relatorioCents) },
+            tarifaLinha: { cents: 0, text: centsToPtBr(0) },
+            tarifaTed: { cents: 0, text: centsToPtBr(0) },
+            diff: { cents: c.saldoCents, text: centsToPtBr(c.saldoCents) },
+          }
+        : conciliacao?.totals,
+    };
+  })();
+
+  const payload = JSON.stringify(narrowedConciliacao);
 
   const closedInfo =
     conciliacao?.closed && typeof conciliacao.closed === 'object'
       ? conciliacao.closed
       : info;
 
-  const ocorrencias = Array.isArray(conciliacao?.relatorio)
-    ? conciliacao.relatorio
-        .map((r: any) => ({
-          cpf: typeof r?.cpf === 'string' ? r.cpf : '',
-          nome: typeof r?.nome === 'string' ? r.nome : '',
-          value: typeof r?.value === 'string' ? r.value : '',
-          ocorrencia: r?.ocorrencia ?? null,
-        }))
-        .filter((r: any) => r.ocorrencia && typeof r.ocorrencia === 'object')
-        .map((r: any) => ({
-          cpf: r.cpf,
-          nome: r.nome,
-          value: r.value,
-          action: typeof r.ocorrencia?.action === 'string' ? r.ocorrencia.action : '',
-          justification:
-            typeof r.ocorrencia?.justification === 'string' ? r.ocorrencia.justification : '',
-          createdAt: typeof r.ocorrencia?.createdAt === 'string' ? r.ocorrencia.createdAt : '',
-        }))
-        .filter((o: any) => Boolean(o.cpf && o.value))
+  const ocorrencias = Array.isArray(narrowedConciliacao?.relatorio)
+    ? narrowedConciliacao.relatorio
+        .flatMap((r: any) => {
+          const cpf = typeof r?.cpf === 'string' ? r.cpf : '';
+          const nome = typeof r?.nome === 'string' ? r.nome : '';
+          const value = typeof r?.value === 'string' ? r.value : '';
+          const list = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
+          return list.map((o: any) => ({
+            cpf,
+            nome,
+            value,
+            action: typeof o?.action === 'string' ? o.action : '',
+            justification: typeof o?.justification === 'string' ? o.justification : '',
+            createdAt: typeof o?.createdAt === 'string' ? o.createdAt : '',
+          }));
+        })
+        .filter((o: any) => Boolean(o.cpf && o.value && o.action && o.justification))
     : [];
 
-  const vencimento = buildVencimentosCellText(conciliacao?.relatorio);
-  const consolidadoPorVencimento = Array.isArray(conciliacao?.consolidadoPorVencimento)
-    ? conciliacao.consolidadoPorVencimento
+  const vencimento = buildVencimentosCellText(narrowedConciliacao?.relatorio);
+  const consolidadoPorVencimento = Array.isArray(narrowedConciliacao?.consolidadoPorVencimento)
+    ? narrowedConciliacao.consolidadoPorVencimento
         .map((v: any) => ({
           vencimento: String(v?.vencimento ?? '').trim(),
           recursoCents: Number(v?.recursoCents ?? 0) || 0,
@@ -6556,21 +7614,31 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
         }))
         .filter((v: any) => Boolean(v.vencimento))
     : [];
+  const consolidadoPorDataForPdf = computeConsolidadoPorDataForContabilidade({
+    relatorio: narrowedConciliacao?.relatorio,
+    totalsExtratosCents: Number(narrowedConciliacao?.totals?.extratos?.cents ?? 0) || 0,
+    extratosPorData:
+      narrowedConciliacao?.extratosPorData && typeof narrowedConciliacao.extratosPorData === 'object'
+        ? (narrowedConciliacao.extratosPorData as Record<string, number>)
+        : null,
+  });
+  const consolidadoForPdf = consolidadoPorDataForPdf.length > 0 ? consolidadoPorDataForPdf : consolidadoPorVencimento;
 
+  const vencLabelForFile = vencimentoLabel ? `_VENC_${vencimentoLabel}` : '';
   const pdfFileName = sanitizeFileName(
-    `CONSIGNADOS_CONFERENCIA_${orgaoRaw}_${monthKey}.pdf`,
+    `CONSIGNADOS_CONFERENCIA_${orgaoRaw}_${monthKey}${vencLabelForFile}.pdf`,
   );
   const pdfBuffer = await createConciliacaoPdfBuffer({
     monthKey,
     orgao: orgaoRaw,
     vencimento,
     evidencePng,
-    consolidadoPorVencimento,
+    consolidadoPorVencimento: consolidadoForPdf,
     totals: {
-      extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
-      recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
-      tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
-      tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+      extratosCents: Number(narrowedConciliacao?.totals?.extratos?.cents ?? 0) || 0,
+      recursoCents: Number(narrowedConciliacao?.totals?.recurso?.cents ?? 0) || 0,
+      tarifaLinhaCents: Number(narrowedConciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+      tarifaTedCents: Number(narrowedConciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
     },
     closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
     closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
@@ -6582,8 +7650,8 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
   try {
     const outStmt = db.prepare(
       `INSERT INTO contabilidade_relatorios_outbox
-       (created_at, created_by, to_email, month_key, orgao_extratos_key, orgao_extratos_raw, payload_json, pdf_file_name, pdf_base64)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+       (created_at, created_by, to_email, month_key, orgao_extratos_key, orgao_extratos_raw, vencimento, payload_json, pdf_file_name, pdf_base64)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
     );
     try {
       outStmt.run([
@@ -6593,6 +7661,7 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
         monthKey,
         orgaoKey,
         orgaoRaw,
+        vencimentoLabel,
         payload,
         pdfFileName,
         pdfBase64,
@@ -6621,11 +7690,12 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
   if (!notificationFrom) throw new Error('NOTIFICATION_EMAIL_FROM não configurado');
 
   const token = await getGraphToken({ tenantId, clientId, clientSecret });
+  const subjectVenc = vencimentoLabel ? ` • Vencimento ${vencimentoLabel}` : '';
   await sendGraphMail({
     token,
     from: notificationFrom,
     to: contabilidadeEmails.length > 0 ? contabilidadeEmails : contabilidadeEmail,
-    subject: `Conciliação consignados • ${orgaoRaw} • ${monthKey} (reenvio)`,
+    subject: `Conciliação consignados • ${orgaoRaw} • ${monthKey}${subjectVenc} (reenvio)`,
     html: buildConciliacaoEmailHtml({
       type: 'reenvio',
       monthKey,
@@ -6634,12 +7704,12 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
       closedBy: typeof closedInfo?.closedBy === 'string' ? closedInfo.closedBy : null,
       closedAt: typeof closedInfo?.closedAt === 'string' ? closedInfo.closedAt : null,
       totals: {
-        extratosCents: Number(conciliacao?.totals?.extratos?.cents ?? 0) || 0,
-        recursoCents: Number(conciliacao?.totals?.recurso?.cents ?? 0) || 0,
-        tarifaLinhaCents: Number(conciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
-        tarifaTedCents: Number(conciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
+        extratosCents: Number(narrowedConciliacao?.totals?.extratos?.cents ?? 0) || 0,
+        recursoCents: Number(narrowedConciliacao?.totals?.recurso?.cents ?? 0) || 0,
+        tarifaLinhaCents: Number(narrowedConciliacao?.totals?.tarifaLinha?.cents ?? 0) || 0,
+        tarifaTedCents: Number(narrowedConciliacao?.totals?.tarifaTed?.cents ?? 0) || 0,
       },
-      consolidadoPorVencimento,
+      consolidadoPorVencimento: consolidadoForPdf,
     }),
     attachments: [
       {
@@ -6654,17 +7724,32 @@ export async function reenviarFechamentoConciliacaoParaContabilidade(opts: {
   ensureSchema(db4);
   db4.run('BEGIN;');
   try {
-    const upd = db4.prepare(
-      `UPDATE conciliacao_fechamentos
-       SET contabilidade_email=?,
-           sent_to_contabilidade_at=?,
-           sent_to_contabilidade_by=?
-       WHERE month_key=? AND orgao_extratos_key=?;`,
-    );
-    try {
-      upd.run([contabilidadeEmail, now, requestedBy, monthKey, orgaoKey] as unknown as any[]);
-    } finally {
-      upd.free();
+    if (vencimentoLabel) {
+      const upd = db4.prepare(
+        `UPDATE conciliacao_fechamentos_vencimento
+         SET contabilidade_email=?,
+             sent_to_contabilidade_at=?,
+             sent_to_contabilidade_by=?
+         WHERE month_key=? AND orgao_extratos_key=? AND vencimento=?;`,
+      );
+      try {
+        upd.run([contabilidadeEmail, now, requestedBy, monthKey, orgaoKey, vencimentoLabel] as unknown as any[]);
+      } finally {
+        upd.free();
+      }
+    } else {
+      const upd = db4.prepare(
+        `UPDATE conciliacao_fechamentos
+         SET contabilidade_email=?,
+             sent_to_contabilidade_at=?,
+             sent_to_contabilidade_by=?
+         WHERE month_key=? AND orgao_extratos_key=?;`,
+      );
+      try {
+        upd.run([contabilidadeEmail, now, requestedBy, monthKey, orgaoKey] as unknown as any[]);
+      } finally {
+        upd.free();
+      }
     }
     db4.run('COMMIT;');
   } catch (e) {
@@ -6689,6 +7774,7 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
   recursoTable?: string;
   action?: string;
   justification: string;
+  devolucaoDate?: string | null;
 }) {
   dotenv.config();
   const { year, month } = parseMonthInput(opts.month);
@@ -6715,8 +7801,26 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
     typeof opts.action === 'string' && opts.action.trim()
       ? opts.action.trim()
       : 'clonar_para_relatorio_sisbr';
-  const justification = String(opts.justification ?? '').trim();
+  const isQuitado = action === 'quitado_recurso' || action.startsWith('quitado_recurso:');
+  const justificationRaw = String(opts.justification ?? '').trim();
+  const justification = justificationRaw || (isQuitado ? 'Quitado' : '');
   if (!justification) throw new Error('Informe a justificativa.');
+  const devolucaoDateRaw = String(opts.devolucaoDate ?? '').trim();
+  const normalizeDevolucaoDate = (raw: string): string => {
+    const t = String(raw ?? '').trim();
+    if (!t) return '';
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(t)) return t;
+    const m = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+    return '';
+  };
+  const devolucaoDate = isQuitado ? normalizeDevolucaoDate(devolucaoDateRaw) : '';
+  if (isQuitado) {
+    if (!devolucaoDate) throw new Error('Informe a data de devolução.');
+    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate)) {
+      throw new Error('Data de devolução inválida.');
+    }
+  }
 
   const due = (() => {
     let m = month + 1;
@@ -6734,6 +7838,7 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
   assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw: orgaoInput });
 
   if (tableExists(db, 'conciliacao_pendencia_actions')) {
+    const likeAction = isQuitado ? 'quitado_recurso%' : 'clonar_para_relatorio_sisbr%';
     const check = db.prepare(
       `SELECT id FROM conciliacao_pendencia_actions
        WHERE month=?
@@ -6742,12 +7847,12 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
          AND TRIM(COALESCE(value,''))=?
          AND COALESCE(error,'')=''
          AND (COALESCE(undone_at,'')='' OR undone_at IS NULL)
-         AND TRIM(COALESCE(action,'')) LIKE 'clonar_para_relatorio_sisbr%'
+         AND TRIM(COALESCE(action,'')) LIKE ?
        ORDER BY id DESC
        LIMIT 1;`,
     );
     try {
-      check.bind([wantedMonthKey, orgaoInput, cpf, centsToPtBr(valueCents)] as unknown as any[]);
+      check.bind([wantedMonthKey, orgaoInput, cpf, centsToPtBr(valueCents), likeAction] as unknown as any[]);
       if (check.step()) {
         const row = check.getAsObject() as { id?: unknown };
         const id = Number(row.id);
@@ -6973,7 +8078,8 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
     }
 
     metaJson = JSON.stringify({
-      kind: 'relatorio_stub_insert',
+      kind: isQuitado ? 'recurso_quitado_e_clonado' : 'relatorio_stub_insert',
+      devolucaoDate: isQuitado ? devolucaoDate : undefined,
       rowIds: insertedRowIds,
       empresa: relEmpresa,
       copetencia: wantedCopetenciaFull,
@@ -7416,6 +8522,1209 @@ export async function alterarOrgaoRelatorioSisbr(opts: {
   };
 }
 
+export async function recursoJudicialValorAMenorRelatorioSisbr(opts: {
+  month: string;
+  orgao: string;
+  cpf: string;
+  nome: string;
+  value: string;
+  fromEmpresa?: string | null;
+  newValue: string;
+  action?: string;
+  justification: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const wantedMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  if (!orgaoRaw) throw new Error('Informe o órgão.');
+  const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
+  if (!orgaoKey) throw new Error('Órgão inválido.');
+
+  const cpfDigits = String(opts.cpf ?? '').replace(/\D/g, '');
+  if (cpfDigits.length !== 11) throw new Error('CPF inválido.');
+  const cpf = normalizeCpfValue(opts.cpf);
+
+  const oldCents = parseMoneyToCents(opts.value);
+  if (oldCents === null) throw new Error('Valor inválido.');
+  const oldValorParcela = centsToPtBr(oldCents);
+
+  const newCents = parseMoneyToCents(opts.newValue);
+  if (newCents === null) throw new Error('Novo valor inválido.');
+  if (newCents >= oldCents) {
+    throw new Error('O novo valor deve ser menor que o valor atual.');
+  }
+  const newValorParcela = centsToPtBr(newCents);
+
+  const nome = String(opts.nome ?? '').trim();
+  if (!nome) throw new Error('Informe o nome.');
+
+  const fromEmpresa = String(opts.fromEmpresa ?? '').trim() || null;
+  const fromEmpresaKey = fromEmpresa ? normalizeRelatorioOrgaoForMatch(fromEmpresa) : null;
+
+  const action =
+    typeof opts.action === 'string' && opts.action.trim()
+      ? opts.action.trim()
+      : 'recurso_judicial_valor_a_menor_relatorio_sisbr';
+  const justification = String(opts.justification ?? '').trim();
+  if (!justification) throw new Error('Informe a justificativa.');
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw });
+
+  if (!tableExists(db, 'relatorio_consignado')) {
+    throw new Error('Tabela relatorio_consignado não encontrada.');
+  }
+  if (!tableExists(db, 'conciliacao_pendencia_actions')) {
+    throw new Error('Tabela conciliacao_pendencia_actions não encontrada.');
+  }
+
+  const matchedRowIds: number[] = [];
+  db.run('BEGIN;');
+  try {
+    normalizeRelatorioCopetenciaToFullYear(db);
+    const select = db.prepare(
+      `SELECT rowid as __rowid,
+              ${escapeSqlIdentifier('EMPRESA')} as EMPRESA,
+              ${escapeSqlIdentifier('Copetencia')} as Copetencia
+       FROM relatorio_consignado
+       WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?
+         AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?;`,
+    );
+    try {
+      select.bind([cpf, oldValorParcela] as unknown as any[]);
+      while (select.step()) {
+        const row = select.getAsObject() as Record<string, unknown>;
+        const rowid = Number((row as any).__rowid);
+        if (!Number.isFinite(rowid)) continue;
+        const cop = typeof row.Copetencia === 'string' ? row.Copetencia.trim() : '';
+        const rowMonthKey = parseCopetenciaToMonthKey(cop);
+        if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
+        if (fromEmpresaKey) {
+          const emp = typeof row.EMPRESA === 'string' ? row.EMPRESA.trim() : '';
+          const empKey = normalizeRelatorioOrgaoForMatch(emp);
+          if (!empKey || empKey !== fromEmpresaKey) continue;
+        }
+        matchedRowIds.push(rowid);
+      }
+    } finally {
+      select.free();
+    }
+
+    if (matchedRowIds.length === 0) {
+      const selectLoose = db.prepare(
+        `SELECT rowid as __rowid,
+                ${escapeSqlIdentifier('Copetencia')} as Copetencia
+         FROM relatorio_consignado
+         WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?
+           AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?;`,
+      );
+      try {
+        selectLoose.bind([cpf, oldValorParcela] as unknown as any[]);
+        while (selectLoose.step()) {
+          const row = selectLoose.getAsObject() as Record<string, unknown>;
+          const rowid = Number((row as any).__rowid);
+          if (!Number.isFinite(rowid)) continue;
+          const cop = typeof row.Copetencia === 'string' ? row.Copetencia.trim() : '';
+          const rowMonthKey = parseCopetenciaToMonthKey(cop);
+          if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
+          matchedRowIds.push(rowid);
+        }
+      } finally {
+        selectLoose.free();
+      }
+    }
+
+    if (matchedRowIds.length === 0) {
+      throw new Error('Nenhum registro do Relatório SISBR encontrado para registrar a ocorrência.');
+    }
+
+    const update = db.prepare(
+      `UPDATE relatorio_consignado
+       SET ${escapeSqlIdentifier('Valor Parcela')}=?
+       WHERE rowid=?;`,
+    );
+    try {
+      for (const rowid of matchedRowIds) {
+        update.run([newValorParcela, rowid] as unknown as any[]);
+      }
+    } finally {
+      update.free();
+    }
+
+    const logStmt = db.prepare(`
+      INSERT INTO conciliacao_pendencia_actions
+      (created_at, month, orgao, cpf, nome, value, action, justification, inserted_rows, skipped_rows, error, previous_value, next_value, meta_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    try {
+      logStmt.run([
+        new Date().toISOString(),
+        wantedMonthKey,
+        orgaoRaw,
+        cpf,
+        nome,
+        newValorParcela,
+        action,
+        justification,
+        0,
+        0,
+        null,
+        oldValorParcela,
+        newValorParcela,
+        JSON.stringify({
+          kind: 'recurso_judicial_valor_a_menor_relatorio',
+          rowIds: matchedRowIds,
+          empresa: fromEmpresa,
+          copetencia: wantedMonthKey,
+          previousValue: oldValorParcela,
+          nextValue: newValorParcela,
+          diffValue: centsToPtBr(oldCents - newCents),
+        }),
+      ]);
+    } finally {
+      logStmt.free();
+    }
+
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+
+  persistDatabase(db, dbFilePath);
+  return {
+    month: wantedMonthKey,
+    orgao: orgaoRaw,
+    cpf,
+    previousValue: oldValorParcela,
+    nextValue: newValorParcela,
+    matchedRows: matchedRowIds.length,
+    dbFilePath,
+  };
+}
+
+export async function liquidacaoForaDoVencimentoRelatorioSisbr(opts: {
+  month: string;
+  orgao: string;
+  cpf: string;
+  nome: string;
+  value: string;
+  fromEmpresa: string | null;
+  liquidationDate: string;
+  action?: string;
+  justification?: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const wantedMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+
+  const orgao = String(opts.orgao ?? '').trim();
+  if (!orgao) throw new Error('Informe o órgão.');
+
+  const cpfDigits = String(opts.cpf ?? '').replace(/\D/g, '');
+  if (cpfDigits.length !== 11) throw new Error('CPF inválido.');
+  const cpf = normalizeCpfValue(opts.cpf);
+
+  const valueCents = parseMoneyToCents(opts.value);
+  if (valueCents === null) throw new Error('Valor inválido.');
+  const valorParcela = centsToPtBr(valueCents);
+
+  const nome = String(opts.nome ?? '').trim();
+  if (!nome) throw new Error('Informe o nome.');
+
+  const fromEmpresa = String(opts.fromEmpresa ?? '').trim() || null;
+  const fromEmpresaKey = fromEmpresa ? normalizeRelatorioOrgaoForMatch(fromEmpresa) : null;
+
+  const liquidationDate = String(opts.liquidationDate ?? '').trim();
+  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) {
+    throw new Error('Informe a data de liquidação no formato dd/mm/aaaa.');
+  }
+
+  const action =
+    typeof opts.action === 'string' && opts.action.trim()
+      ? opts.action.trim()
+      : 'liquidacao_fora_vencimento_relatorio_sisbr';
+  const justificationRaw = String(opts.justification ?? '').trim();
+  const justification =
+    justificationRaw ||
+    `Liquidação fora do vencimento. Data de liquidação: ${liquidationDate}`;
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw: orgao });
+
+  if (!tableExists(db, 'relatorio_consignado'))
+    throw new Error('Tabela relatorio_consignado não encontrada.');
+  if (!tableExists(db, 'conciliacao_pendencia_actions'))
+    throw new Error('Tabela conciliacao_pendencia_actions não encontrada.');
+
+  normalizeRelatorioCopetenciaToFullYear(db);
+
+  const matchedRowIds: number[] = [];
+  const select = db.prepare(
+    `SELECT rowid as __rowid,
+            ${escapeSqlIdentifier('EMPRESA')} as EMPRESA,
+            ${escapeSqlIdentifier('Copetencia')} as Copetencia,
+            ${escapeSqlIdentifier('Valor Parcela')} as ValorParcela
+     FROM relatorio_consignado
+     WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?;`,
+  );
+  try {
+    select.bind([cpf] as unknown as any[]);
+    while (select.step()) {
+      const row = select.getAsObject() as Record<string, unknown>;
+      const rowid = Number((row as any).__rowid);
+      if (!Number.isFinite(rowid) || rowid <= 0) continue;
+      const cop = typeof row.Copetencia === 'string' ? row.Copetencia.trim() : '';
+      const rowMonthKey = parseCopetenciaToMonthKey(cop);
+      if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
+      const cents = parseMoneyToCents((row as any).ValorParcela);
+      if (cents === null || cents !== valueCents) continue;
+      if (fromEmpresaKey) {
+        const emp = typeof row.EMPRESA === 'string' ? row.EMPRESA.trim() : '';
+        const empKey = normalizeRelatorioOrgaoForMatch(emp);
+        if (!empKey || empKey !== fromEmpresaKey) continue;
+      }
+      matchedRowIds.push(rowid);
+    }
+  } finally {
+    select.free();
+  }
+
+  if (matchedRowIds.length === 0) {
+    throw new Error('Nenhum registro do Relatório SISBR encontrado para registrar a ocorrência.');
+  }
+
+  const conciliacao = (await conciliarRecursoOrgaoRelatorio({
+    month: wantedMonthKey,
+    orgao,
+  })) as any;
+  const relatorio = Array.isArray(conciliacao?.relatorio) ? conciliacao.relatorio : [];
+  const hasConciliado = relatorio.some((r: any) => {
+    const rCpfDigits = String(r?.cpf ?? '').replace(/\D/g, '');
+    if (rCpfDigits !== cpfDigits) return false;
+    const rCents = parseMoneyToCents(r?.value);
+    if (rCents === null || rCents !== valueCents) return false;
+    if (fromEmpresaKey) {
+      const empKey = normalizeRelatorioOrgaoForMatch(r?.empresa);
+      if (!empKey || empKey !== fromEmpresaKey) return false;
+    }
+    return Boolean(typeof r?.pairId === 'string' && r.pairId.trim());
+  });
+  if (!hasConciliado) {
+    throw new Error('Para registrar Liquidação Fora do Vencimento, o registro deve estar conciliado.');
+  }
+
+  const metaJson = JSON.stringify({
+    kind: 'liquidacao_fora_vencimento_relatorio',
+    rowIds: matchedRowIds,
+    empresa: fromEmpresa,
+    copetencia: wantedMonthKey,
+    liquidationDate,
+  });
+
+  db.run('BEGIN;');
+  try {
+    const logStmt = db.prepare(`
+      INSERT INTO conciliacao_pendencia_actions
+      (created_at, month, orgao, cpf, nome, value, action, justification, inserted_rows, skipped_rows, error, previous_value, next_value, meta_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    try {
+      logStmt.run([
+        new Date().toISOString(),
+        wantedMonthKey,
+        orgao,
+        cpf,
+        nome,
+        valorParcela,
+        action,
+        justification,
+        0,
+        0,
+        null,
+        null,
+        null,
+        metaJson,
+      ] as unknown as any[]);
+    } finally {
+      logStmt.free();
+    }
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+
+  persistDatabase(db, dbFilePath);
+  return {
+    month: wantedMonthKey,
+    orgao,
+    cpf,
+    value: valorParcela,
+    liquidationDate,
+    matchedRows: matchedRowIds.length,
+    dbFilePath,
+  };
+}
+
+export async function liquidacaoCcsExcluirRelatorioSisbr(opts: {
+  month: string;
+  orgao: string;
+  cpf: string;
+  nome: string;
+  value: string;
+  fromEmpresa: string | null;
+  action?: string;
+  justification: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const wantedMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+
+  const orgao = String(opts.orgao ?? '').trim();
+  if (!orgao) throw new Error('Informe o órgão.');
+
+  const cpfDigits = String(opts.cpf ?? '').replace(/\D/g, '');
+  if (cpfDigits.length !== 11) throw new Error('CPF inválido.');
+  const cpf = normalizeCpfValue(opts.cpf);
+
+  const valueCents = parseMoneyToCents(opts.value);
+  if (valueCents === null) throw new Error('Valor inválido.');
+  const valorParcela = centsToPtBr(valueCents);
+
+  const nome = String(opts.nome ?? '').trim();
+  if (!nome) throw new Error('Informe o nome.');
+
+  const fromEmpresa = String(opts.fromEmpresa ?? '').trim() || null;
+  const fromEmpresaKey = fromEmpresa ? normalizeRelatorioOrgaoForMatch(fromEmpresa) : null;
+
+  const action =
+    typeof opts.action === 'string' && opts.action.trim()
+      ? opts.action.trim()
+      : 'liquidacao_ccs_relatorio_sisbr';
+  const justification = String(opts.justification ?? '').trim();
+  if (!justification) throw new Error('Informe a justificativa.');
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw: orgao });
+
+  if (!tableExists(db, 'relatorio_consignado'))
+    throw new Error('Tabela relatorio_consignado não encontrada.');
+
+  normalizeRelatorioCopetenciaToFullYear(db);
+
+  const deletedRowIds: number[] = [];
+  const select = db.prepare(
+    `SELECT rowid as __rowid,
+            ${escapeSqlIdentifier('EMPRESA')} as EMPRESA,
+            ${escapeSqlIdentifier('Copetencia')} as Copetencia,
+            ${escapeSqlIdentifier('Valor Parcela')} as ValorParcela
+     FROM relatorio_consignado
+     WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?;`,
+  );
+  try {
+    select.bind([cpf] as unknown as any[]);
+    while (select.step()) {
+      const row = select.getAsObject() as Record<string, unknown>;
+      const rowid = Number((row as any).__rowid);
+      if (!Number.isFinite(rowid) || rowid <= 0) continue;
+      const cop = typeof row.Copetencia === 'string' ? row.Copetencia.trim() : '';
+      const rowMonthKey = parseCopetenciaToMonthKey(cop);
+      if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
+      const cents = parseMoneyToCents((row as any).ValorParcela);
+      if (cents === null || cents !== valueCents) continue;
+      if (fromEmpresaKey) {
+        const emp = typeof row.EMPRESA === 'string' ? row.EMPRESA.trim() : '';
+        const empKey = normalizeRelatorioOrgaoForMatch(emp);
+        if (!empKey || empKey !== fromEmpresaKey) continue;
+      }
+      deletedRowIds.push(rowid);
+    }
+  } finally {
+    select.free();
+  }
+
+  if (deletedRowIds.length === 0) {
+    throw new Error('Nenhum registro do Relatório SISBR encontrado para excluir.');
+  }
+
+  const relatorioCols = getTableColumns(db, 'relatorio_consignado');
+  const snapshotRows: Array<Record<string, unknown>> = [];
+
+  db.run('BEGIN;');
+  try {
+    if (relatorioCols.length > 0) {
+      const colsSql = relatorioCols.map(escapeSqlIdentifier).join(', ');
+      const snap = db.prepare(
+        `SELECT rowid as __rowid, ${colsSql}
+         FROM relatorio_consignado
+         WHERE rowid=?;`,
+      );
+      try {
+        for (const id of deletedRowIds) {
+          snap.bind([id] as unknown as any[]);
+          if (snap.step()) snapshotRows.push(snap.getAsObject() as Record<string, unknown>);
+          snap.reset();
+        }
+      } finally {
+        snap.free();
+      }
+    }
+
+    const del = db.prepare(`DELETE FROM relatorio_consignado WHERE rowid=?;`);
+    try {
+      for (const id of deletedRowIds) del.run([id] as unknown as any[]);
+    } finally {
+      del.free();
+    }
+
+    const metaJson = JSON.stringify({
+      kind: 'liquidacao_ccs_excluir_relatorio',
+      rowIds: deletedRowIds,
+      rows: snapshotRows,
+      empresa: fromEmpresa,
+      copetencia: wantedMonthKey,
+    });
+    const logStmt = db.prepare(`
+      INSERT INTO conciliacao_pendencia_actions
+      (created_at, month, orgao, cpf, nome, value, action, justification, inserted_rows, skipped_rows, error, previous_value, next_value, meta_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    try {
+      logStmt.run([
+        new Date().toISOString(),
+        wantedMonthKey,
+        orgao,
+        cpf,
+        nome,
+        valorParcela,
+        action,
+        justification,
+        deletedRowIds.length,
+        0,
+        null,
+        fromEmpresa,
+        null,
+        metaJson,
+      ]);
+    } finally {
+      logStmt.free();
+    }
+
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+
+  persistDatabase(db, dbFilePath);
+  return {
+    month: wantedMonthKey,
+    orgao,
+    cpf,
+    value: valorParcela,
+    deletedRows: deletedRowIds.length,
+    dbFilePath,
+  };
+}
+
+export async function naoPossuiRecursoRelatorioSisbr(opts: {
+  month: string;
+  orgao: string;
+  cpf: string;
+  nome: string;
+  value: string;
+  fromEmpresa?: string | null;
+  gerenteEmail: string;
+  message: string;
+  action?: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const wantedMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+
+  const orgao = String(opts.orgao ?? '').trim();
+  if (!orgao) throw new Error('Informe o órgão.');
+
+  const cpfDigits = String(opts.cpf ?? '').replace(/\D/g, '');
+  if (cpfDigits.length !== 11) throw new Error('CPF inválido.');
+  const cpf = normalizeCpfValue(opts.cpf);
+
+  const valueCents = parseMoneyToCents(opts.value);
+  if (valueCents === null) throw new Error('Valor inválido.');
+  const valorParcela = centsToPtBr(valueCents);
+
+  const nome = String(opts.nome ?? '').trim();
+  if (!nome) throw new Error('Informe o nome.');
+
+  const gerenteEmail = String(opts.gerenteEmail ?? '').trim();
+  if (!gerenteEmail) throw new Error('Informe o e-mail do gerente responsável.');
+
+  const message = String(opts.message ?? '').trim();
+  if (!message) throw new Error('Informe a mensagem.');
+
+  const action =
+    typeof opts.action === 'string' && opts.action.trim()
+      ? opts.action.trim()
+      : 'nao_possui_recurso_relatorio_sisbr';
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw: orgao });
+
+  if (!tableExists(db, 'conciliacao_pendencia_actions')) {
+    throw new Error('Tabela conciliacao_pendencia_actions não encontrada.');
+  }
+  if (!tableExists(db, 'relatorio_consignado')) {
+    throw new Error('Tabela relatorio_consignado não encontrada.');
+  }
+
+  const fromEmpresa = String(opts.fromEmpresa ?? '').trim() || null;
+  const resolveEmpresaFromOrgao = (): string => {
+    if (fromEmpresa) return fromEmpresa;
+    if (!orgao) return '';
+    const wantedKey = normalizeExtratosOrgaoForMatch(orgao);
+    if (!wantedKey) return orgao;
+    if (!tableExists(db, 'orgao_depara')) return orgao;
+    const rows = readTableRows(db, 'orgao_depara', ['extratos_value', 'relatorio_value']);
+    for (const r of rows) {
+      const ex = normalizeExtratosOrgaoForMatch((r as any).extratos_value);
+      if (!ex || ex !== wantedKey) continue;
+      const raw = typeof (r as any).relatorio_value === 'string' ? (r as any).relatorio_value : '';
+      const cleaned = String(raw ?? '').trim();
+      if (cleaned) return cleaned;
+    }
+    return orgao;
+  };
+  const targetEmpresa = resolveEmpresaFromOrgao();
+  const targetEmpresaKey = targetEmpresa ? normalizeRelatorioOrgaoForMatch(targetEmpresa) : null;
+
+  normalizeRelatorioCopetenciaToFullYear(db);
+  const relatorioCols = getTableColumns(db, 'relatorio_consignado');
+  const requiredCols = ['CPF', 'EMPRESA', 'Copetencia', 'Valor Parcela'];
+  for (const c of requiredCols) {
+    if (!relatorioCols.includes(c)) {
+      throw new Error('Tabela relatorio_consignado inválida.');
+    }
+  }
+  const relatorioColsSql = relatorioCols.map(escapeSqlIdentifier).join(', ');
+  const deletedRowIds: number[] = [];
+  const snapshotRows: Array<Record<string, unknown>> = [];
+  const selectRel = db.prepare(
+    `SELECT rowid as __rowid, ${relatorioColsSql}
+     FROM relatorio_consignado
+     WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?;`,
+  );
+  try {
+    selectRel.bind([cpf] as unknown as any[]);
+    while (selectRel.step()) {
+      const row = selectRel.getAsObject() as Record<string, unknown>;
+      const rowid = Number((row as any).__rowid);
+      if (!Number.isFinite(rowid) || rowid <= 0) continue;
+
+      const cop = typeof (row as any).Copetencia === 'string' ? String((row as any).Copetencia).trim() : '';
+      const rowMonthKey = parseCopetenciaToMonthKey(cop);
+      if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
+
+      const cents = parseMoneyToCents((row as any)['Valor Parcela']);
+      if (cents === null || cents !== valueCents) continue;
+
+      if (targetEmpresaKey) {
+        const emp = typeof (row as any).EMPRESA === 'string' ? String((row as any).EMPRESA).trim() : '';
+        const empKey = normalizeRelatorioOrgaoForMatch(emp);
+        if (!empKey || empKey !== targetEmpresaKey) continue;
+      }
+
+      deletedRowIds.push(rowid);
+      const snap: Record<string, unknown> = {};
+      for (const c of relatorioCols) snap[c] = (row as any)[c];
+      snapshotRows.push(snap);
+    }
+  } finally {
+    selectRel.free();
+  }
+  if (deletedRowIds.length === 0) {
+    throw new Error('Nenhum registro do Relatório SISBR encontrado para excluir.');
+  }
+
+  const teamsDelegatedRefreshTokenFromConfig =
+    getConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN) ?? null;
+  const teamsDelegatedRefreshToken =
+    typeof teamsDelegatedRefreshTokenFromConfig === 'string'
+      ? teamsDelegatedRefreshTokenFromConfig.trim()
+      : '';
+
+  const now = new Date().toISOString();
+  const lastRowIdStmt = db.prepare(`SELECT last_insert_rowid() as id;`);
+  let occurrenceId: number | null = null;
+  db.run('BEGIN;');
+  try {
+    const del = db.prepare(`DELETE FROM relatorio_consignado WHERE rowid=?;`);
+    try {
+      for (const id of deletedRowIds) del.run([id] as unknown as any[]);
+    } finally {
+      del.free();
+    }
+
+    const logStmt = db.prepare(`
+      INSERT INTO conciliacao_pendencia_actions
+      (created_at, month, orgao, cpf, nome, value, action, justification, gerente_email, inserted_rows, skipped_rows, error, previous_value, next_value, meta_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    try {
+      logStmt.run([
+        now,
+        wantedMonthKey,
+        orgao,
+        cpf,
+        nome,
+        valorParcela,
+        action,
+        message,
+        gerenteEmail,
+        deletedRowIds.length,
+        0,
+        null,
+        targetEmpresa || null,
+        null,
+        JSON.stringify({
+          kind: 'nao_possui_recurso_excluir_relatorio',
+          rowIds: deletedRowIds,
+          rows: snapshotRows,
+          empresa: targetEmpresa,
+          copetencia: wantedMonthKey,
+          gerenteEmail,
+        }),
+      ]);
+      if (lastRowIdStmt.step()) {
+        const obj = lastRowIdStmt.getAsObject() as { id?: unknown };
+        const id = Number((obj as any).id);
+        occurrenceId = Number.isFinite(id) && id > 0 ? id : null;
+      }
+      lastRowIdStmt.reset();
+    } finally {
+      logStmt.free();
+    }
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  } finally {
+    lastRowIdStmt.free();
+  }
+
+  persistDatabase(db, dbFilePath);
+
+  const tenantId = process.env.AZURE_TENANT_ID;
+  const clientId = process.env.AZURE_CLIENT_ID;
+  const clientSecret = process.env.AZURE_CLIENT_SECRET;
+  const notificationFrom = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+  if (!tenantId) throw new Error('AZURE_TENANT_ID não configurado');
+  if (!clientId) throw new Error('AZURE_CLIENT_ID não configurado');
+  if (!clientSecret) throw new Error('AZURE_CLIENT_SECRET não configurado');
+  if (!notificationFrom) throw new Error('NOTIFICATION_EMAIL_FROM não configurado');
+  const token = await getGraphToken({ tenantId, clientId, clientSecret });
+
+  const html = buildEmailTemplateHtml({
+    title: 'Não possui Recurso',
+    subtitle: `${orgao} • ${wantedMonthKey}`,
+    contentHtml: `
+      <div style="display:inline-flex;align-items:center;gap:10px;margin:0 0 14px 0">
+        <span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:#fee2e2;border:1px solid #fecaca;color:#991b1b;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;font-size:12px">
+          Prazo: 5 dias
+        </span>
+      </div>
+      <div style="margin:0 0 10px 0;color:#111827">
+        <div><b>Órgão:</b> ${escapeHtml(orgao)}</div>
+        <div><b>Competência:</b> ${escapeHtml(wantedMonthKey)}</div>
+        <div style="margin-top:8px"><b>CPF:</b> ${escapeHtml(cpf)}</div>
+        <div><b>Nome:</b> ${escapeHtml(nome)}</div>
+        <div><b>Valor:</b> ${escapeHtml(valorParcela)}</div>
+      </div>
+      <div style="margin-top: 14px;">
+        <div style="font-weight:900;color:#0f172a;margin-bottom:8px">Mensagem</div>
+        <div style="white-space: pre-wrap; background: #f8fafc; border: 1px solid #e5e7eb; padding: 12px; border-radius: 10px; font-size: 13px; color: #111827;">
+          ${escapeHtml(message)}
+        </div>
+      </div>
+    `.trim(),
+  });
+
+  await sendGraphMail({
+    token,
+    from: notificationFrom,
+    to: gerenteEmail,
+    subject: `Não possui Recurso • ${orgao} • ${wantedMonthKey} • ${cpf}`,
+    html,
+    importance: 'normal',
+  });
+
+  let teams:
+    | null
+    | {
+        attempted: boolean;
+        sent: boolean;
+        error: string | null;
+      } = null;
+  if (!teamsDelegatedRefreshToken) {
+    teams = {
+      attempted: false,
+      sent: false,
+      error:
+        'Teams (Chat 1:1) não está conectado. Vá em Configurações → Teams (Chat 1:1) — Login Microsoft (delegado) e conecte.',
+    };
+  } else {
+    teams = { attempted: true, sent: false, error: null };
+    try {
+      reportTeamsChatDebug({
+        runId: 'post',
+        hypothesisId: 'H5',
+        msg: '[TEAMS] delegated_send_start',
+        data: {
+          fromMasked: notificationFrom.replace(/^(.).+(@.+)$/g, '$1***$2'),
+          toMasked: gerenteEmail.replace(/^(.).+(@.+)$/g, '$1***$2'),
+        },
+      });
+      const delegatedToken = await getGraphDelegatedTokenFromRefreshToken({
+        tenantId,
+        clientId,
+        clientSecret,
+        refreshToken: teamsDelegatedRefreshToken,
+      });
+      reportTeamsChatDebug({
+        runId: 'post',
+        hypothesisId: 'H1',
+        msg: '[TEAMS] delegated_token_ok',
+        data: { tokenLen: delegatedToken.length },
+      });
+      const textLines = [
+        '**Não possui Recurso**',
+        '',
+        '**PRAZO: 5 DIAS**',
+        '',
+        `Órgão: ${orgao}`,
+        `Competência: ${wantedMonthKey}`,
+        `CPF: ${cpf}`,
+        `Nome: ${nome}`,
+        `Valor: ${valorParcela}`,
+        '',
+        'Mensagem:',
+        message,
+      ];
+      const teamsHtml = `
+        <div style="font-family: Segoe UI, Arial, sans-serif;">
+          <div style="display:flex;align-items:center;gap:10px;margin:0 0 10px 0">
+            <span style="font-weight:900;font-size:14px;">Não possui Recurso</span>
+            <span style="font-size:12px;padding:4px 10px;border-radius:999px;background:#fee2e2;border:1px solid #fecaca;color:#991b1b;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;">
+              Prazo: 5 dias
+            </span>
+          </div>
+          <div style="margin:0 0 10px 0;">
+            <div>🏛️ <b>Órgão:</b> ${escapeHtml(orgao)}</div>
+            <div>📅 <b>Competência:</b> ${escapeHtml(wantedMonthKey)}</div>
+            <div style="margin-top:8px;">🧾 <b>CPF:</b> ${escapeHtml(cpf)}</div>
+            <div>👤 <b>Nome:</b> ${escapeHtml(nome)}</div>
+            <div>💰 <b>Valor:</b> ${escapeHtml(valorParcela)}</div>
+          </div>
+          <div style="margin-top:12px;">
+            <div style="font-weight:900;margin-bottom:6px;">📝 Mensagem</div>
+            <div style="white-space: pre-wrap; background: rgba(255,255,255,0.85); border: 1px solid rgba(15, 23, 42, 0.10); padding: 10px 12px; border-radius: 10px; font-size: 13px;">
+              ${escapeHtml(message)}
+            </div>
+          </div>
+        </div>
+      `.trim();
+      await sendTeamsChatMessage({
+        token: delegatedToken,
+        fromEmail: notificationFrom,
+        toEmail: gerenteEmail,
+        text: textLines.join('\n'),
+        html: teamsHtml,
+      });
+      teams.sent = true;
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e ?? '').trim();
+      const errorHead = errMsg ? errMsg.slice(0, 800) : 'unknown_error';
+      teams.error = errorHead;
+      reportTeamsChatDebug({
+        runId: 'post',
+        hypothesisId: 'H1',
+        msg: '[TEAMS] delegated_send_fail',
+        data: { errorHead },
+      });
+    }
+  }
+
+  return {
+    month: wantedMonthKey,
+    orgao,
+    cpf,
+    value: valorParcela,
+    gerenteEmail,
+    deletedRows: deletedRowIds.length,
+    occurrenceId,
+    teams,
+    dbFilePath,
+  };
+}
+
+export async function repactuacaoRelatorioSisbr(opts: {
+  month: string;
+  orgao: string;
+  cpf: string;
+  nome: string;
+  value: string;
+  status?: string;
+  gerenteEmail?: string;
+  action?: string;
+  justification: string;
+}) {
+  dotenv.config();
+  const { year, month } = parseMonthInput(opts.month);
+  const wantedMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+
+  const orgao = String(opts.orgao ?? '').trim();
+  if (!orgao) throw new Error('Informe o órgão.');
+
+  const cpfDigits = String(opts.cpf ?? '').replace(/\D/g, '');
+  if (cpfDigits.length !== 11) throw new Error('CPF inválido.');
+  const cpf = normalizeCpfValue(opts.cpf);
+
+  const valueCents = parseMoneyToCents(opts.value);
+  if (valueCents === null) throw new Error('Valor inválido.');
+  const valorParcela = centsToPtBr(valueCents);
+
+  const nome = String(opts.nome ?? '').trim();
+  if (!nome) throw new Error('Informe o nome.');
+
+  const normalizeStatus = (raw: unknown): 'pendente_gerente' | 'concluido' => {
+    const t = String(raw ?? '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[-\s]+/g, '_');
+    if (t === 'pendente_gerente' || t === 'pendentegerente') return 'pendente_gerente';
+    if (t === 'concluido' || t === 'concluida') return 'concluido';
+    throw new Error('Informe o status da repactuação (Pendente Gerente ou Concluido).');
+  };
+  const status = normalizeStatus(opts.status);
+
+  const action =
+    typeof opts.action === 'string' && opts.action.trim()
+      ? opts.action.trim()
+      : 'repactuacao_relatorio_sisbr';
+  const justification = String(opts.justification ?? '').trim();
+  if (!justification) throw new Error('Informe a justificativa.');
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw: orgao });
+
+  if (!tableExists(db, 'conciliacao_pendencia_actions')) {
+    throw new Error('Tabela conciliacao_pendencia_actions não encontrada.');
+  }
+
+  const gerenteEmailFromRequest = String(opts.gerenteEmail ?? '').trim();
+  const gerenteEmail = gerenteEmailFromRequest;
+  if (status === 'pendente_gerente' && !gerenteEmail) {
+    throw new Error('Informe o e-mail do gerente responsável.');
+  }
+  const teamsDelegatedRefreshTokenFromConfig =
+    getConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN) ?? null;
+  const teamsDelegatedRefreshToken =
+    typeof teamsDelegatedRefreshTokenFromConfig === 'string'
+      ? teamsDelegatedRefreshTokenFromConfig.trim()
+      : '';
+
+  const existingRepactuacaoStmt = db.prepare(
+    `SELECT id, status, meta_json
+     FROM conciliacao_pendencia_actions
+     WHERE month=?
+       AND TRIM(COALESCE(orgao,''))=?
+       AND TRIM(COALESCE(cpf,''))=?
+       AND TRIM(COALESCE(value,''))=?
+       AND TRIM(COALESCE(action,'')) LIKE 'repactuacao%'
+       AND COALESCE(error,'')=''
+       AND (COALESCE(undone_at,'')='' OR undone_at IS NULL)
+     ORDER BY id ASC;`,
+  );
+  const repactuacaoStatuses = new Set<string>();
+  let repactuacaoCount = 0;
+  try {
+    existingRepactuacaoStmt.bind([wantedMonthKey, orgao, cpf, valorParcela] as unknown as any[]);
+    while (existingRepactuacaoStmt.step()) {
+      repactuacaoCount += 1;
+      const row = existingRepactuacaoStmt.getAsObject() as { status?: unknown; meta_json?: unknown };
+      const rowStatusRaw = typeof row.status === 'string' ? row.status.trim() : '';
+      if (rowStatusRaw) {
+        repactuacaoStatuses.add(rowStatusRaw);
+        continue;
+      }
+      const metaRaw = typeof (row as any).meta_json === 'string' ? String((row as any).meta_json).trim() : '';
+      if (!metaRaw) continue;
+      try {
+        const parsed = JSON.parse(metaRaw) as { status?: unknown };
+        const s = typeof parsed?.status === 'string' ? parsed.status.trim() : '';
+        if (s) repactuacaoStatuses.add(s);
+      } catch {
+        continue;
+      }
+    }
+  } finally {
+    existingRepactuacaoStmt.free();
+  }
+  if (repactuacaoCount >= 2) {
+    throw new Error('Limite de repactuações atingido (máximo 2).');
+  }
+  if (repactuacaoStatuses.has(status)) {
+    throw new Error(
+      status === 'pendente_gerente'
+        ? 'Já existe uma repactuação com status Pendente Gerente para esta linha.'
+        : 'Já existe uma repactuação com status Concluido para esta linha.',
+    );
+  }
+
+  const now = new Date().toISOString();
+  const lastRowIdStmt = db.prepare(`SELECT last_insert_rowid() as id;`);
+  let occurrenceId: number | null = null;
+  db.run('BEGIN;');
+  try {
+    const logStmt = db.prepare(`
+      INSERT INTO conciliacao_pendencia_actions
+      (created_at, month, orgao, cpf, nome, value, action, justification, status, gerente_email, inserted_rows, skipped_rows, error, previous_value, next_value, meta_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    `);
+    try {
+      logStmt.run([
+        now,
+        wantedMonthKey,
+        orgao,
+        cpf,
+        nome,
+        valorParcela,
+        action,
+        justification,
+        status,
+        gerenteEmail || null,
+        0,
+        0,
+        null,
+        null,
+        null,
+        JSON.stringify({
+          kind: 'repactuacao_relatorio',
+          status,
+          gerenteEmail: gerenteEmail || null,
+        }),
+      ]);
+      if (lastRowIdStmt.step()) {
+        const obj = lastRowIdStmt.getAsObject() as { id?: unknown };
+        const id = Number((obj as any).id);
+        occurrenceId = Number.isFinite(id) && id > 0 ? id : null;
+      }
+      lastRowIdStmt.reset();
+    } finally {
+      logStmt.free();
+    }
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  } finally {
+    lastRowIdStmt.free();
+  }
+
+  persistDatabase(db, dbFilePath);
+
+  let teams:
+    | null
+    | {
+        attempted: boolean;
+        sent: boolean;
+        error: string | null;
+      } = null;
+  if (status === 'pendente_gerente' && gerenteEmail) {
+    const tenantId = process.env.AZURE_TENANT_ID;
+    const clientId = process.env.AZURE_CLIENT_ID;
+    const clientSecret = process.env.AZURE_CLIENT_SECRET;
+    const notificationFrom = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+    if (!tenantId) throw new Error('AZURE_TENANT_ID não configurado');
+    if (!clientId) throw new Error('AZURE_CLIENT_ID não configurado');
+    if (!clientSecret) throw new Error('AZURE_CLIENT_SECRET não configurado');
+    if (!notificationFrom) throw new Error('NOTIFICATION_EMAIL_FROM não configurado');
+    const token = await getGraphToken({ tenantId, clientId, clientSecret });
+
+    const contentHtml = `
+      <div style="display:inline-flex;align-items:center;gap:10px;margin:0 0 14px 0">
+        <span style="display:inline-flex;align-items:center;padding:6px 10px;border-radius:999px;background:#fee2e2;border:1px solid #fecaca;color:#991b1b;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;font-size:12px">
+          Urgente
+        </span>
+        <span style="font-weight:900;color:#0f172a">Repactuação pendente de validação</span>
+      </div>
+
+      <div style="margin:0 0 10px 0;color:#111827">
+        <div><b>Órgão:</b> ${escapeHtml(orgao)}</div>
+        <div><b>Competência:</b> ${escapeHtml(wantedMonthKey)}</div>
+        <div style="margin-top:8px"><b>CPF:</b> ${escapeHtml(cpf)}</div>
+        <div><b>Nome:</b> ${escapeHtml(nome)}</div>
+        <div><b>Valor:</b> ${escapeHtml(valorParcela)}</div>
+        <div style="margin-top:8px"><b>Status:</b> Pendente Gerente</div>
+      </div>
+
+      <div style="margin-top: 14px;">
+        <div style="font-weight:900;color:#0f172a;margin-bottom:8px">Justificativa</div>
+        <div style="white-space: pre-wrap; background: #f8fafc; border: 1px solid #e5e7eb; padding: 12px; border-radius: 10px; font-size: 13px; color: #111827;">
+          ${escapeHtml(justification)}
+        </div>
+      </div>
+    `.trim();
+    const html = buildEmailTemplateHtml({
+      title: 'URGENTE • Repactuação',
+      subtitle: `Pendente Gerente • ${orgao} • ${wantedMonthKey}`,
+      contentHtml,
+    });
+    await sendGraphMail({
+      token,
+      from: notificationFrom,
+      to: gerenteEmail,
+      subject: `URGENTE • Repactuação pendente • ${orgao} • ${wantedMonthKey} • ${cpf}`,
+      html,
+      importance: 'high',
+    });
+
+    const textLines = [
+      '**URGENTE • Repactuação pendente (Pendente Gerente)**',
+      '',
+      `Órgão: ${orgao}`,
+      `Competência: ${wantedMonthKey}`,
+      `CPF: ${cpf}`,
+      `Nome: ${nome}`,
+      `Valor: ${valorParcela}`,
+      '',
+      'Justificativa:',
+      justification,
+    ];
+
+    if (!teamsDelegatedRefreshToken) {
+      teams = {
+        attempted: false,
+        sent: false,
+        error:
+          'Teams (Chat 1:1) não está conectado. Vá em Configurações → Teams (Chat 1:1) — Login Microsoft (delegado) e conecte.',
+      };
+    } else {
+      teams = { attempted: true, sent: false, error: null };
+      try {
+        reportTeamsChatDebug({
+          runId: 'post',
+          hypothesisId: 'H5',
+          msg: '[TEAMS] delegated_send_start',
+          data: {
+            fromMasked: notificationFrom.replace(/^(.).+(@.+)$/g, '$1***$2'),
+            toMasked: gerenteEmail.replace(/^(.).+(@.+)$/g, '$1***$2'),
+          },
+        });
+        const delegatedToken = await getGraphDelegatedTokenFromRefreshToken({
+          tenantId,
+          clientId,
+          clientSecret,
+          refreshToken: teamsDelegatedRefreshToken,
+        });
+        reportTeamsChatDebug({
+          runId: 'post',
+          hypothesisId: 'H1',
+          msg: '[TEAMS] delegated_token_ok',
+          data: { tokenLen: delegatedToken.length },
+        });
+        const teamsHtml = `
+          <div style="font-family: Segoe UI, Arial, sans-serif;">
+            <div style="display:flex;align-items:center;gap:10px;margin:0 0 10px 0">
+              <span style="font-weight:900;font-size:14px;">🚨 URGENTE • Repactuação pendente</span>
+              <span style="font-size:12px;padding:4px 10px;border-radius:999px;background:#fee2e2;border:1px solid #fecaca;color:#991b1b;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;">
+                Pendente Gerente
+              </span>
+            </div>
+            <div style="margin:0 0 10px 0;">
+              <div>🏛️ <b>Órgão:</b> ${escapeHtml(orgao)}</div>
+              <div>📅 <b>Competência:</b> ${escapeHtml(wantedMonthKey)}</div>
+              <div style="margin-top:8px;">🧾 <b>CPF:</b> ${escapeHtml(cpf)}</div>
+              <div>👤 <b>Nome:</b> ${escapeHtml(nome)}</div>
+              <div>💰 <b>Valor:</b> ${escapeHtml(valorParcela)}</div>
+            </div>
+            <div style="margin-top:12px;">
+              <div style="font-weight:900;margin-bottom:6px;">📝 Justificativa</div>
+              <div style="white-space: pre-wrap; background: rgba(255,255,255,0.85); border: 1px solid rgba(15, 23, 42, 0.10); padding: 10px 12px; border-radius: 10px; font-size: 13px;">
+                ${escapeHtml(justification)}
+              </div>
+            </div>
+          </div>
+        `.trim();
+        await sendTeamsChatMessage({
+          token: delegatedToken,
+          fromEmail: notificationFrom,
+          toEmail: gerenteEmail,
+          text: textLines.join('\n'),
+          html: teamsHtml,
+        });
+        teams.sent = true;
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e ?? '').trim();
+        const errorHead = errMsg ? errMsg.slice(0, 800) : 'unknown_error';
+        teams.error = errorHead;
+        reportTeamsChatDebug({
+          runId: 'post',
+          hypothesisId: 'H1',
+          msg: '[TEAMS] delegated_send_fail',
+          data: { errorHead },
+        });
+      }
+    }
+  }
+
+  return {
+    month: wantedMonthKey,
+    orgao,
+    cpf,
+    value: valorParcela,
+    action,
+    status,
+    gerenteEmail: gerenteEmail || null,
+    occurrenceId,
+    teams,
+    dbFilePath,
+  };
+}
+
 export async function desfazerOcorrenciaRelatorioSisbr(opts: {
   id: number;
   undoJustification?: string;
@@ -7452,7 +9761,19 @@ export async function desfazerOcorrenciaRelatorioSisbr(opts: {
   const action = typeof row.action === 'string' ? row.action.trim() : '';
   const isAlterarOrgao = Boolean(action) && action.startsWith('alterar_orgao_relatorio');
   const isClone = Boolean(action) && action.startsWith('clonar_para_relatorio_sisbr');
-  if (!isAlterarOrgao && !isClone) {
+  const isRepactuacao = Boolean(action) && action.startsWith('repactuacao');
+  const isNaoPossuiRecurso = Boolean(action) && action.startsWith('nao_possui_recurso');
+  const isLiquidacaoCcs = Boolean(action) && action.startsWith('liquidacao_ccs');
+  const isRecursoJudicialValorAMenor =
+    Boolean(action) && action.startsWith('recurso_judicial_valor_a_menor');
+  if (
+    !isAlterarOrgao &&
+    !isClone &&
+    !isRepactuacao &&
+    !isNaoPossuiRecurso &&
+    !isLiquidacaoCcs &&
+    !isRecursoJudicialValorAMenor
+  ) {
     throw new Error('Esta ocorrência não pode ser desfeita.');
   }
 
@@ -7509,8 +9830,33 @@ export async function desfazerOcorrenciaRelatorioSisbr(opts: {
   }
   const kind =
     metaKind ||
-    (isAlterarOrgao ? 'relatorio_empresa' : isClone ? 'relatorio_stub_insert' : '');
+    (isAlterarOrgao
+      ? 'relatorio_empresa'
+      : isClone
+        ? 'relatorio_stub_insert'
+        : isRepactuacao
+          ? 'repactuacao_relatorio'
+          : isLiquidacaoCcs
+            ? 'liquidacao_ccs_excluir_relatorio'
+            : isNaoPossuiRecurso
+              ? 'nao_possui_recurso_relatorio'
+              : isRecursoJudicialValorAMenor
+                ? 'recurso_judicial_valor_a_menor_relatorio'
+          : '');
   if (isAlterarOrgao && kind !== 'relatorio_empresa') {
+    throw new Error('Esta ocorrência não pode ser desfeita.');
+  }
+  if (isLiquidacaoCcs && kind !== 'liquidacao_ccs_excluir_relatorio') {
+    throw new Error('Esta ocorrência não pode ser desfeita.');
+  }
+  if (
+    isNaoPossuiRecurso &&
+    kind !== 'nao_possui_recurso_relatorio' &&
+    kind !== 'nao_possui_recurso_excluir_relatorio'
+  ) {
+    throw new Error('Esta ocorrência não pode ser desfeita.');
+  }
+  if (isRecursoJudicialValorAMenor && kind !== 'recurso_judicial_valor_a_menor_relatorio') {
     throw new Error('Esta ocorrência não pode ser desfeita.');
   }
 
@@ -7682,6 +10028,293 @@ export async function desfazerOcorrenciaRelatorioSisbr(opts: {
         }
       }
     }
+    if (isLiquidacaoCcs) {
+      const cols = getTableColumns(db, 'relatorio_consignado');
+      if (cols.length === 0) throw new Error('Tabela relatorio_consignado inválida.');
+      const colsSql = cols.map(escapeSqlIdentifier).join(', ');
+      const placeholders = cols.map(() => '?').join(', ');
+
+      const existsCanCheck =
+        cols.includes('EMPRESA') &&
+        cols.includes('Copetencia') &&
+        cols.includes('CPF') &&
+        cols.includes('Valor Parcela');
+      const hasVencimento = cols.includes('Vencimento');
+      const existsSql = existsCanCheck
+        ? `SELECT COUNT(1) as c FROM relatorio_consignado
+           WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Copetencia')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('EMPRESA')}, '')) = ?` +
+          (hasVencimento
+            ? ` AND TRIM(COALESCE(${escapeSqlIdentifier('Vencimento')}, '')) = ?`
+            : '') +
+          ` LIMIT 1;`
+        : '';
+
+      const insert = db.prepare(
+        `INSERT INTO relatorio_consignado (${colsSql}) VALUES (${placeholders});`,
+      );
+      const existsStmt = existsSql ? db.prepare(existsSql) : null;
+      try {
+        let rowsToRestore: Array<Record<string, unknown>> = [];
+        if (metaRaw) {
+          try {
+            const parsed = JSON.parse(metaRaw) as { rows?: unknown };
+            const arr = Array.isArray(parsed?.rows) ? (parsed.rows as any[]) : [];
+            rowsToRestore = arr
+              .filter((v) => v && typeof v === 'object')
+              .map((v) => v as Record<string, unknown>);
+          } catch {
+            rowsToRestore = [];
+          }
+        }
+
+        const inferFromEmpresa =
+          previousEmpresa ||
+          (() => {
+            const wantedKey = normalizeExtratosOrgaoForMatch(orgaoInput);
+            if (!wantedKey) return orgaoInput;
+            if (!tableExists(db, 'orgao_depara')) return orgaoInput;
+            const rows = readTableRows(db, 'orgao_depara', ['extratos_value', 'relatorio_value']);
+            for (const r of rows) {
+              const ex = normalizeExtratosOrgaoForMatch((r as any).extratos_value);
+              if (!ex || ex !== wantedKey) continue;
+              const raw =
+                typeof (r as any).relatorio_value === 'string' ? (r as any).relatorio_value : '';
+              const cleaned = String(raw ?? '').trim();
+              if (cleaned) return cleaned;
+            }
+            return orgaoInput;
+          })();
+
+        const inferMostCommonValue = (col: string): string | null => {
+          if (!cols.includes(col)) return null;
+          const parts = monthKey.split('-');
+          if (parts.length !== 2) return null;
+          const copetenciaFull = `${String(Number(parts[1])).padStart(2, '0')}/${parts[0]}`;
+          if (!cols.includes('Copetencia') || !cols.includes('EMPRESA')) return null;
+          const stmt = db.prepare(
+            `SELECT ${escapeSqlIdentifier(col)} as v, COUNT(1) as c
+             FROM relatorio_consignado
+             WHERE TRIM(COALESCE(${escapeSqlIdentifier('Copetencia')}, '')) = ?
+               AND TRIM(COALESCE(${escapeSqlIdentifier('EMPRESA')}, '')) = ?
+               AND TRIM(COALESCE(${escapeSqlIdentifier(col)}, '')) <> ''
+             GROUP BY v
+             ORDER BY c DESC
+             LIMIT 1;`,
+          );
+          try {
+            stmt.bind([copetenciaFull, inferFromEmpresa] as unknown as any[]);
+            if (!stmt.step()) return null;
+            const obj = stmt.getAsObject() as { v?: unknown };
+            const v = typeof obj.v === 'string' ? obj.v.trim() : '';
+            return v || null;
+          } finally {
+            stmt.free();
+          }
+        };
+
+        if (rowsToRestore.length === 0) {
+          const valueCents = parseMoneyToCents(value);
+          if (valueCents === null) {
+            throw new Error(
+              'Não foi possível restaurar a exclusão do Relatório SISBR (valor inválido).',
+            );
+          }
+          const valorParcela = centsToPtBr(valueCents);
+          const parts = monthKey.split('-');
+          if (parts.length !== 2) {
+            throw new Error(
+              'Não foi possível restaurar a exclusão do Relatório SISBR (competência inválida).',
+            );
+          }
+          const copetenciaFull = `${String(Number(parts[1])).padStart(2, '0')}/${parts[0]}`;
+          const nome = typeof row.nome === 'string' ? row.nome.trim() : '';
+          const base: Record<string, unknown> = {
+            EMPRESA: inferFromEmpresa,
+            Copetencia: copetenciaFull,
+            CPF: cpf,
+            Nome: nome || null,
+            'Valor Parcela': valorParcela,
+          };
+          const vencimento =
+            inferMostCommonValue('Vencimento') ||
+            inferMostCommonValue('Vencto. Operação') ||
+            null;
+          const modalidade = inferMostCommonValue('Modalidade') || null;
+          if (vencimento) base.Vencimento = vencimento;
+          if (modalidade) base.Modalidade = modalidade;
+          rowsToRestore = [base];
+        }
+
+        for (const r of rowsToRestore) {
+          const get = (k: string) => (k in r ? (r as any)[k] : null);
+          const values = cols.map((c) => get(c) ?? null);
+
+          if (existsStmt) {
+            const cpfV = typeof get('CPF') === 'string' ? String(get('CPF')).trim() : '';
+            const valorV =
+              typeof get('Valor Parcela') === 'string' ? String(get('Valor Parcela')).trim() : '';
+            const copV = typeof get('Copetencia') === 'string' ? String(get('Copetencia')).trim() : '';
+            const empV = typeof get('EMPRESA') === 'string' ? String(get('EMPRESA')).trim() : '';
+            const venV = hasVencimento && typeof get('Vencimento') === 'string' ? String(get('Vencimento')).trim() : '';
+            if (cpfV && valorV && copV && empV) {
+              const bind = hasVencimento ? [cpfV, valorV, copV, empV, venV] : [cpfV, valorV, copV, empV];
+              existsStmt.bind(bind as unknown as any[]);
+              let exists = false;
+              if (existsStmt.step()) {
+                const obj = existsStmt.getAsObject() as { c?: unknown };
+                const c = Number((obj as any).c);
+                exists = Number.isFinite(c) && c > 0;
+              }
+              existsStmt.reset();
+              if (exists) continue;
+            }
+          }
+
+          insert.run(values as unknown as any[]);
+        }
+      } finally {
+        insert.free();
+        if (existsStmt) existsStmt.free();
+      }
+    }
+    if (isNaoPossuiRecurso && kind === 'nao_possui_recurso_excluir_relatorio') {
+      const cols = getTableColumns(db, 'relatorio_consignado');
+      if (cols.length === 0) throw new Error('Tabela relatorio_consignado inválida.');
+      const colsSql = cols.map(escapeSqlIdentifier).join(', ');
+      const placeholders = cols.map(() => '?').join(', ');
+
+      const existsCanCheck =
+        cols.includes('EMPRESA') &&
+        cols.includes('Copetencia') &&
+        cols.includes('CPF') &&
+        cols.includes('Valor Parcela');
+      const hasVencimento = cols.includes('Vencimento');
+      const existsSql = existsCanCheck
+        ? `SELECT COUNT(1) as c FROM relatorio_consignado
+           WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Copetencia')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('EMPRESA')}, '')) = ?` +
+          (hasVencimento
+            ? ` AND TRIM(COALESCE(${escapeSqlIdentifier('Vencimento')}, '')) = ?`
+            : '') +
+          ` LIMIT 1;`
+        : '';
+
+      const insert = db.prepare(
+        `INSERT INTO relatorio_consignado (${colsSql}) VALUES (${placeholders});`,
+      );
+      const existsStmt = existsSql ? db.prepare(existsSql) : null;
+      try {
+        let rowsToRestore: Array<Record<string, unknown>> = [];
+        if (metaRaw) {
+          try {
+            const parsed = JSON.parse(metaRaw) as { rows?: unknown };
+            const arr = Array.isArray(parsed?.rows) ? (parsed.rows as any[]) : [];
+            rowsToRestore = arr
+              .filter((v) => v && typeof v === 'object')
+              .map((v) => v as Record<string, unknown>);
+          } catch {
+            rowsToRestore = [];
+          }
+        }
+
+        for (const r of rowsToRestore) {
+          const get = (k: string) => (k in r ? (r as any)[k] : null);
+          const values = cols.map((c) => get(c) ?? null);
+
+          if (existsStmt) {
+            const cpfV = typeof get('CPF') === 'string' ? String(get('CPF')).trim() : '';
+            const valorV =
+              typeof get('Valor Parcela') === 'string' ? String(get('Valor Parcela')).trim() : '';
+            const copV =
+              typeof get('Copetencia') === 'string' ? String(get('Copetencia')).trim() : '';
+            const empV = typeof get('EMPRESA') === 'string' ? String(get('EMPRESA')).trim() : '';
+            const venV =
+              hasVencimento && typeof get('Vencimento') === 'string'
+                ? String(get('Vencimento')).trim()
+                : '';
+            if (cpfV && valorV && copV && empV) {
+              const bind = hasVencimento ? [cpfV, valorV, copV, empV, venV] : [cpfV, valorV, copV, empV];
+              existsStmt.bind(bind as unknown as any[]);
+              let exists = false;
+              if (existsStmt.step()) {
+                const obj = existsStmt.getAsObject() as { c?: unknown };
+                const c = Number((obj as any).c);
+                exists = Number.isFinite(c) && c > 0;
+              }
+              existsStmt.reset();
+              if (exists) continue;
+            }
+          }
+
+          insert.run(values as unknown as any[]);
+        }
+      } finally {
+        insert.free();
+        if (existsStmt) existsStmt.free();
+      }
+    }
+
+    if (isRecursoJudicialValorAMenor) {
+      const previousValue = previousEmpresa;
+      const nextValue = nextEmpresa;
+      if (!previousValue || !nextValue) {
+        throw new Error('Ocorrência não possui valor anterior para restaurar.');
+      }
+
+      if (rowIds.length === 0) {
+        normalizeRelatorioCopetenciaToFullYear(db);
+        const fromEmpresaKey = metaEmpresa ? normalizeRelatorioOrgaoForMatch(metaEmpresa) : null;
+        const stmt = db.prepare(
+          `SELECT rowid as __rowid,
+                  ${escapeSqlIdentifier('EMPRESA')} as EMPRESA,
+                  ${escapeSqlIdentifier('Copetencia')} as Copetencia
+           FROM relatorio_consignado
+           WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?
+             AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?;`,
+        );
+        try {
+          stmt.bind([cpf, nextValue] as unknown as any[]);
+          while (stmt.step()) {
+            const r = stmt.getAsObject() as Record<string, unknown>;
+            const rowid = Number((r as any).__rowid);
+            if (!Number.isFinite(rowid) || rowid <= 0) continue;
+            const cop = typeof r.Copetencia === 'string' ? r.Copetencia.trim() : '';
+            const rowMonthKey = parseCopetenciaToMonthKey(cop);
+            if (!rowMonthKey || rowMonthKey !== monthKey) continue;
+            if (fromEmpresaKey) {
+              const emp = typeof r.EMPRESA === 'string' ? r.EMPRESA.trim() : '';
+              const empKey = normalizeRelatorioOrgaoForMatch(emp);
+              if (!empKey || empKey !== fromEmpresaKey) continue;
+            }
+            rowIds.push(rowid);
+          }
+        } finally {
+          stmt.free();
+        }
+      }
+
+      if (rowIds.length === 0) {
+        throw new Error('Não foi possível localizar os registros para desfazer a ocorrência.');
+      }
+
+      const upd = db.prepare(
+        `UPDATE relatorio_consignado
+         SET ${escapeSqlIdentifier('Valor Parcela')}=?
+         WHERE rowid=?;`,
+      );
+      try {
+        for (const rowid of rowIds) {
+          upd.run([previousValue, rowid] as unknown as any[]);
+        }
+      } finally {
+        upd.free();
+      }
+    }
 
     const updOcc = db.prepare(
       `UPDATE conciliacao_pendencia_actions
@@ -7771,6 +10404,12 @@ const CONFIG_KEY_RECURSO_ALEGO_URL = 'recursoAlegoUrl';
 const CONFIG_KEY_RECURSO_MPGO_URL = 'recursoMpgoUrl';
 const CONFIG_KEY_NOTIFICATION_EMAIL = 'notificationEmail';
 const CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE = 'notificationEmailContabilidade';
+const CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN =
+  'notificationTeamsDelegatedRefreshToken';
+const CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE =
+  'notificationTeamsDelegatedDeviceCode';
+const CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE_EXPIRES_AT =
+  'notificationTeamsDelegatedDeviceCodeExpiresAt';
 
 export async function getConsignadoAutomationConfig() {
   dotenv.config();
@@ -7798,12 +10437,16 @@ export async function getConsignadoAutomationConfig() {
     db,
     CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE,
   );
+  const teamsDelegatedConnected = Boolean(
+    getConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN),
+  );
   return {
     sharePointFolderUrl,
     recursoAlegoUrl,
     recursoMpgoUrl,
     notificationEmail,
     notificationEmailContabilidade,
+    teamsDelegatedConnected,
     dbFilePath,
   };
 }
@@ -7868,6 +10511,225 @@ export async function saveConsignadoAutomationConfig(opts: {
   }
   persistDatabase(db, dbFilePath);
   return await getConsignadoAutomationConfig();
+}
+
+export async function startTeamsDelegatedDeviceCodeLogin() {
+  dotenv.config();
+  const tenantId = String(process.env.AZURE_TENANT_ID ?? '').trim();
+  const clientId = String(process.env.AZURE_CLIENT_ID ?? '').trim();
+  if (!tenantId) throw new Error('AZURE_TENANT_ID não configurado');
+  if (!clientId) throw new Error('AZURE_CLIENT_ID não configurado');
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+
+  const scope = 'https://graph.microsoft.com/Chat.ReadWrite offline_access';
+  const body = new URLSearchParams();
+  body.set('client_id', clientId);
+  body.set('scope', scope);
+
+  const res = await fetch(`https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/devicecode`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  const data = (await res.json().catch(() => null)) as
+    | null
+    | {
+        device_code?: unknown;
+        user_code?: unknown;
+        verification_uri?: unknown;
+        expires_in?: unknown;
+        interval?: unknown;
+        message?: unknown;
+        error_description?: unknown;
+      };
+  if (!res.ok) {
+    const msg =
+      (typeof data?.error_description === 'string' && data.error_description.trim()) ||
+      `Falha ao iniciar login do Teams (HTTP ${res.status}).`;
+    throw new Error(msg);
+  }
+  const deviceCode = typeof data?.device_code === 'string' ? data.device_code.trim() : '';
+  const userCode = typeof data?.user_code === 'string' ? data.user_code.trim() : '';
+  const verificationUri = typeof data?.verification_uri === 'string' ? data.verification_uri.trim() : '';
+  const expiresIn = Number(data?.expires_in);
+  const interval = Number(data?.interval);
+  const message = typeof data?.message === 'string' ? data.message.trim() : '';
+  if (!deviceCode || !userCode || !verificationUri || !Number.isFinite(expiresIn)) {
+    throw new Error('Resposta inválida do login do Teams.');
+  }
+  const expiresAt = new Date(Date.now() + Math.max(0, expiresIn) * 1000).toISOString();
+
+  db.run('BEGIN;');
+  try {
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE, deviceCode);
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE_EXPIRES_AT, expiresAt);
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db, dbFilePath);
+  return {
+    userCode,
+    verificationUri,
+    message,
+    expiresAt,
+    interval: Number.isFinite(interval) ? interval : null,
+    scope,
+    dbFilePath,
+  };
+}
+
+export async function finishTeamsDelegatedDeviceCodeLogin() {
+  dotenv.config();
+  const tenantId = String(process.env.AZURE_TENANT_ID ?? '').trim();
+  const clientId = String(process.env.AZURE_CLIENT_ID ?? '').trim();
+  const clientSecret = String(process.env.AZURE_CLIENT_SECRET ?? '').trim();
+  if (!tenantId) throw new Error('AZURE_TENANT_ID não configurado');
+  if (!clientId) throw new Error('AZURE_CLIENT_ID não configurado');
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+
+  const deviceCode = getConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE);
+  const expiresAtRaw = getConsignadoAppConfigValue(
+    db,
+    CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE_EXPIRES_AT,
+  );
+  const expiresAt = typeof expiresAtRaw === 'string' ? expiresAtRaw.trim() : '';
+  if (!deviceCode) throw new Error('Login do Teams não iniciado.');
+
+  if (expiresAt) {
+    const d = new Date(expiresAt);
+    if (Number.isFinite(d.getTime()) && d.getTime() < Date.now()) {
+      db.run('BEGIN;');
+      try {
+        setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE, null);
+        setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE_EXPIRES_AT, null);
+        db.run('COMMIT;');
+      } catch (e) {
+        try {
+          db.run('ROLLBACK;');
+        } catch {
+          void 0;
+        }
+        throw e;
+      }
+      persistDatabase(db, dbFilePath);
+      return { status: 'expired', dbFilePath };
+    }
+  }
+
+  const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`;
+  const requestToken = async (withSecret: boolean) => {
+    const body = new URLSearchParams();
+    body.set('grant_type', 'urn:ietf:params:oauth:grant-type:device_code');
+    body.set('client_id', clientId);
+    if (withSecret && clientSecret) body.set('client_secret', clientSecret);
+    body.set('device_code', deviceCode);
+
+    const res = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    const data = (await res.json().catch(() => null)) as
+      | null
+      | { access_token?: unknown; refresh_token?: unknown; error?: unknown; error_description?: unknown };
+    return { res, data };
+  };
+
+  let result = await requestToken(false);
+  let err = typeof (result.data as any)?.error === 'string' ? String((result.data as any).error).trim() : '';
+  if (!result.res.ok) {
+    if (err === 'authorization_pending' || err === 'slow_down') {
+      return { status: 'pending', dbFilePath };
+    }
+    const msg =
+      (typeof (result.data as any)?.error_description === 'string' &&
+        String((result.data as any).error_description).trim()) ||
+      `Falha ao concluir login do Teams (HTTP ${result.res.status}).`;
+
+    if (clientSecret && msg.includes('AADSTS7000218')) {
+      result = await requestToken(true);
+      err = typeof (result.data as any)?.error === 'string' ? String((result.data as any).error).trim() : '';
+      if (!result.res.ok) {
+        if (err === 'authorization_pending' || err === 'slow_down') {
+          return { status: 'pending', dbFilePath };
+        }
+        const msg2 =
+          (typeof (result.data as any)?.error_description === 'string' &&
+            String((result.data as any).error_description).trim()) ||
+          `Falha ao concluir login do Teams (HTTP ${result.res.status}).`;
+        throw new Error(msg2);
+      }
+    } else if (msg.includes('AADSTS700025')) {
+      result = await requestToken(false);
+      if (!result.res.ok) {
+        const msg2 =
+          (typeof (result.data as any)?.error_description === 'string' &&
+            String((result.data as any).error_description).trim()) ||
+          `Falha ao concluir login do Teams (HTTP ${result.res.status}).`;
+        throw new Error(msg2);
+      }
+    } else {
+      throw new Error(msg);
+    }
+  }
+
+  const refreshToken =
+    typeof (result.data as any)?.refresh_token === 'string'
+      ? String((result.data as any).refresh_token).trim()
+      : '';
+  if (!refreshToken) throw new Error('Refresh token não retornado pelo Teams.');
+
+  db.run('BEGIN;');
+  try {
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN, refreshToken);
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE, null);
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE_EXPIRES_AT, null);
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db, dbFilePath);
+  return { status: 'connected', dbFilePath };
+}
+
+export async function disconnectTeamsDelegatedLogin() {
+  dotenv.config();
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  db.run('BEGIN;');
+  try {
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN, null);
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE, null);
+    setConsignadoAppConfigValue(db, CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE_EXPIRES_AT, null);
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db, dbFilePath);
+  return { status: 'disconnected', dbFilePath };
 }
 
 export async function getOrgaoColumnsConfig() {
@@ -9473,6 +12335,7 @@ async function sendGraphMail(opts: {
   to: string | string[];
   subject: string;
   html: string;
+  importance?: 'low' | 'normal' | 'high';
   attachments?: Array<{ name: string; contentType: string; contentBytesBase64: string }>;
 }) {
   const parseEmailRecipients = (input: string | string[]) => {
@@ -9500,6 +12363,11 @@ async function sendGraphMail(opts: {
   if (toRecipientsList.length === 0) {
     throw new Error('E-mail de contabilidade não configurado.');
   }
+
+  // #region debug-point G:send-mail-start
+  ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } const fromMasked = String(opts.from ?? '').replace(/^(.).+(@.+)$/g, '$1***$2'); fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'E', location: 'import-consignado.ts:sendGraphMail', msg: '[DEBUG] send_mail_start', data: { from: fromMasked, toCount: toRecipientsList.length, subject: String(opts.subject ?? '').slice(0, 120), hasAttachments: Boolean(opts.attachments && opts.attachments.length > 0) }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+  // #endregion debug-point G:send-mail-start
+
   const res = await fetch(
     `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(
       opts.from,
@@ -9513,6 +12381,7 @@ async function sendGraphMail(opts: {
       body: JSON.stringify({
         message: {
           subject: opts.subject,
+          ...(opts.importance ? { importance: opts.importance } : {}),
           body: { contentType: 'HTML', content: opts.html },
           toRecipients: toRecipientsList.map((address) => ({ emailAddress: { address } })),
           ...(opts.attachments && opts.attachments.length > 0
@@ -9532,8 +12401,354 @@ async function sendGraphMail(opts: {
   );
   if (!res.ok) {
     const text = await res.text().catch(() => '');
+
+    // #region debug-point H:send-mail-fail
+    ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'E', location: 'import-consignado.ts:sendGraphMail', msg: '[DEBUG] send_mail_fail', data: { status: res.status, bodyHead: String(text ?? '').slice(0, 1200) }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+    // #endregion debug-point H:send-mail-fail
+
     throw new Error(text || `Falha ao enviar e-mail (HTTP ${res.status})`);
   }
+
+  // #region debug-point I:send-mail-ok
+  ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'E', location: 'import-consignado.ts:sendGraphMail', msg: '[DEBUG] send_mail_ok', data: { status: res.status }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+  // #endregion debug-point I:send-mail-ok
+}
+
+function reportTeamsChatDebug(opts: { runId: 'pre' | 'post'; hypothesisId: string; msg: string; data?: any }) {
+  // #region debug-point T:teams-chat-report
+  ;(() => {
+    let u = 'http://127.0.0.1:7777/event',
+      s = 'teams-delegated-chat-missing';
+    try {
+      const candidateRelPaths = [
+        '.dbg/teams-delegated-chat-missing.env',
+        '.dbg/teams-chat-not-sent.env',
+        '../.dbg/teams-delegated-chat-missing.env',
+        '../.dbg/teams-chat-not-sent.env',
+        '../../.dbg/teams-delegated-chat-missing.env',
+        '../../.dbg/teams-chat-not-sent.env',
+        '../../../.dbg/teams-delegated-chat-missing.env',
+        '../../../.dbg/teams-chat-not-sent.env',
+        '../../../../.dbg/teams-delegated-chat-missing.env',
+        '../../../../.dbg/teams-chat-not-sent.env',
+      ];
+      let e = '';
+      for (const p of candidateRelPaths) {
+        try {
+          e = fs.readFileSync(p, 'utf8');
+          if (e) break;
+        } catch {
+          void 0;
+        }
+      }
+      u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+      s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+    } catch {
+      void 0;
+    }
+    fetch(u, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: s,
+        runId: opts.runId,
+        hypothesisId: opts.hypothesisId,
+        location: 'import-consignado.ts:teams-chat',
+        msg: opts.msg,
+        data: opts.data ?? null,
+        ts: Date.now(),
+      }),
+    }).catch(() => {
+      void 0;
+    });
+  })();
+  // #endregion debug-point T:teams-chat-report
+}
+
+async function graphResolveUserIdByEmail(opts: { token: string; email: string }): Promise<string | null> {
+  const email = String(opts.email ?? '').trim();
+  if (!email) return null;
+  reportTeamsChatDebug({
+    runId: 'pre',
+    hypothesisId: 'H3',
+    msg: '[TEAMS] resolve_user_start',
+    data: { emailMasked: email.replace(/^(.).+(@.+)$/g, '$1***$2') },
+  });
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(email)}?$select=id`,
+    { headers: { authorization: `Bearer ${opts.token}` } },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    reportTeamsChatDebug({
+      runId: 'pre',
+      hypothesisId: 'H3',
+      msg: '[TEAMS] resolve_user_fail',
+      data: { status: res.status, bodyHead: String(text ?? '').slice(0, 800) },
+    });
+    return null;
+  }
+  const data = (await res.json().catch(() => null)) as null | { id?: unknown };
+  const id = typeof data?.id === 'string' ? data.id.trim() : '';
+  reportTeamsChatDebug({
+    runId: 'pre',
+    hypothesisId: 'H3',
+    msg: '[TEAMS] resolve_user_ok',
+    data: { ok: Boolean(id) },
+  });
+  return id || null;
+}
+
+async function graphFindOneOnOneChatId(opts: {
+  token: string;
+  ownerUpn: string;
+  otherUpn: string;
+}): Promise<string | null> {
+  const ownerUpn = String(opts.ownerUpn ?? '').trim();
+  const otherUpn = String(opts.otherUpn ?? '').trim();
+  if (!ownerUpn || !otherUpn) return null;
+  const otherUpnLower = otherUpn.toLowerCase();
+  const ownerUpnLower = ownerUpn.toLowerCase();
+
+  let nextUrl: string | null =
+    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(ownerUpn)}/chats?` +
+    `$filter=chatType%20eq%20'oneOnOne'&$top=50`;
+  let pages = 0;
+  while (nextUrl && pages < 5) {
+    pages += 1;
+    reportTeamsChatDebug({
+      runId: 'pre',
+      hypothesisId: 'H1',
+      msg: '[TEAMS] list_chats_page',
+      data: { page: pages },
+    });
+    const res = await fetch(nextUrl, { headers: { authorization: `Bearer ${opts.token}` } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      reportTeamsChatDebug({
+        runId: 'pre',
+        hypothesisId: 'H1',
+        msg: '[TEAMS] list_chats_fail',
+        data: { status: res.status, bodyHead: String(text ?? '').slice(0, 800) },
+      });
+      return null;
+    }
+    const data = (await res.json().catch(() => null)) as
+      | null
+      | {
+          value?: Array<{ id?: unknown }>;
+          '@odata.nextLink'?: unknown;
+        };
+    const list = Array.isArray(data?.value) ? data!.value! : [];
+    for (const c of list) {
+      const id = typeof c?.id === 'string' ? c.id.trim() : '';
+      if (!id) continue;
+      const membersRes = await fetch(
+        `https://graph.microsoft.com/v1.0/chats/${encodeURIComponent(id)}/members?$select=email`,
+        { headers: { authorization: `Bearer ${opts.token}` } },
+      );
+      if (!membersRes.ok) {
+        const text = await membersRes.text().catch(() => '');
+        reportTeamsChatDebug({
+          runId: 'pre',
+          hypothesisId: 'H1',
+          msg: '[TEAMS] chat_members_fail',
+          data: { status: membersRes.status, bodyHead: String(text ?? '').slice(0, 800) },
+        });
+        continue;
+      }
+      const membersData = (await membersRes.json().catch(() => null)) as
+        | null
+        | { value?: Array<{ email?: unknown }> };
+      const emails = (Array.isArray(membersData?.value) ? membersData!.value! : [])
+        .map((m) => (typeof m?.email === 'string' ? m.email.trim() : ''))
+        .filter(Boolean)
+        .map((e) => e.toLowerCase());
+      if (emails.includes(ownerUpnLower) && emails.includes(otherUpnLower)) return id;
+    }
+    const next = typeof (data as any)?.['@odata.nextLink'] === 'string' ? String((data as any)['@odata.nextLink']) : '';
+    nextUrl = next ? next : null;
+  }
+  return null;
+}
+
+async function graphCreateOneOnOneChatId(opts: {
+  token: string;
+  ownerUpn: string;
+  otherUpn: string;
+}): Promise<string> {
+  const ownerUpn = String(opts.ownerUpn ?? '').trim();
+  const otherUpn = String(opts.otherUpn ?? '').trim();
+  if (!ownerUpn || !otherUpn) throw new Error('Usuário inválido para chat do Teams.');
+  const escapeOdataKey = (v: string) => String(v ?? '').replace(/'/g, "''");
+  reportTeamsChatDebug({
+    runId: 'pre',
+    hypothesisId: 'H1',
+    msg: '[TEAMS] create_chat_start',
+    data: {},
+  });
+  const res = await fetch('https://graph.microsoft.com/v1.0/chats', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${opts.token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      chatType: 'oneOnOne',
+      members: [
+        {
+          '@odata.type': '#microsoft.graph.aadUserConversationMember',
+          roles: ['owner'],
+          'user@odata.bind': `https://graph.microsoft.com/v1.0/users('${escapeOdataKey(ownerUpn)}')`,
+        },
+        {
+          '@odata.type': '#microsoft.graph.aadUserConversationMember',
+          roles: ['owner'],
+          'user@odata.bind': `https://graph.microsoft.com/v1.0/users('${escapeOdataKey(otherUpn)}')`,
+        },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    reportTeamsChatDebug({
+      runId: 'pre',
+      hypothesisId: 'H1',
+      msg: '[TEAMS] create_chat_fail',
+      data: { status: res.status, bodyHead: String(text ?? '').slice(0, 800) },
+    });
+    throw new Error(text || `Falha ao criar chat do Teams (HTTP ${res.status})`);
+  }
+  const data = (await res.json().catch(() => null)) as null | { id?: unknown };
+  const id = typeof data?.id === 'string' ? data.id.trim() : '';
+  reportTeamsChatDebug({
+    runId: 'pre',
+    hypothesisId: 'H1',
+    msg: '[TEAMS] create_chat_ok',
+    data: { ok: Boolean(id) },
+  });
+  if (!id) throw new Error('Falha ao criar chat do Teams.');
+  return id;
+}
+
+async function sendTeamsChatMessage(opts: {
+  token: string;
+  fromEmail: string;
+  toEmail: string;
+  text: string;
+  html?: string;
+}) {
+  const fromEmail = String(opts.fromEmail ?? '').trim();
+  const toEmail = String(opts.toEmail ?? '').trim();
+  const text = String(opts.text ?? '').trim();
+  const htmlInput = typeof opts.html === 'string' ? opts.html.trim() : '';
+  if (!fromEmail || !toEmail || (!text && !htmlInput)) return;
+  let delegatedMeUpn = '';
+  let delegatedMeMail = '';
+  try {
+    const meRes = await fetch('https://graph.microsoft.com/v1.0/me?$select=userPrincipalName,mail', {
+      headers: { authorization: `Bearer ${opts.token}` },
+    });
+    if (meRes.ok) {
+      const me = (await meRes.json().catch(() => null)) as
+        | null
+        | { userPrincipalName?: unknown; mail?: unknown };
+      delegatedMeUpn = typeof me?.userPrincipalName === 'string' ? me.userPrincipalName.trim() : '';
+      delegatedMeMail = typeof me?.mail === 'string' ? me.mail.trim() : '';
+      reportTeamsChatDebug({
+        runId: 'pre',
+        hypothesisId: 'H3',
+        msg: '[TEAMS] delegated_me',
+        data: {
+          upnMasked: delegatedMeUpn ? delegatedMeUpn.replace(/^(.).+(@.+)$/g, '$1***$2') : null,
+          mailMasked: delegatedMeMail ? delegatedMeMail.replace(/^(.).+(@.+)$/g, '$1***$2') : null,
+        },
+      });
+    } else {
+      const txt = await meRes.text().catch(() => '');
+      reportTeamsChatDebug({
+        runId: 'pre',
+        hypothesisId: 'H3',
+        msg: '[TEAMS] delegated_me_fail',
+        data: { status: meRes.status, bodyHead: String(txt ?? '').slice(0, 800) },
+      });
+    }
+  } catch {
+    void 0;
+  }
+  const delegatedResolved = (delegatedMeUpn || delegatedMeMail).trim().toLowerCase();
+  const expected = fromEmail.trim().toLowerCase();
+  if (delegatedResolved && delegatedResolved !== expected) {
+    reportTeamsChatDebug({
+      runId: 'pre',
+      hypothesisId: 'H3',
+      msg: '[TEAMS] delegated_from_mismatch',
+      data: {
+        expectedMasked: fromEmail.replace(/^(.).+(@.+)$/g, '$1***$2'),
+        delegatedMasked: delegatedResolved.replace(/^(.).+(@.+)$/g, '$1***$2'),
+      },
+    });
+    throw new Error(
+      `Login do Teams conectado não é ${fromEmail}. Clique em "Desconectar" e conecte usando essa conta para o remetente ficar correto.`,
+    );
+  }
+  reportTeamsChatDebug({
+    runId: 'pre',
+    hypothesisId: 'H2',
+    msg: '[TEAMS] send_chat_start',
+    data: {
+      fromMasked: fromEmail.replace(/^(.).+(@.+)$/g, '$1***$2'),
+      toMasked: toEmail.replace(/^(.).+(@.+)$/g, '$1***$2'),
+      textLen: text.length,
+      htmlLen: htmlInput ? htmlInput.length : 0,
+    },
+  });
+  const chatId = await graphCreateOneOnOneChatId({
+    token: opts.token,
+    ownerUpn: fromEmail,
+    otherUpn: toEmail,
+  });
+
+  const escapeHtmlForTeams = (v: string) =>
+    String(v ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  const html = htmlInput || escapeHtmlForTeams(text).replace(/\n/g, '<br/>');
+
+  reportTeamsChatDebug({
+    runId: 'pre',
+    hypothesisId: 'H1',
+    msg: '[TEAMS] send_message_start',
+    data: {},
+  });
+  const res = await fetch(`https://graph.microsoft.com/v1.0/chats/${encodeURIComponent(chatId)}/messages`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${opts.token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      body: { contentType: 'html', content: html },
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    reportTeamsChatDebug({
+      runId: 'pre',
+      hypothesisId: 'H1',
+      msg: '[TEAMS] send_message_fail',
+      data: { status: res.status, bodyHead: String(text ?? '').slice(0, 800) },
+    });
+    throw new Error(text || `Falha ao enviar mensagem no Teams (HTTP ${res.status})`);
+  }
+  reportTeamsChatDebug({
+    runId: 'pre',
+    hypothesisId: 'H1',
+    msg: '[TEAMS] send_message_ok',
+    data: { status: res.status },
+  });
 }
 
 function monthKeyToPtBrUpper(monthKey: string): string {
@@ -9630,8 +12845,8 @@ function escapeHtml(value: string): string {
 function getEmailLogoDataUri(): string | null {
   try {
     const candidates = [
-      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
       path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
       path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
       path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
       path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
@@ -9645,6 +12860,56 @@ function getEmailLogoDataUri(): string | null {
   } catch {
     return null;
   }
+}
+
+function buildEmailTemplateHtml(opts: {
+  subtitle: string;
+  contentHtml: string;
+  title?: string;
+}): string {
+  const subtitle = escapeHtml(String(opts.subtitle ?? '').trim());
+  const title = escapeHtml(String(opts.title ?? 'Portal Administrativo').trim() || 'Portal Administrativo');
+  const logoDataUri = getEmailLogoDataUri();
+  const headerBg = '#003641';
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body>
+    <div style="font-family: Arial, sans-serif; max-width: 720px; margin: 0 auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; border: 1px solid #e0e0e0;">
+      <div style="background-color: ${headerBg}; padding: 26px; border-bottom: 4px solid #00ae9d;">
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse: collapse;">
+          <tr>
+            <td align="left" valign="middle" style="width: 1px; white-space: nowrap;">
+              ${
+                logoDataUri
+                  ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height: 30px; background-color: ${headerBg}; padding: 4px 10px; border-radius: 6px; display: block;">`
+                  : '<span style="color:white; font-weight:bold;">SICOOB Juriscred</span>'
+              }
+            </td>
+            <td align="center" valign="middle">
+              <div style="color: #ffffff; font-size: 20px; font-weight: normal; letter-spacing: 0.5px;">${title}</div>
+              <div style="color: #b0bec5; font-size: 14px; margin-top: 6px;">${subtitle}</div>
+            </td>
+            <td style="width: 1px;">&nbsp;</td>
+          </tr>
+        </table>
+      </div>
+
+      <div style="padding: 26px; color: #333; line-height: 1.6;">
+        ${String(opts.contentHtml ?? '')}
+      </div>
+
+      <div style="background-color: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #999;">
+        © 2026 Sicoob Juriscred • Portal Administrativo<br>
+        Desenvolvido Por: Departamento de Tecnologia da Informação - Juriscred<br>
+        E-mail automático - Por favor não responder.
+      </div>
+    </div>
+  </body>
+</html>`;
 }
 
 function buildConciliacaoEmailHtml(opts: {
@@ -10564,6 +13829,10 @@ export async function runImportConsignado(opts?: {
       : undefined;
   const target = opts?.target ?? targetEnv ?? 'both';
 
+  // #region debug-point A:run-import-start
+  ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } const folderUrlRaw = typeof sharePointFolderUrlCandidate === 'string' ? sharePointFolderUrlCandidate : ''; fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'A', location: 'import-consignado.ts:runImportConsignado', msg: '[DEBUG] run_import_start', data: { target, mode, folderUrlRawLen: String(folderUrlRaw ?? '').trim().length, folderUrlRawHead: String(folderUrlRaw ?? '').trim().slice(0, 160), extratosFolderName, relatorioFolderName, importedFolderName, hasNotificationTo: Boolean(String(notificationTo ?? '').trim()), hasNotificationFrom: Boolean(String(notificationFrom ?? '').trim()) }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+  // #endregion debug-point A:run-import-start
+
   const dbFilePath = getSqlitePath();
 
   const db = await openDatabase(dbFilePath);
@@ -10631,6 +13900,10 @@ export async function runImportConsignado(opts?: {
     normalizedFolderUrl,
   );
 
+  // #region debug-point B:sharepoint-resolved
+  ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'B', location: 'import-consignado.ts:runImportConsignado', msg: '[DEBUG] sharepoint_resolved', data: { normalizedFolderUrlHead: String(normalizedFolderUrl ?? '').slice(0, 220), driveId: baseFolder.driveId, itemId: baseFolder.itemId, itemName: baseFolder.itemName, specificFileName: baseFolder.specificFile?.name ?? null }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+  // #endregion debug-point B:sharepoint-resolved
+
   const extratoCandidates = Array.from(
     new Set([
       ...folderNameVariants(extratosFolderName),
@@ -10668,6 +13941,10 @@ export async function runImportConsignado(opts?: {
         relatorioCandidates,
         target,
       });
+
+  // #region debug-point C:container-resolved
+  ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'C', location: 'import-consignado.ts:runImportConsignado', msg: '[DEBUG] container_resolved', data: { importingSingleFile, target, containerName: container.containerName, extratoFolderId: container.extratoFolderId, relatorioFolderId: container.relatorioFolderId, extratoCandidatesCount: extratoCandidates.length, relatorioCandidatesCount: relatorioCandidates.length }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+  // #endregion debug-point C:container-resolved
 
   const extratosAllBase =
     target === 'relatorio'
@@ -10713,6 +13990,10 @@ export async function runImportConsignado(opts?: {
     extratosAll = extratosAllIncludingImportados;
     extratosFallbackImportados = true;
   }
+
+  // #region debug-point D:extratos-listed
+  ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } const namesOutside = extratosAllOutsideImportados.slice(0, 12).map((f) => f.name); const namesAll = extratosAllIncludingImportados.slice(0, 12).map((f) => f.name); const namesSelected = extratosAll.slice(0, 12).map((f) => f.name); fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'D', location: 'import-consignado.ts:runImportConsignado', msg: '[DEBUG] extratos_listed', data: { outsideCount: extratosAllOutsideImportados.length, includingImportadosCount: extratosAllIncludingImportados.length, selectedCount: extratosAll.length, fallbackImportados: extratosFallbackImportados, outsideHead: namesOutside, includingHead: namesAll, selectedHead: namesSelected }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+  // #endregion debug-point D:extratos-listed
 
   const relatoriosAllBaseRaw =
     target === 'extratos'
@@ -10902,6 +14183,10 @@ export async function runImportConsignado(opts?: {
       const rows = table.rows;
       const fileColumns = table.headers;
 
+      // #region debug-point E:extrato-file-parsed
+      ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } const lower = String(file.name ?? '').toLowerCase(); const shouldLog = idx === 0 || /45-0/i.test(file.name) || /maio\s*2026/i.test(lower); if (!shouldLog) return; fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'C', location: 'import-consignado.ts:runImportConsignado', msg: '[DEBUG] extrato_file_parsed', data: { fileName: file.name, fileBytes: buffer.length, headers: fileColumns.length, rows: rows.length }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+      // #endregion debug-point E:extrato-file-parsed
+
       db.run('BEGIN;');
       try {
         if (fileColumns.length > 0) {
@@ -10922,6 +14207,10 @@ export async function runImportConsignado(opts?: {
             insertedRows: inserted.insertedRows,
             skippedRows: inserted.skippedRows,
           });
+
+          // #region debug-point F:extrato-file-inserted
+          ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } const lower = String(file.name ?? '').toLowerCase(); const shouldLog = idx === 0 || /45-0/i.test(file.name) || /maio\s*2026/i.test(lower); if (!shouldLog) return; fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'C', location: 'import-consignado.ts:runImportConsignado', msg: '[DEBUG] extrato_file_inserted', data: { fileName: file.name, insertedRows: inserted.insertedRows, skippedRows: inserted.skippedRows }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+          // #endregion debug-point F:extrato-file-inserted
         } else {
           extratosFiles.push({
             name: file.name,
@@ -11094,13 +14383,22 @@ export async function runImportConsignado(opts?: {
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+
+    // #region debug-point J:run-import-error
+    ;(() => { let u = 'http://127.0.0.1:7777/event', s = 'extrato-recurso-import'; try { const e = fs.readFileSync('.dbg/extrato-recurso-import.env', 'utf8'); u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u; s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s; } catch { void 0; } fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId: s, runId: 'pre', hypothesisId: 'D', location: 'import-consignado.ts:runImportConsignado', msg: '[DEBUG] run_import_error', data: { message: String(message ?? '').slice(0, 1200), target, mode, hasNotificationTo: Boolean(String(notificationTo ?? '').trim()), hasNotificationFrom: Boolean(String(notificationFrom ?? '').trim()) }, ts: Date.now() }) }).catch(() => { void 0; }); })();
+    // #endregion debug-point J:run-import-error
+
     if (notificationTo && notificationFrom) {
       await sendGraphMail({
         token,
         from: notificationFrom,
         to: notificationTo,
         subject: 'Importação de consignados - erro',
-        html: `<p>Erro na importação.</p><p>${message}</p>`,
+        html: buildEmailTemplateHtml({
+          title: 'Portal Administrativo',
+          subtitle: 'Importação de consignados',
+          contentHtml: `<p style="margin:0 0 10px 0;"><b>Erro na importação.</b></p><pre style="margin:0;white-space:pre-wrap;background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;font-size:12px;line-height:1.45;color:#111827;">${escapeHtml(message)}</pre>`,
+        }),
       });
     }
     throw err;
@@ -11115,7 +14413,10 @@ export async function runImportConsignado(opts?: {
       from: notificationFrom,
       to: notificationTo,
       subject: 'Importação de consignados - sucesso',
-      html: `<p>Importação concluída.</p>
+      html: buildEmailTemplateHtml({
+        title: 'Portal Administrativo',
+        subtitle: 'Importação de consignados',
+        contentHtml: `<p style="margin:0 0 10px 0;"><b>Importação concluída.</b></p>
 <ul>
 <li>Extratos importados: ${importedExtratosCount}</li>
 <li>Extratos movidos para "${importedFolderName}": ${movedExtratosCount}</li>
@@ -11126,6 +14427,7 @@ export async function runImportConsignado(opts?: {
 <li>Relatórios inseridos (sem duplicar): ${insertedRelatoriosRows}</li>
 <li>Relatórios ignorados (duplicados): ${skippedRelatoriosRows}</li>
 </ul>`,
+      }),
     });
   }
 
@@ -11220,7 +14522,8 @@ function normalizeUrlForMatch(value: string): string {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .replace(/\/+$/g, '');
 }
 
 function selectLearningProfileForFile(
@@ -11532,13 +14835,59 @@ function importRecursoAlegoXlsxIntoTable(opts: {
         skippedNoCpf += 1;
         continue;
       }
+      const normalizedRow: Record<string, unknown> = { ...(row as any) };
+      if ('Mês' in normalizedRow && 'Ano' in normalizedRow) {
+        const rawAno = String((normalizedRow as any).Ano ?? '').trim();
+        const rawMes = String((normalizedRow as any)['Mês'] ?? '').trim();
+        const ano = Number(rawAno);
+        const mesNorm = rawMes
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim();
+        const monthMap: Record<string, number> = {
+          janeiro: 1,
+          fevereiro: 2,
+          marco: 3,
+          abril: 4,
+          maio: 5,
+          junho: 6,
+          julho: 7,
+          agosto: 8,
+          setembro: 9,
+          outubro: 10,
+          novembro: 11,
+          dezembro: 12,
+        };
+        const numToName: Record<number, string> = {
+          1: 'Janeiro',
+          2: 'Fevereiro',
+          3: 'Março',
+          4: 'Abril',
+          5: 'Maio',
+          6: 'Junho',
+          7: 'Julho',
+          8: 'Agosto',
+          9: 'Setembro',
+          10: 'Outubro',
+          11: 'Novembro',
+          12: 'Dezembro',
+        };
+        const monthNum = monthMap[mesNorm];
+        if (Number.isFinite(ano) && ano > 1990 && ano < 2200 && monthNum) {
+          const nextMonth = monthNum === 12 ? 1 : monthNum + 1;
+          const nextYear = monthNum === 12 ? ano + 1 : ano;
+          ;(normalizedRow as any).Ano = String(nextYear);
+          ;(normalizedRow as any)['Mês'] = numToName[nextMonth] ?? rawMes;
+        }
+      }
       const rowForHash: Record<string, unknown> = {};
       const values = finalColumns.map((col) => {
         if (col === 'CPF') {
           rowForHash.CPF = cpf;
           return cpf;
         }
-        const v = col in row ? toStableValue((row as any)[col]) : '';
+        const v = col in normalizedRow ? toStableValue((normalizedRow as any)[col]) : '';
         rowForHash[col] = v;
         return v;
       });
@@ -11577,8 +14926,21 @@ async function readRecursoMpgoPdfTable(fileName: string, file: Buffer): Promise<
   const extracted = await extractPdf(file);
   const rawText = extracted.pages.map((p) => p.text || '').join('\n');
 
-  const competencia =
+  const competenciaRaw =
     (rawText.match(/per[ií]odo:\s*(\d{2}\/\d{4})/i)?.[1] ?? '').trim() || null;
+  const addOneMonthMmYyyy = (v: string | null): string | null => {
+    const t = String(v ?? '').trim();
+    const m = t.match(/^(\d{2})\/(\d{4})$/);
+    if (!m) return v;
+    const mm = Number(m[1]);
+    const yyyy = Number(m[2]);
+    if (!Number.isFinite(mm) || mm < 1 || mm > 12) return v;
+    if (!Number.isFinite(yyyy) || yyyy < 2000 || yyyy > 2100) return v;
+    const nextMonth = mm === 12 ? 1 : mm + 1;
+    const nextYear = mm === 12 ? yyyy + 1 : yyyy;
+    return `${String(nextMonth).padStart(2, '0')}/${String(nextYear)}`;
+  };
+  const competencia = addOneMonthMmYyyy(competenciaRaw);
   const orgao =
     (rawText.match(/ÓRGÃO:\s*([^\r\n]+)/i)?.[1] ?? '').trim() || null;
 
@@ -12653,40 +16015,46 @@ export async function importByLearningProfileFromFolderUrl(opts: { folderUrl: st
   }
 
   const importedFolderName = process.env.SHAREPOINT_IMPORTED_FOLDER ?? 'Importados';
-  const filesOutsideImportados = await listSpreadsheetFilesRecursive({
-    token,
-    driveId: resolved.driveId,
-    rootFolderId: resolved.itemId,
-    excludeFolderNames: [importedFolderName],
-    fileFilter: (name) => {
-      const lower = name.trim().toLowerCase();
-      if (profile.kind === 'recurso_mpgo') {
-        return lower.endsWith('.pdf') && fileRe.test(name);
-      }
-      return (
-        (lower.endsWith('.xlsx') || lower.endsWith('.xls') || lower.endsWith('.xlsm')) &&
-        fileRe.test(name)
-      );
-    },
-  });
-  const files =
-    filesOutsideImportados.length > 0
-      ? filesOutsideImportados
-      : await listSpreadsheetFilesRecursive({
+  const rootFolderIdForSearch =
+    profile.kind === 'recurso_mpgo'
+      ? await resolveRecursoMpgoFolderId({
           token,
           driveId: resolved.driveId,
-          rootFolderId: resolved.itemId,
-          fileFilter: (name) => {
-            const lower = name.trim().toLowerCase();
-            if (profile.kind === 'recurso_mpgo') {
-              return lower.endsWith('.pdf') && fileRe.test(name);
-            }
-            return (
-              (lower.endsWith('.xlsx') || lower.endsWith('.xls') || lower.endsWith('.xlsm')) &&
-              fileRe.test(name)
-            );
-          },
-        });
+          baseFolderId: resolved.itemId,
+        })
+      : resolved.itemId;
+
+  const listCandidateFiles = async (opts: { excludeImportados: boolean; relaxedMpgo: boolean }) => {
+    return await listSpreadsheetFilesRecursive({
+      token,
+      driveId: resolved.driveId,
+      rootFolderId: rootFolderIdForSearch,
+      ...(opts.excludeImportados ? { excludeFolderNames: [importedFolderName] } : {}),
+      fileFilter: (name) => {
+        const lower = name.trim().toLowerCase();
+        if (profile.kind === 'recurso_mpgo') {
+          const okPdf = lower.endsWith('.pdf');
+          if (!okPdf) return false;
+          return opts.relaxedMpgo ? true : fileRe.test(name);
+        }
+        return (
+          (lower.endsWith('.xlsx') || lower.endsWith('.xls') || lower.endsWith('.xlsm')) &&
+          fileRe.test(name)
+        );
+      },
+    });
+  };
+
+  let files = await listCandidateFiles({ excludeImportados: true, relaxedMpgo: false });
+  if (files.length === 0 && profile.kind === 'recurso_mpgo') {
+    files = await listCandidateFiles({ excludeImportados: true, relaxedMpgo: true });
+  }
+  if (files.length === 0) {
+    files = await listCandidateFiles({ excludeImportados: false, relaxedMpgo: false });
+    if (files.length === 0 && profile.kind === 'recurso_mpgo') {
+      files = await listCandidateFiles({ excludeImportados: false, relaxedMpgo: true });
+    }
+  }
   if (files.length === 0) {
     throw new Error('Nenhum arquivo encontrado na pasta para o perfil selecionado.');
   }

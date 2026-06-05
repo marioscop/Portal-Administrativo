@@ -88,6 +88,10 @@ function useHashView(defaultView: ViewId) {
 }
 
 export default function CreditoPage() {
+  const orgaoSort = useMemo(() => {
+    const collator = new Intl.Collator('pt-BR', { sensitivity: 'base', numeric: true })
+    return (a: string, b: string) => collator.compare(a.trim(), b.trim())
+  }, [])
   const initialView = useMemo(() => {
     return parseViewFromHash(window.location.hash.replace('#', '')) ?? 'home'
   }, [])
@@ -158,6 +162,14 @@ export default function CreditoPage() {
   )
   const [notificationEmailContabilidade, setNotificationEmailContabilidade] =
     useState(storedConfig?.notificationEmailContabilidade ?? '')
+  const [teamsDelegatedConnected, setTeamsDelegatedConnected] = useState(false)
+  const [teamsDelegatedDeviceCode, setTeamsDelegatedDeviceCode] = useState<null | {
+    userCode: string
+    verificationUri: string
+    message: string
+    expiresAt: string
+  }>(null)
+  const [teamsDelegatedLoading, setTeamsDelegatedLoading] = useState(false)
   const [accessFixedEmail, setAccessFixedEmail] = useState(
     'mario.junior@sicoobjuriscred.com.br',
   )
@@ -236,6 +248,7 @@ export default function CreditoPage() {
   >([])
   const [conciliacaoMonthsLoading, setConciliacaoMonthsLoading] = useState(false)
   const [conciliacaoOnlyDiff, setConciliacaoOnlyDiff] = useState(false)
+  const [relatorioVencimentoFilter, setRelatorioVencimentoFilter] = useState('')
   const [conciliacaoLoading, setConciliacaoLoading] = useState(false)
   const [conciliacaoError, setConciliacaoError] = useState<string | null>(null)
   const [conciliacaoExpandedKeys, setConciliacaoExpandedKeys] = useState<string[]>(
@@ -285,6 +298,7 @@ export default function CreditoPage() {
       cpf: string
       nome: string
       value: string
+      vencimento: string | null
       status: 'conciliado' | 'pendencia'
       pairId: string | null
     }>
@@ -303,7 +317,16 @@ export default function CreditoPage() {
         createdAt: string
         action: string
         justification: string
+        status?: string | null
+        gerenteEmail?: string | null
       }
+      repactuacoes?: Array<{
+        id: number
+        createdAt: string
+        status: string
+        gerenteEmail: string | null
+        justification: string
+      }>
     }>
     message?: string
   }>(null)
@@ -311,11 +334,13 @@ export default function CreditoPage() {
     cpf: string
     nome: string
     value: string
+    vencimento: string | null
   }>(null)
   const [cloneSisbrLoading, setCloneSisbrLoading] = useState(false)
   const [cloneSisbrError, setCloneSisbrError] = useState<string | null>(null)
-  const [cloneSisbrAction, setCloneSisbrAction] = useState('clonar_para_relatorio_sisbr')
+  const [cloneSisbrAction, setCloneSisbrAction] = useState<CloneSisbrAction>('clonar_para_relatorio_sisbr')
   const [cloneSisbrJustification, setCloneSisbrJustification] = useState('')
+  const [cloneSisbrDevolucaoDate, setCloneSisbrDevolucaoDate] = useState('')
   const [cloneSisbrContext, setCloneSisbrContext] = useState<null | {
     targetEmpresa: string
     sourceEmpresas: string[]
@@ -333,7 +358,11 @@ export default function CreditoPage() {
   const [conciliacaoCloseModalOpen, setConciliacaoCloseModalOpen] = useState(false)
   const [conciliacaoCloseStep, setConciliacaoCloseStep] = useState<1 | 2 | 3>(1)
   const [conciliacaoCloseError, setConciliacaoCloseError] = useState<string | null>(null)
+  const [conciliacaoCloseMode, setConciliacaoCloseMode] = useState<'total' | 'parcial'>('total')
+  const [conciliacaoCloseVencimento, setConciliacaoCloseVencimento] = useState('')
   const [conciliacaoReopenModalOpen, setConciliacaoReopenModalOpen] = useState(false)
+  const [conciliacaoReopenMode, setConciliacaoReopenMode] = useState<'total' | 'parcial'>('total')
+  const [conciliacaoReopenVencimento, setConciliacaoReopenVencimento] = useState('')
   const [conciliacaoReopenPassword, setConciliacaoReopenPassword] = useState('')
   const [conciliacaoReopenError, setConciliacaoReopenError] = useState<string | null>(null)
   const [conciliacaoClosedBalloonVisible, setConciliacaoClosedBalloonVisible] = useState(false)
@@ -345,15 +374,61 @@ export default function CreditoPage() {
     nome: string
     cpf: string
     value: string
+    vencimento: string | null
     empresa: string | null
-    ocorrencia: null | { id: number; createdAt: string; action: string; justification: string }
+    status: 'conciliado' | 'pendencia'
+    ocorrencia: null | {
+      id: number
+      createdAt: string
+      action: string
+      justification: string
+      status?: string | null
+      gerenteEmail?: string | null
+    }
+    ocorrencias: Array<{
+      id: number
+      createdAt: string
+      action: string
+      justification: string
+      status?: string | null
+      gerenteEmail?: string | null
+    }>
+    repactuacoes: Array<{
+      id: number
+      createdAt: string
+      status: string
+      gerenteEmail: string | null
+      justification: string
+    }>
     readOnly?: boolean
   }>(null)
+  const [ocorrenciaModalShowNew, setOcorrenciaModalShowNew] = useState(false)
+  const [ocorrenciaModalGroupsOpen, setOcorrenciaModalGroupsOpen] = useState<Record<string, boolean>>({})
+  const defaultNaoPossuiRecursoMessage =
+    'Prezado(a),\n\n' +
+    'Informamos que o servidor em questão não possui recursos disponíveis para atendimento da demanda no momento.\n\n' +
+    'Dessa forma, solicitamos que a situação seja regularizada junto ao setor Financeiro no prazo máximo de 5 (cinco) dias úteis, contados a partir do recebimento desta comunicação.\n\n' +
+    'Ressaltamos que, caso não haja uma resolução dentro do prazo estabelecido, o assunto será encaminhado à Diretoria para conhecimento e deliberação das medidas cabíveis.\n\n' +
+    'Permanecemos à disposição para esclarecimentos.\n\n' +
+    'Atenciosamente,\n' +
+    'Equipe Financeira'
   const [relatorioOcorrenciaAction, setRelatorioOcorrenciaAction] = useState(
     'alterar_orgao_relatorio_sisbr',
   )
   const [relatorioOcorrenciaToOrgao, setRelatorioOcorrenciaToOrgao] = useState('')
   const [relatorioOcorrenciaJustification, setRelatorioOcorrenciaJustification] = useState('')
+  const [relatorioOcorrenciaUndoJustification, setRelatorioOcorrenciaUndoJustification] = useState('')
+  const [relatorioLiquidacaoForaVencimentoDate, setRelatorioLiquidacaoForaVencimentoDate] =
+    useState('')
+  const [relatorioRecursoJudicialNovoValor, setRelatorioRecursoJudicialNovoValor] = useState('')
+  const [relatorioRecursoJudicialAutoJustification, setRelatorioRecursoJudicialAutoJustification] =
+    useState(false)
+  const [relatorioRepactuacaoStatus, setRelatorioRepactuacaoStatus] = useState<'pendente_gerente' | 'concluido'>(
+    'pendente_gerente',
+  )
+  const [relatorioRepactuacaoGerenteEmail, setRelatorioRepactuacaoGerenteEmail] = useState('')
+  const [relatorioNaoPossuiRecursoGerenteEmail, setRelatorioNaoPossuiRecursoGerenteEmail] =
+    useState('')
   const [relatorioOcorrenciaSaving, setRelatorioOcorrenciaSaving] = useState(false)
   const [relatorioOcorrenciaError, setRelatorioOcorrenciaError] = useState<string | null>(null)
   const [conciliacaoExportingXlsx, setConciliacaoExportingXlsx] = useState(false)
@@ -406,8 +481,50 @@ export default function CreditoPage() {
   const [userPhotoUrl, setUserPhotoUrl] = useState<string | null>(null)
 
   const isMain = view === 'home' || view === 'dashboard'
-  const conciliacaoIsClosed = Boolean(conciliacaoData?.closed?.isClosed)
+  const closedVencimentos = Array.isArray((conciliacaoData as any)?.closed?.closedVencimentos)
+    ? ((conciliacaoData as any).closed.closedVencimentos as string[])
+    : []
+  const conciliacaoTotalIsClosed = Boolean(conciliacaoData?.closed?.isClosed)
+  const isVencimentoLocked = (v: unknown) =>
+    conciliacaoTotalIsClosed || closedVencimentos.includes(normalizeVencimentoLabel(v))
+  const vencimentoSelecionado = relatorioVencimentoFilter.trim()
+  const conciliacaoIsClosed =
+    conciliacaoTotalIsClosed ||
+    (Boolean(vencimentoSelecionado) && closedVencimentos.includes(vencimentoSelecionado))
   const ocorrenciaReadOnly = conciliacaoIsClosed || Boolean(ocorrenciaModal?.readOnly)
+  const ocorrenciaModalOcorrencias = useMemo(() => {
+    if (!ocorrenciaModal) return []
+    const list = Array.isArray((ocorrenciaModal as any).ocorrencias)
+      ? ((ocorrenciaModal as any).ocorrencias as any[])
+      : []
+    if (list.length > 0) return list
+    return ocorrenciaModal.ocorrencia ? [ocorrenciaModal.ocorrencia] : []
+  }, [ocorrenciaModal])
+  const ocorrenciaModalOcorrenciasByTipo = useMemo(() => {
+    const buckets = new Map<string, any[]>()
+    for (const o of ocorrenciaModalOcorrencias) {
+      const action = String((o as any)?.action ?? '').trim()
+      const label = formatOcorrenciaActionLabel(action)
+      const key = label || action || 'Ocorrência'
+      const list = buckets.get(key) ?? []
+      list.push(o)
+      buckets.set(key, list)
+    }
+    const out = Array.from(buckets.entries())
+      .map(([label, items]) => ({ label, items }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'))
+    return out
+  }, [formatOcorrenciaActionLabel, ocorrenciaModalOcorrencias])
+
+  useEffect(() => {
+    if (!ocorrenciaModal) {
+      setOcorrenciaModalShowNew(false)
+      setOcorrenciaModalGroupsOpen({})
+      return
+    }
+    setOcorrenciaModalShowNew(false)
+    setOcorrenciaModalGroupsOpen({})
+  }, [ocorrenciaModal])
   const headerUserLabel = String(userDisplayName || 'SICOOB JURISCRED').trim()
 
   useEffect(() => {
@@ -866,6 +983,7 @@ export default function CreditoPage() {
               recursoMpgoUrl?: string | null
               notificationEmail?: string | null
               notificationEmailContabilidade?: string | null
+              teamsDelegatedConnected?: boolean
               message?: string
             }
         if (!res.ok) {
@@ -881,12 +999,14 @@ export default function CreditoPage() {
           typeof data?.notificationEmailContabilidade === 'string'
             ? data!.notificationEmailContabilidade!.trim()
             : ''
+        const remoteTeamsDelegatedConnected = data?.teamsDelegatedConnected === true
         if (remote) setSharePointFolderPath(remote)
         if (remoteAlego) setRecursoAlegoUrl(remoteAlego)
         if (remoteMpgo) setRecursoMpgoUrl(remoteMpgo)
         if (remoteNotificationEmail) setNotificationEmail(remoteNotificationEmail)
         if (remoteNotificationEmailContabilidade)
           setNotificationEmailContabilidade(remoteNotificationEmailContabilidade)
+        setTeamsDelegatedConnected(remoteTeamsDelegatedConnected)
 
         const shouldMigrateSharePoint = !remote
         if (didAutoMigrateSharePointFolderPathRef.current) return
@@ -958,6 +1078,120 @@ export default function CreditoPage() {
       })
     } catch {
       return
+    }
+  }
+
+  const refreshTeamsDelegatedConnectedFromServer = async () => {
+    try {
+      const res = await fetch('/api/consignado/automation/config')
+      const data = (await res.json().catch(() => null)) as null | {
+        teamsDelegatedConnected?: boolean
+      }
+      if (!res.ok) return
+      setTeamsDelegatedConnected(data?.teamsDelegatedConnected === true)
+    } catch {
+      return
+    }
+  }
+
+  const startTeamsDelegatedLogin = async () => {
+    if (settingsLocked) return
+    setTeamsDelegatedLoading(true)
+    try {
+      const res = await fetch('/api/consignado/teams/delegated/start', { method: 'POST' })
+      const data = (await res.json().catch(() => null)) as
+        | null
+        | {
+            userCode?: unknown
+            verificationUri?: unknown
+            message?: unknown
+            expiresAt?: unknown
+          }
+      if (!res.ok) {
+        const msg =
+          (typeof (data as any)?.message === 'string' && String((data as any).message).trim()) ||
+          `Falha ao iniciar login do Teams (HTTP ${res.status}).`
+        throw new Error(msg)
+      }
+      const userCode = typeof data?.userCode === 'string' ? data.userCode.trim() : ''
+      const verificationUri =
+        typeof data?.verificationUri === 'string' ? data.verificationUri.trim() : ''
+      const message = typeof data?.message === 'string' ? data.message.trim() : ''
+      const expiresAt = typeof data?.expiresAt === 'string' ? data.expiresAt.trim() : ''
+      if (!userCode || !verificationUri || !expiresAt) {
+        throw new Error('Resposta inválida ao iniciar login do Teams.')
+      }
+      setTeamsDelegatedConnected(false)
+      setTeamsDelegatedDeviceCode({ userCode, verificationUri, message, expiresAt })
+      toast.success('Login do Teams iniciado.')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao iniciar login do Teams.'
+      toast.error(msg)
+    } finally {
+      setTeamsDelegatedLoading(false)
+      void refreshTeamsDelegatedConnectedFromServer()
+    }
+  }
+
+  const finishTeamsDelegatedLogin = async () => {
+    if (settingsLocked) return
+    setTeamsDelegatedLoading(true)
+    const toastId = toast.loading('Aguardando autorização do Teams...')
+    try {
+      for (let i = 0; i < 40; i += 1) {
+        const res = await fetch('/api/consignado/teams/delegated/finish', { method: 'POST' })
+        const data = (await res.json().catch(() => null)) as null | { status?: string; message?: string }
+        if (!res.ok) {
+          throw new Error(data?.message || `Falha ao concluir login do Teams (HTTP ${res.status}).`)
+        }
+        const status = String(data?.status ?? '').trim()
+        if (status === 'pending') {
+          await new Promise((r) => window.setTimeout(r, 1500))
+          continue
+        }
+        if (status === 'connected') {
+          setTeamsDelegatedConnected(true)
+          setTeamsDelegatedDeviceCode(null)
+          toast.success('Teams conectado.', { id: toastId })
+          return
+        }
+        if (status === 'expired') {
+          setTeamsDelegatedConnected(false)
+          setTeamsDelegatedDeviceCode(null)
+          toast.error('Código expirado. Inicie o login novamente.', { id: toastId })
+          return
+        }
+        toast.error('Resposta inválida ao concluir login do Teams.', { id: toastId })
+        return
+      }
+      toast.error('Não foi possível concluir o login do Teams.', { id: toastId })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao concluir login do Teams.'
+      toast.error(msg, { id: toastId })
+    } finally {
+      setTeamsDelegatedLoading(false)
+      void refreshTeamsDelegatedConnectedFromServer()
+    }
+  }
+
+  const disconnectTeamsDelegatedLogin = async () => {
+    if (settingsLocked) return
+    setTeamsDelegatedLoading(true)
+    try {
+      const res = await fetch('/api/consignado/teams/delegated/disconnect', { method: 'POST' })
+      const data = (await res.json().catch(() => null)) as null | { status?: string; message?: string }
+      if (!res.ok) {
+        throw new Error(data?.message || `Falha ao desconectar Teams (HTTP ${res.status}).`)
+      }
+      setTeamsDelegatedConnected(false)
+      setTeamsDelegatedDeviceCode(null)
+      toast.success('Teams desconectado.')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao desconectar Teams.'
+      toast.error(msg)
+    } finally {
+      setTeamsDelegatedLoading(false)
+      void refreshTeamsDelegatedConnectedFromServer()
     }
   }
 
@@ -1195,6 +1429,312 @@ export default function CreditoPage() {
     return unique
   }, [orgaoDePara])
 
+  function normalizeVencimentoLabel(v: unknown) {
+    return String(v ?? '').trim() || '-'
+  }
+  function formatOcorrenciaActionLabel(v: unknown) {
+    const t = String(v ?? '').trim()
+    if (!t) return '-'
+    if (t === 'alterar_orgao_relatorio_sisbr' || t.startsWith('alterar_orgao_relatorio')) return 'Alterar Órgão'
+    if (t === 'repactuacao_relatorio_sisbr' || t.startsWith('repactuacao')) return 'Repactuação'
+    if (t === 'liquidacao_ccs_relatorio_sisbr' || t.startsWith('liquidacao_ccs')) return 'Liquidação CCS'
+    if (t === 'nao_possui_recurso_relatorio_sisbr' || t.startsWith('nao_possui_recurso')) return 'Não possui Recurso'
+    if (
+      t === 'recurso_judicial_valor_a_menor_relatorio_sisbr' ||
+      t.startsWith('recurso_judicial_valor_a_menor')
+    )
+      return 'Recurso Judicial - Valor a Menor'
+    if (t === 'quitado_recurso' || t.startsWith('quitado_recurso')) return 'Quitado'
+    return t
+  }
+  type CloneSisbrAction = 'clonar_para_relatorio_sisbr' | 'quitado_recurso'
+  type RepactuacaoStatus = 'pendente_gerente' | 'concluido'
+  const repactuacaoStatusLabel = (s: RepactuacaoStatus) =>
+    s === 'pendente_gerente' ? 'Pendente Gerente' : 'Concluido'
+  const repactuacaoStatusStyle = (s: RepactuacaoStatus) =>
+    s === 'concluido'
+      ? { bg: 'rgba(0,174,157,0.20)', border: '1px solid rgba(0,174,157,0.55)' }
+      : { bg: 'rgba(245,197,66,0.18)', border: '1px solid rgba(245,197,66,0.55)' }
+
+  const RepactuacaoStatusSelect = (props: {
+    value: RepactuacaoStatus
+    onChange: (next: RepactuacaoStatus) => void
+    disabled?: boolean
+  }) => {
+    const { value, onChange, disabled } = props
+    const [open, setOpen] = useState(false)
+    const ref = useRef<HTMLDivElement | null>(null)
+
+    useEffect(() => {
+      if (!open) return
+      const onDown = (e: MouseEvent) => {
+        const el = ref.current
+        if (!el) return
+        if (e.target instanceof Node && !el.contains(e.target)) setOpen(false)
+      }
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') setOpen(false)
+      }
+      window.addEventListener('mousedown', onDown)
+      window.addEventListener('keydown', onKey)
+      return () => {
+        window.removeEventListener('mousedown', onDown)
+        window.removeEventListener('keydown', onKey)
+      }
+    }, [open])
+
+    const base = repactuacaoStatusStyle(value)
+    const options: RepactuacaoStatus[] = ['pendente_gerente', 'concluido']
+
+    return (
+      <div ref={ref} style={{ position: 'relative' }}>
+        <button
+          type="button"
+          className="control"
+          onClick={() => {
+            if (disabled) return
+            setOpen((v) => !v)
+          }}
+          disabled={Boolean(disabled)}
+          style={{
+            width: '100%',
+            height: 44,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            padding: '10px 12px',
+            borderRadius: 12,
+            background: base.bg,
+            border: base.border,
+            color: 'rgba(255,255,255,0.92)',
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            opacity: disabled ? 0.55 : 1,
+          }}
+        >
+          <span style={{ fontWeight: 850 }}>{repactuacaoStatusLabel(value)}</span>
+          <ChevronDown size={18} />
+        </button>
+        {open ? (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 8px)',
+              left: 0,
+              right: 0,
+              zIndex: 80,
+              borderRadius: 12,
+              border: '1px solid rgba(255,255,255,0.16)',
+              background: 'rgb(12, 22, 40)',
+              boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
+              overflow: 'hidden',
+            }}
+          >
+            {options.map((opt) => {
+              const st = repactuacaoStatusStyle(opt)
+              const active = opt === value
+              return (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => {
+                    onChange(opt)
+                    setOpen(false)
+                  }}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '10px 12px',
+                    background: active ? st.bg : 'transparent',
+                    border: 'none',
+                    borderBottom: '1px solid rgba(255,255,255,0.10)',
+                    color: 'rgba(255,255,255,0.92)',
+                    cursor: 'pointer',
+                    fontWeight: active ? 900 : 800,
+                  }}
+                >
+                  {repactuacaoStatusLabel(opt)}
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  const cloneSisbrActionLabel = (a: CloneSisbrAction) =>
+    a === 'quitado_recurso' ? 'Quitado' : 'Clonar para Relatorio Sisbr'
+  const cloneSisbrActionStyle = (a: CloneSisbrAction) =>
+    a === 'quitado_recurso'
+      ? { bg: 'rgba(245,197,66,0.18)', border: '1px solid rgba(245,197,66,0.55)' }
+      : { bg: 'rgba(0,174,157,0.14)', border: '1px solid rgba(0,174,157,0.45)' }
+
+  const CloneSisbrActionSelect = (props: {
+    value: CloneSisbrAction
+    onChange: (next: CloneSisbrAction) => void
+    disabled?: boolean
+  }) => {
+    const { value, onChange, disabled } = props
+    const [open, setOpen] = useState(false)
+    const ref = useRef<HTMLDivElement | null>(null)
+
+    useEffect(() => {
+      if (!open) return
+      const onDown = (e: MouseEvent) => {
+        const el = ref.current
+        if (!el) return
+        if (e.target instanceof Node && !el.contains(e.target)) setOpen(false)
+      }
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') setOpen(false)
+      }
+      window.addEventListener('mousedown', onDown)
+      window.addEventListener('keydown', onKey)
+      return () => {
+        window.removeEventListener('mousedown', onDown)
+        window.removeEventListener('keydown', onKey)
+      }
+    }, [open])
+
+    const base = cloneSisbrActionStyle(value)
+    const options: CloneSisbrAction[] = ['clonar_para_relatorio_sisbr', 'quitado_recurso']
+
+    return (
+      <div ref={ref} style={{ position: 'relative' }}>
+        <button
+          type="button"
+          className="control"
+          onClick={() => {
+            if (disabled) return
+            setOpen((v) => !v)
+          }}
+          disabled={Boolean(disabled)}
+          style={{
+            width: '100%',
+            height: 44,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            padding: '10px 12px',
+            borderRadius: 12,
+            background: base.bg,
+            border: base.border,
+            color: 'rgba(255,255,255,0.92)',
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            opacity: disabled ? 0.55 : 1,
+          }}
+        >
+          <span style={{ fontWeight: 850 }}>{cloneSisbrActionLabel(value)}</span>
+          <ChevronDown size={18} />
+        </button>
+        {open ? (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 8px)',
+              left: 0,
+              right: 0,
+              zIndex: 80,
+              borderRadius: 12,
+              border: '1px solid rgba(255,255,255,0.16)',
+              background: 'rgb(12, 22, 40)',
+              boxShadow: '0 20px 70px rgba(0,0,0,0.55)',
+              overflow: 'hidden',
+            }}
+          >
+            {options.map((opt) => {
+              const st = cloneSisbrActionStyle(opt)
+              const active = opt === value
+              return (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => {
+                    onChange(opt)
+                    setOpen(false)
+                  }}
+                  style={{
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '10px 12px',
+                    background: active ? st.bg : 'transparent',
+                    border: 'none',
+                    borderBottom: '1px solid rgba(255,255,255,0.10)',
+                    color: active ? 'rgba(255,255,255,0.96)' : 'rgba(255,255,255,0.90)',
+                    cursor: 'pointer',
+                    fontWeight: active ? 900 : 800,
+                  }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                    <span
+                      style={{
+                        width: 10,
+                        height: 10,
+                        borderRadius: 99,
+                        background:
+                          opt === 'quitado_recurso'
+                            ? 'rgba(245,197,66,0.95)'
+                            : 'rgba(0,174,157,0.95)',
+                      }}
+                    />
+                    {cloneSisbrActionLabel(opt)}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+  const vencimentoSortKey = (raw: string) => {
+    const t = String(raw ?? '').trim()
+    if (!t) return ''
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t
+    const m = t.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+    if (m) return `${m[3]}-${m[2]}-${m[1]}`
+    return t
+  }
+
+  const relatorioVencimentoOptions = useMemo(() => {
+    if (view !== 'conciliacao-extratos') return []
+    if (!conciliacaoData) return []
+    const base = conciliacaoOnlyDiff
+      ? conciliacaoData.relatorio.filter((x) => x.status === 'pendencia')
+      : conciliacaoData.relatorio
+    const unique = Array.from(new Set(base.map((r) => normalizeVencimentoLabel((r as any).vencimento))))
+    unique.sort((a, b) => (vencimentoSortKey(a) || a).localeCompare(vencimentoSortKey(b) || b, 'pt-BR'))
+    return unique
+  }, [conciliacaoData, conciliacaoOnlyDiff, view])
+
+  const conciliacaoCloseVencimentoOptions = useMemo(() => {
+    return relatorioVencimentoOptions.filter((v) => !closedVencimentos.includes(v))
+  }, [closedVencimentos, relatorioVencimentoOptions])
+
+  const conciliacaoReopenVencimentoOptions = useMemo(() => {
+    const unique = Array.from(new Set(closedVencimentos.map((v) => normalizeVencimentoLabel(v))))
+    unique.sort((a, b) => (vencimentoSortKey(a) || a).localeCompare(vencimentoSortKey(b) || b, 'pt-BR'))
+    return unique
+  }, [closedVencimentos])
+
+  useEffect(() => {
+    if (!conciliacaoReopenModalOpen) return
+    if (conciliacaoReopening) return
+    if (conciliacaoReopenMode !== 'parcial') return
+    const wanted = conciliacaoReopenVencimento.trim()
+    if (wanted && conciliacaoReopenVencimentoOptions.includes(wanted)) return
+    const first = conciliacaoReopenVencimentoOptions[0] ?? ''
+    if (first && first !== wanted) setConciliacaoReopenVencimento(first)
+  }, [
+    conciliacaoReopenModalOpen,
+    conciliacaoReopenMode,
+    conciliacaoReopenVencimento,
+    conciliacaoReopenVencimentoOptions,
+    conciliacaoReopening,
+  ])
+
   useEffect(() => {
     if (view !== 'dashboard') return
     if (conciliacaoOrgao.trim()) return
@@ -1257,10 +1797,12 @@ export default function CreditoPage() {
       return
     }
 
-    const shouldPick = !conciliacaoOrgao.trim() || conciliacaoIsClosed
+    const selected = conciliacaoOrgao.trim()
+    const shouldPick =
+      !selected || !conciliacaoOrgaoOptions.some((o) => o.trim() === selected)
     if (!shouldPick) return
 
-    const runKey = `${monthWanted}|${conciliacaoOrgao.trim()}|${conciliacaoIsClosed ? '1' : '0'}`
+    const runKey = `${monthWanted}|${selected}`
     if (homeAutoPickRef.current === runKey) return
     homeAutoPickRef.current = runKey
 
@@ -1288,7 +1830,7 @@ export default function CreditoPage() {
     return () => {
       cancelled = true
     }
-  }, [conciliacaoIsClosed, conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, conciliacaoOrgaoOptions, view])
+  }, [conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, conciliacaoOrgaoOptions, view])
 
   const relatorioOcorrenciaOrgaoOptions = useMemo(() => {
     const base =
@@ -1335,6 +1877,36 @@ export default function CreditoPage() {
     if (!Number.isFinite(n)) return 0
     return Math.round(n * 100)
   }
+
+  useEffect(() => {
+    if (relatorioOcorrenciaAction !== 'nao_possui_recurso_relatorio_sisbr') return
+    setRelatorioOcorrenciaJustification((prev) =>
+      prev.trim() ? prev : defaultNaoPossuiRecursoMessage,
+    )
+  }, [defaultNaoPossuiRecursoMessage, relatorioOcorrenciaAction])
+
+  useEffect(() => {
+    if (relatorioOcorrenciaAction !== 'recurso_judicial_valor_a_menor_relatorio_sisbr') return
+    if (!ocorrenciaModal) return
+    const oldCents = ptBrMoneyToCents(ocorrenciaModal.value)
+    const newCents = ptBrMoneyToCents(relatorioRecursoJudicialNovoValor || ocorrenciaModal.value)
+    const diffCents = Math.max(0, oldCents - newCents)
+    const template =
+      'Servidora com recurso judicial contra a cooperativa.\n\n' +
+      `Valor Contrato Original: R$ ${centsToPtBr(oldCents)}\n` +
+      `Valor Judicial (Valor editado): R$ ${centsToPtBr(newCents)}\n` +
+      `Diferença: R$ ${centsToPtBr(diffCents)}`
+    setRelatorioOcorrenciaJustification((prev) =>
+      relatorioRecursoJudicialAutoJustification || !prev.trim() ? template : prev,
+    )
+  }, [
+    centsToPtBr,
+    ocorrenciaModal,
+    ptBrMoneyToCents,
+    relatorioOcorrenciaAction,
+    relatorioRecursoJudicialAutoJustification,
+    relatorioRecursoJudicialNovoValor,
+  ])
 
   const normalizeLinkKey = (cpf: string, nome: string) => {
     const cpfDigits = String(cpf ?? '').replace(/\D/g, '')
@@ -1922,6 +2494,16 @@ export default function CreditoPage() {
 
   useEffect(() => {
     if (!cloneSisbrModal) {
+      setCloneSisbrDevolucaoDate('')
+      return
+    }
+    if (cloneSisbrAction !== 'quitado_recurso') {
+      setCloneSisbrDevolucaoDate('')
+    }
+  }, [cloneSisbrAction, cloneSisbrModal])
+
+  useEffect(() => {
+    if (!cloneSisbrModal) {
       setCloneSisbrContext(null)
       return
     }
@@ -2220,6 +2802,11 @@ export default function CreditoPage() {
     conciliacaoSelectedPersonKey,
     conciliacaoOnlyDiff,
   ])
+
+  useEffect(() => {
+    if (view !== 'conciliacao-extratos') return
+    setRelatorioVencimentoFilter('')
+  }, [view, conciliacaoMonth, conciliacaoOrgao])
 
   return (
     <div className="credito-root">
@@ -2571,10 +3158,20 @@ export default function CreditoPage() {
           border-radius: 13px;
           display: grid;
           place-items: center;
+          flex: 0 0 auto;
+          line-height: 0;
           background:
             radial-gradient(18px 18px at 30% 30%, rgba(255,255,255,0.35) 0%, transparent 60%),
             linear-gradient(135deg, rgba(0,174,157,0.92) 0%, rgba(0,54,65,0.92) 100%);
           box-shadow: 0 16px 35px rgba(0,174,157,0.18);
+        }
+
+        .page-icon > svg {
+          width: 20px;
+          height: 20px;
+          max-width: 100%;
+          max-height: 100%;
+          display: block;
         }
 
         .title-wrap {
@@ -2600,6 +3197,24 @@ export default function CreditoPage() {
           white-space: nowrap;
           overflow: hidden;
           text-overflow: ellipsis;
+        }
+
+        .dev-credit {
+          margin: 0;
+          font-size: 0.64rem;
+          color: rgba(255,255,255,0.55);
+          font-weight: 650;
+          font-style: italic;
+          letter-spacing: 0.01em;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          animation: devPulse 6s ease-in-out infinite;
+        }
+
+        @keyframes devPulse {
+          0%, 100% { opacity: 0.55; }
+          50% { opacity: 0.82; }
         }
 
         .header-actions {
@@ -2727,9 +3342,14 @@ export default function CreditoPage() {
           grid-template-columns: 1fr;
         }
 
+        .form-grid-4 {
+          grid-template-columns: 1fr;
+        }
+
         @media (min-width: 900px) {
           .form-grid { grid-template-columns: 1fr 1fr; }
           .form-grid-3 { grid-template-columns: 160px 1fr 260px; }
+          .form-grid-4 { grid-template-columns: 160px 1fr 240px 260px; }
         }
 
         .field label {
@@ -2761,6 +3381,20 @@ export default function CreditoPage() {
         .control:focus {
           border-color: rgba(0,174,157,0.45);
           background: rgba(255,255,255,0.08);
+        }
+
+        .control.control-highlight {
+          border-color: rgba(0,174,157,0.32);
+          background:
+            radial-gradient(220px 120px at 20% 25%, rgba(0,174,157,0.20) 0%, transparent 70%),
+            rgba(0,174,157,0.10);
+        }
+
+        .control.control-highlight:focus {
+          border-color: rgba(0,174,157,0.55);
+          background:
+            radial-gradient(220px 120px at 20% 25%, rgba(0,174,157,0.26) 0%, transparent 70%),
+            rgba(0,174,157,0.14);
         }
 
         .month-select option,
@@ -3547,6 +4181,9 @@ export default function CreditoPage() {
                 <div className="title-wrap">
                   <h1>{title}</h1>
                   <p>{subtitle}</p>
+                  <div className="dev-credit">
+                    Desenvolvido por: Departamento de Tecnologia da Informação - Juriscred
+                  </div>
                 </div>
               </div>
               <div className="header-actions">
@@ -4456,6 +5093,8 @@ export default function CreditoPage() {
                             const used = new Set(orgaoDePara.map((x) => x.extratos))
                             return orgaoValues.extratos
                               .filter((v) => !used.has(v))
+                              .slice()
+                              .sort(orgaoSort)
                               .map((v) => (
                                 <option key={v} value={v}>
                                   {v}
@@ -4482,6 +5121,8 @@ export default function CreditoPage() {
                             const used = new Set(orgaoDePara.map((x) => x.relatorio))
                             return orgaoValues.relatorio
                               .filter((v) => !used.has(v))
+                              .slice()
+                              .sort(orgaoSort)
                               .map((v) => (
                                 <option key={v} value={v}>
                                   {v}
@@ -5034,6 +5675,98 @@ export default function CreditoPage() {
                         placeholder="ex.: contabilidade@sicoobjuriscred.com.br; fiscal@sicoobjuriscred.com.br"
                         disabled={settingsLocked}
                       />
+                    </div>
+                    <div
+                      style={{
+                        marginTop: 14,
+                        paddingTop: 14,
+                        borderTop: '1px solid rgba(255,255,255,0.10)',
+                        display: 'grid',
+                        gap: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 12,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <div style={{ fontWeight: 750, color: 'rgba(255,255,255,0.92)' }}>
+                          Teams (Chat 1:1) — Login Microsoft (delegado)
+                        </div>
+                        <span className="chip">
+                          {teamsDelegatedConnected ? 'conectado' : 'desconectado'}
+                        </span>
+                      </div>
+
+                      {teamsDelegatedDeviceCode ? (
+                        <div
+                          style={{
+                            padding: '10px 12px',
+                            borderRadius: 14,
+                            border: '1px solid rgba(255,255,255,0.10)',
+                            background: 'rgba(255,255,255,0.04)',
+                            display: 'grid',
+                            gap: 8,
+                          }}
+                        >
+                          <div style={{ color: 'rgba(255,255,255,0.92)', fontWeight: 650 }}>
+                            Acesse:{' '}
+                            <a
+                              href={teamsDelegatedDeviceCode.verificationUri}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: 'rgba(127, 210, 255, 0.95)' }}
+                            >
+                              {teamsDelegatedDeviceCode.verificationUri}
+                            </a>
+                          </div>
+                          <div style={{ color: 'rgba(255,255,255,0.92)' }}>
+                            Código: <span style={{ fontWeight: 800 }}>{teamsDelegatedDeviceCode.userCode}</span>
+                          </div>
+                          {teamsDelegatedDeviceCode.message ? (
+                            <div style={{ color: 'rgba(255,255,255,0.70)' }}>
+                              {teamsDelegatedDeviceCode.message}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        {!teamsDelegatedConnected ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => void startTeamsDelegatedLogin()}
+                            disabled={settingsLocked || teamsDelegatedLoading}
+                          >
+                            Iniciar login
+                          </button>
+                        ) : null}
+                        {teamsDelegatedDeviceCode ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => void finishTeamsDelegatedLogin()}
+                            disabled={settingsLocked || teamsDelegatedLoading}
+                          >
+                            Concluir login
+                          </button>
+                        ) : null}
+                        {teamsDelegatedConnected ? (
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => void disconnectTeamsDelegatedLogin()}
+                            disabled={settingsLocked || teamsDelegatedLoading}
+                          >
+                            Desconectar
+                          </button>
+                        ) : null}
+                      </div>
                     </div>
                     <div className="help">
                       Recebe o resultado (sucesso ou erro) do processo de
@@ -5691,7 +6424,7 @@ export default function CreditoPage() {
                             ? 'Fechando...'
                             : conciliacaoReopening
                               ? 'Reabrindo...'
-                              : conciliacaoData?.closed?.isClosed
+                              : conciliacaoIsClosed
                                 ? 'Reabrir conciliação'
                                 : 'Fechar conciliação'
                         }
@@ -5700,7 +6433,7 @@ export default function CreditoPage() {
                             ? 'Fechando conciliação'
                             : conciliacaoReopening
                               ? 'Reabrindo conciliação'
-                              : conciliacaoData?.closed?.isClosed
+                              : conciliacaoIsClosed
                                 ? 'Reabrir conciliação'
                                 : 'Fechar conciliação'
                         }
@@ -5708,27 +6441,57 @@ export default function CreditoPage() {
                         onClick={() => {
                           if (!conciliacaoOrgao.trim()) return
                           if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
-                          if (conciliacaoData?.closed?.isClosed) {
+                          if (conciliacaoIsClosed) {
                             setConciliacaoReopenError(null)
                             setConciliacaoReopenPassword('')
+                            setConciliacaoReopenMode(conciliacaoTotalIsClosed ? 'total' : 'parcial')
+                            setConciliacaoReopenVencimento(
+                              conciliacaoTotalIsClosed ? '' : vencimentoSelecionado,
+                            )
                             setConciliacaoReopenModalOpen(true)
                             return
                           }
                           setConciliacaoCloseError(null)
+                          setConciliacaoCloseMode('total')
+                          setConciliacaoCloseVencimento('')
                           setConciliacaoCloseStep(1)
                           setConciliacaoCloseModalOpen(true)
                         }}
                       >
                         {conciliacaoClosing || conciliacaoReopening ? (
                           <Clock size={18} />
-                        ) : conciliacaoData?.closed?.isClosed ? (
+                        ) : conciliacaoIsClosed ? (
                           <Lock size={18} />
                         ) : (
                           <Unlock size={18} />
                         )}
                       </button>
                     </div>
-                    {conciliacaoData?.closed?.isClosed &&
+                    {!conciliacaoTotalIsClosed &&
+                    closedVencimentos.length > 0 &&
+                    !conciliacaoMonthsLoading &&
+                    !orgaoDeParaLoading ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={conciliacaoClosing || conciliacaoReopening || conciliacaoResending}
+                        title="Reabrir vencimento (parcial)"
+                        aria-label="Reabrir vencimento"
+                        style={{ padding: 11, width: 44, justifyContent: 'center' }}
+                        onClick={() => {
+                          if (!conciliacaoOrgao.trim()) return
+                          if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
+                          setConciliacaoReopenError(null)
+                          setConciliacaoReopenPassword('')
+                          setConciliacaoReopenMode('parcial')
+                          setConciliacaoReopenVencimento('')
+                          setConciliacaoReopenModalOpen(true)
+                        }}
+                      >
+                        <Unlock size={18} />
+                      </button>
+                    ) : null}
+                    {conciliacaoIsClosed &&
                     conciliacaoClosedBalloonVisible &&
                     conciliacaoLockBalloonPos &&
                     typeof document !== 'undefined'
@@ -5740,12 +6503,12 @@ export default function CreditoPage() {
                               top: conciliacaoLockBalloonPos.top,
                             }}
                           >
-                            Conciliação fechada
+                            Conciliação fechada{vencimentoSelecionado ? ` • Vencimento ${vencimentoSelecionado}` : ''}
                           </div>,
                           document.body,
                         )
                       : null}
-                    {conciliacaoData?.closed?.isClosed ? (
+                    {conciliacaoIsClosed ? (
                       <button
                         type="button"
                         className="btn btn-ghost"
@@ -5764,7 +6527,7 @@ export default function CreditoPage() {
                         onClick={async () => {
                           if (!conciliacaoOrgao.trim()) return
                           if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
-                          if (!conciliacaoData?.closed?.isClosed) return
+                          if (!conciliacaoIsClosed) return
                           setConciliacaoError(null)
                           setConciliacaoResending(true)
                           try {
@@ -5777,6 +6540,7 @@ export default function CreditoPage() {
                                 body: JSON.stringify({
                                   month: conciliacaoMonth,
                                   orgao: conciliacaoOrgao.trim(),
+                                  vencimento: vencimentoSelecionado || undefined,
                                   requestedBy: accessFixedEmail,
                                   contabilidadeEmail: notificationEmailContabilidade,
                                   evidencePngBase64,
@@ -5803,10 +6567,24 @@ export default function CreditoPage() {
                       <FileText size={16} />
                       Conciliação
                     </span>
+                    {conciliacaoTotalIsClosed ? (
+                      <span className="chip">
+                        <Lock size={16} />
+                        Fechada
+                      </span>
+                    ) : closedVencimentos.length > 0 ? (
+                      <span
+                        className="chip"
+                        title={`Fechamentos parciais: ${closedVencimentos.join(' | ')}`}
+                      >
+                        <Lock size={16} />
+                        Parcial ({closedVencimentos.length})
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <div className="panel-body" ref={conciliacaoEvidenceRef}>
-                  {conciliacaoData?.closed?.isClosed ? (
+                  {conciliacaoIsClosed ? (
                     <div
                       style={{
                         marginBottom: 12,
@@ -5826,7 +6604,7 @@ export default function CreditoPage() {
                         <Lock size={16} />
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 850, letterSpacing: '0.02em' }}>
-                            Conciliação fechada
+                            Conciliação fechada{vencimentoSelecionado ? ` • Vencimento ${vencimentoSelecionado}` : ''}
                           </div>
                           <div style={{ opacity: 0.78, fontSize: 13, lineHeight: 1.25 }}>
                             Campos de edição desabilitados (somente leitura).
@@ -5834,13 +6612,39 @@ export default function CreditoPage() {
                         </div>
                       </div>
                       <div style={{ opacity: 0.78, fontSize: 13, whiteSpace: 'nowrap' }}>
-                        {conciliacaoData.closed.closedAt
-                          ? `Fechado em ${String(conciliacaoData.closed.closedAt).slice(0, 10)}`
+                        {conciliacaoData?.closed?.closedAt
+                          ? `Fechado em ${String(conciliacaoData?.closed?.closedAt).slice(0, 10)}`
                           : null}
                       </div>
                     </div>
                   ) : null}
-                  <div className="form-grid form-grid-3">
+                  {!conciliacaoTotalIsClosed && closedVencimentos.length > 0 ? (
+                    <div
+                      style={{
+                        marginBottom: 12,
+                        padding: '10px 12px',
+                        borderRadius: 12,
+                        border: '1px solid rgba(255,140,0,0.35)',
+                        background: 'rgba(255,255,255,0.03)',
+                        color: 'rgba(255,255,255,0.92)',
+                        display: 'grid',
+                        gap: 4,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                        <Lock size={16} />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 850, letterSpacing: '0.02em' }}>
+                            Fechamentos parciais ({closedVencimentos.length})
+                          </div>
+                          <div style={{ opacity: 0.78, fontSize: 13, lineHeight: 1.25 }}>
+                            Vencimentos fechados: {closedVencimentos.join(' | ')}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="form-grid form-grid-4">
                     <div className="field">
                       <label>Competência</label>
                       <select
@@ -5872,6 +6676,26 @@ export default function CreditoPage() {
                             {o}
                           </option>
                         ))}
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label>Vencimento</label>
+                      <select
+                        className="control month-select control-highlight"
+                        value={relatorioVencimentoFilter}
+                        onChange={(e) => setRelatorioVencimentoFilter(e.target.value)}
+                        disabled={!conciliacaoOrgao.trim() || relatorioVencimentoOptions.length === 0}
+                        style={{ height: 44 }}
+                      >
+                        <option value="">Todos</option>
+                        {relatorioVencimentoOptions.map((v) => {
+                          const isClosed = closedVencimentos.includes(v)
+                          return (
+                            <option key={v} value={v}>
+                              {isClosed ? `${v} (Fechado)` : v}
+                            </option>
+                          )
+                        })}
                       </select>
                     </div>
                     <div className="field">
@@ -6165,6 +6989,14 @@ export default function CreditoPage() {
                                 ? relatorioBase.filter((x) => matchesSearch(x))
                                 : relatorioBase
 
+                              const relatorioRowsByVencimento = (() => {
+                                const wanted = relatorioVencimentoFilter.trim()
+                                if (!wanted) return relatorioRows
+                                return relatorioRows.filter(
+                                  (r) => normalizeVencimentoLabel((r as any).vencimento) === wanted,
+                                )
+                              })()
+
                               const eligibleGroupKeys = (() => {
                                 const countByCents = (items: Array<{ value: string }>) => {
                                   const m = new Map<number, number>()
@@ -6184,7 +7016,7 @@ export default function CreditoPage() {
                                 const concRecurso = recursoRows.filter(
                                   (x) => x.status === 'conciliado' && Boolean(x.pairId),
                                 )
-                                const concRelatorio = relatorioRows.filter(
+                                const concRelatorio = relatorioRowsByVencimento.filter(
                                   (x) => x.status === 'conciliado' && Boolean(x.pairId),
                                 )
                                 const byKeyRecurso = new Map<string, typeof concRecurso>()
@@ -6527,7 +7359,8 @@ export default function CreditoPage() {
                                                         <td
                                                           onClick={(e) => {
                                                             if (r.status !== 'pendencia') return
-                                                            if (conciliacaoData?.closed?.isClosed) return
+                                                            const rowLocked = isVencimentoLocked(r.vencimento)
+                                                            if (rowLocked) return
                                                             e.stopPropagation()
                                                             setCloneSisbrError(null)
                                                             setCloneSisbrAction('clonar_para_relatorio_sisbr')
@@ -6536,6 +7369,7 @@ export default function CreditoPage() {
                                                               cpf: r.cpf,
                                                               nome: r.nome,
                                                               value: r.value,
+                                                              vencimento: r.vencimento ?? null,
                                                             })
                                                           }}
                                                           style={{
@@ -6550,17 +7384,17 @@ export default function CreditoPage() {
                                                             textOverflow: 'ellipsis',
                                                             whiteSpace: 'nowrap',
                                                             cursor:
-                                                              r.status === 'pendencia' && !conciliacaoData?.closed?.isClosed
+                                                              r.status === 'pendencia' && !isVencimentoLocked(r.vencimento)
                                                                 ? 'pointer'
-                                                                : r.status === 'pendencia' && conciliacaoData?.closed?.isClosed
+                                                                : r.status === 'pendencia' && isVencimentoLocked(r.vencimento)
                                                                   ? 'not-allowed'
                                                                   : undefined,
                                                             textDecoration:
-                                                              r.status === 'pendencia' && !conciliacaoData?.closed?.isClosed
+                                                              r.status === 'pendencia' && !isVencimentoLocked(r.vencimento)
                                                                 ? 'underline'
                                                                 : undefined,
                                                             opacity:
-                                                              r.status === 'pendencia' && conciliacaoData?.closed?.isClosed
+                                                              r.status === 'pendencia' && isVencimentoLocked(r.vencimento)
                                                                 ? 0.55
                                                                 : opts?.indented
                                                                   ? 0.92
@@ -6783,7 +7617,7 @@ export default function CreditoPage() {
                                                 </thead>
                                                 <tbody>
                                                   {(() => {
-                                                    const withIndex = relatorioRows
+                                                    const withIndex = relatorioRowsByVencimento
                                                       .slice(0, 300)
                                                       .map((r, idx) => ({ ...r, __idx: idx }))
                                                     const conc = withIndex.filter((r) => r.status === 'conciliado')
@@ -6892,23 +7726,26 @@ export default function CreditoPage() {
                                                                 textOverflow: 'ellipsis',
                                                                 whiteSpace: 'nowrap',
                                                                 cursor:
-                                                                  r.status === 'pendencia' && !conciliacaoData?.closed?.isClosed
+                                                                  (r.status === 'pendencia' || r.status === 'conciliado') &&
+                                                                  !isVencimentoLocked(r.vencimento)
                                                                     ? 'pointer'
-                                                                    : r.status === 'pendencia' && conciliacaoData?.closed?.isClosed
+                                                                    : (r.status === 'pendencia' ||
+                                                                          r.status === 'conciliado') &&
+                                                                        isVencimentoLocked(r.vencimento)
                                                                       ? 'not-allowed'
                                                                       : undefined,
                                                                 textDecoration:
-                                                                  r.status === 'pendencia' && !conciliacaoData?.closed?.isClosed
+                                                                  r.status === 'pendencia' && !isVencimentoLocked(r.vencimento)
                                                                     ? 'underline'
                                                                     : undefined,
                                                                 opacity:
-                                                                  r.status === 'pendencia' && conciliacaoData?.closed?.isClosed
+                                                                  (r.status === 'pendencia' || r.status === 'conciliado') &&
+                                                                  isVencimentoLocked(r.vencimento)
                                                                     ? 0.55
                                                                     : undefined,
                                                               }}
                                                               onClick={(e) => {
-                                                                if (r.status !== 'pendencia') return
-                                                                if (conciliacaoData?.closed?.isClosed) return
+                                                                if (isVencimentoLocked(r.vencimento)) return
                                                                 e.stopPropagation()
                                                                 if (!conciliacaoMonth || !conciliacaoOrgao) return
                                                                 setRelatorioOcorrenciaError(null)
@@ -6917,12 +7754,27 @@ export default function CreditoPage() {
                                                                 )
                                                                 setRelatorioOcorrenciaToOrgao(conciliacaoOrgao)
                                                                 setRelatorioOcorrenciaJustification('')
+                                                                setRelatorioOcorrenciaUndoJustification('')
+                                                                setRelatorioLiquidacaoForaVencimentoDate('')
+                                                                setRelatorioRepactuacaoStatus('pendente_gerente')
+                                                                setRelatorioRepactuacaoGerenteEmail('')
                                                                 setOcorrenciaModal({
                                                                   nome: r.nome,
                                                                   cpf: r.cpf,
                                                                   value: r.value,
+                                                                  vencimento: r.vencimento ?? null,
                                                                   empresa: r.empresa ?? null,
+                                                                  status: r.status === 'conciliado' ? 'conciliado' : 'pendencia',
                                                                   ocorrencia: r.ocorrencia ?? null,
+                                                                  ocorrencias: Array.isArray((r as any).ocorrencias)
+                                                                    ? ((r as any).ocorrencias as any[])
+                                                                    : r.ocorrencia
+                                                                      ? [r.ocorrencia]
+                                                                      : [],
+                                                                  repactuacoes: Array.isArray((r as any).repactuacoes)
+                                                                    ? ((r as any).repactuacoes as any[])
+                                                                    : [],
+                                                                  readOnly: isVencimentoLocked(r.vencimento),
                                                                 })
                                                               }}
                                                             >
@@ -6946,7 +7798,7 @@ export default function CreditoPage() {
                                                                 onClick={(e) => {
                                                                   e.stopPropagation()
                                                                   if (!conciliacaoMonth || !conciliacaoOrgao) return
-                                                                  const readOnly = Boolean(conciliacaoData?.closed?.isClosed)
+                                                                  const readOnly = isVencimentoLocked(r.vencimento)
                                                                   if (!readOnly) {
                                                                     setRelatorioOcorrenciaError(null)
                                                                     setRelatorioOcorrenciaAction(
@@ -6954,13 +7806,27 @@ export default function CreditoPage() {
                                                                     )
                                                                     setRelatorioOcorrenciaToOrgao(conciliacaoOrgao)
                                                                     setRelatorioOcorrenciaJustification('')
+                                                                    setRelatorioOcorrenciaUndoJustification('')
+                                                                    setRelatorioLiquidacaoForaVencimentoDate('')
+                                                                    setRelatorioRepactuacaoStatus('pendente_gerente')
+                                                                    setRelatorioRepactuacaoGerenteEmail('')
                                                                   }
                                                                   setOcorrenciaModal({
                                                                     nome: r.nome,
                                                                     cpf: r.cpf,
                                                                     value: r.value,
+                                                                    vencimento: r.vencimento ?? null,
                                                                     empresa: r.empresa ?? null,
+                                                                    status: r.status === 'conciliado' ? 'conciliado' : 'pendencia',
                                                                     ocorrencia: r.ocorrencia ?? null,
+                                                                    ocorrencias: Array.isArray((r as any).ocorrencias)
+                                                                      ? ((r as any).ocorrencias as any[])
+                                                                      : r.ocorrencia
+                                                                        ? [r.ocorrencia]
+                                                                        : [],
+                                                                    repactuacoes: Array.isArray((r as any).repactuacoes)
+                                                                      ? ((r as any).repactuacoes as any[])
+                                                                      : [],
                                                                     readOnly,
                                                                   })
                                                                 }}
@@ -7234,6 +8100,9 @@ export default function CreditoPage() {
                                     color: 'rgba(255,255,255,0.92)',
                                     boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
                                     overflow: 'hidden',
+                                    maxHeight: '86vh',
+                                    display: 'flex',
+                                    flexDirection: 'column',
                                   }}
                                   onClick={(e) => e.stopPropagation()}
                                 >
@@ -7260,7 +8129,7 @@ export default function CreditoPage() {
                                 Fechar
                               </button>
                             </div>
-                            <div style={{ padding: '14px 16px' }}>
+                            <div style={{ padding: '14px 16px', overflowY: 'auto', flex: 1, minHeight: 0 }}>
                               <div style={{ display: 'grid', gap: 6 }}>
                                 <div style={{ fontWeight: 850 }}>
                                   {cloneSisbrModal.nome || '-'}
@@ -7273,16 +8142,11 @@ export default function CreditoPage() {
                               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
                                 <div className="field">
                                   <label>Ação</label>
-                                  <select
-                                    className="control"
+                                  <CloneSisbrActionSelect
                                     value={cloneSisbrAction}
-                                    onChange={(e) => setCloneSisbrAction(e.target.value)}
+                                    onChange={setCloneSisbrAction}
                                     disabled={cloneSisbrLoading}
-                                  >
-                                    <option value="clonar_para_relatorio_sisbr">
-                                      Clonar para Relatorio Sisbr
-                                    </option>
-                                  </select>
+                                  />
                                 </div>
                                 {cloneSisbrAction === 'clonar_para_relatorio_sisbr' ? (
                                   <div
@@ -7317,8 +8181,67 @@ export default function CreditoPage() {
                                     ) : null}
                                   </div>
                                 ) : null}
+                                {cloneSisbrAction === 'quitado_recurso' ? (
+                                  <div
+                                    style={{
+                                      padding: '10px 12px',
+                                      borderRadius: 12,
+                                      border: '1px solid rgba(255,255,255,0.12)',
+                                      background: 'rgba(255,255,255,0.04)',
+                                      display: 'grid',
+                                      gap: 10,
+                                    }}
+                                  >
+                                    <div style={{ fontWeight: 850 }}>Quitado (Recurso do Órgão)</div>
+                                    <div style={{ opacity: 0.86 }}>
+                                      Esta ação remove a linha do Recurso do Órgão para não compor a conciliação.
+                                    </div>
+                                    <div className="field">
+                                      <label>Data de devolução (dd/mm/aaaa)</label>
+                                      <input
+                                        className="control"
+                                        type="text"
+                                        value={cloneSisbrDevolucaoDate}
+                                        onChange={(e) => {
+                                          const raw = e.target.value || ''
+                                          const next = raw
+                                            .replace(/[^\d/]/g, '')
+                                            .replace(/\/{2,}/g, '/')
+                                            .slice(0, 10)
+                                          setCloneSisbrDevolucaoDate(next)
+                                        }}
+                                        disabled={cloneSisbrLoading}
+                                        placeholder="dd/mm/aaaa"
+                                      />
+                                    </div>
+                                    <div style={{ display: 'grid', gap: 8 }}>
+                                      <div className="field">
+                                        <label>Nome</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={cloneSisbrModal.nome || '-'}
+                                          disabled
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Valor</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={withCurrency(cloneSisbrModal.value)}
+                                          disabled
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
+                                ) : null}
                                 <div className="field">
-                                  <label>Justificativa (obrigatória)</label>
+                                  <label>
+                                    {cloneSisbrAction === 'quitado_recurso'
+                                      ? 'Justificativa (opcional)'
+                                      : 'Justificativa (obrigatória)'}
+                                  </label>
                                   <textarea
                                     className="control"
                                     rows={4}
@@ -7342,8 +8265,13 @@ export default function CreditoPage() {
                                   className="btn btn-primary"
                                   disabled={
                                     cloneSisbrLoading ||
-                                    !cloneSisbrJustification.trim() ||
-                                    Boolean(conciliacaoData?.closed?.isClosed)
+                                    (cloneSisbrAction === 'quitado_recurso' &&
+                                      !/^\d{2}\/\d{2}\/\d{4}$/.test(cloneSisbrDevolucaoDate)) ||
+                                    (cloneSisbrAction !== 'quitado_recurso' &&
+                                      !cloneSisbrJustification.trim()) ||
+                                    (cloneSisbrModal?.vencimento
+                                      ? isVencimentoLocked(cloneSisbrModal.vencimento)
+                                      : conciliacaoIsClosed)
                                   }
                                   onClick={async () => {
                                     if (!cloneSisbrModal) return
@@ -7365,6 +8293,8 @@ export default function CreditoPage() {
                                             recursoTable: conciliacaoData?.recursoTable,
                                             action: cloneSisbrAction,
                                             justification: cloneSisbrJustification,
+                                            devolucaoDate:
+                                              cloneSisbrAction === 'quitado_recurso' ? cloneSisbrDevolucaoDate : null,
                                           }),
                                         },
                                       )
@@ -7387,7 +8317,13 @@ export default function CreditoPage() {
                                     }
                                   }}
                                 >
-                                  {cloneSisbrLoading ? 'Clonando...' : 'Clonar para Relatorio Sisbr'}
+                                  {cloneSisbrLoading
+                                    ? cloneSisbrAction === 'quitado_recurso'
+                                      ? 'Salvando...'
+                                      : 'Clonando...'
+                                    : cloneSisbrAction === 'quitado_recurso'
+                                      ? 'Marcar como Quitado'
+                                      : 'Clonar para Relatorio Sisbr'}
                                 </button>
                               </div>
                             </div>
@@ -7552,170 +8488,287 @@ export default function CreditoPage() {
                         </div>
                       ) : null}
 
-                      {conciliacaoCloseModalOpen ? (
-                        <div
-                          role="dialog"
-                          aria-modal="true"
-                          style={{
-                            position: 'fixed',
-                            inset: 0,
-                            background: 'rgba(0,0,0,0.62)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            padding: 16,
-                            zIndex: 230,
-                          }}
-                          onClick={() => {
-                            if (conciliacaoClosing) return
-                            setConciliacaoCloseModalOpen(false)
-                            setConciliacaoCloseError(null)
-                            setConciliacaoCloseStep(1)
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: 'min(720px, 96vw)',
-                              borderRadius: 18,
-                              border: '1px solid rgba(255,255,255,0.16)',
-                              background: 'rgba(12, 22, 40, 0.96)',
-                              color: 'rgba(255,255,255,0.92)',
-                              boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
-                              overflow: 'hidden',
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                          >
+                      {conciliacaoCloseModalOpen
+                        ? createPortal(
                             <div
+                              role="dialog"
+                              aria-modal="true"
                               style={{
-                                padding: '14px 16px',
-                                borderBottom: '1px solid rgba(255,255,255,0.10)',
+                                position: 'fixed',
+                                inset: 0,
+                                background: 'rgba(0,0,0,0.62)',
                                 display: 'flex',
                                 alignItems: 'center',
-                                justifyContent: 'space-between',
-                                gap: 10,
+                                justifyContent: 'center',
+                                padding: 16,
+                                zIndex: 230,
+                              }}
+                              onClick={() => {
+                                if (conciliacaoClosing) return
+                                setConciliacaoCloseModalOpen(false)
+                                setConciliacaoCloseError(null)
+                                setConciliacaoCloseMode('total')
+                                setConciliacaoCloseVencimento('')
+                                setConciliacaoCloseStep(1)
                               }}
                             >
-                              <div style={{ fontWeight: 900 }}>Fechar conciliação</div>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                onClick={() => {
-                                  if (conciliacaoClosing) return
-                                  setConciliacaoCloseModalOpen(false)
-                                  setConciliacaoCloseError(null)
-                                  setConciliacaoCloseStep(1)
+                              <div
+                                style={{
+                                  width: 'min(720px, 96vw)',
+                                  borderRadius: 18,
+                                  border: '1px solid rgba(255,255,255,0.16)',
+                                  background: 'rgba(12, 22, 40, 0.96)',
+                                  color: 'rgba(255,255,255,0.92)',
+                                  boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                                  overflow: 'hidden',
                                 }}
+                                onClick={(e) => e.stopPropagation()}
                               >
-                                Fechar
-                              </button>
-                            </div>
-                            <div style={{ padding: '14px 16px' }}>
-                              <div style={{ display: 'grid', gap: 10 }}>
-                                <div style={{ fontWeight: 850 }}>
-                                  {conciliacaoCloseStep === 1
-                                    ? 'Foi feita a liquidação no SISBR?'
-                                    : conciliacaoCloseStep === 2
-                                      ? 'Tem certeza que deseja fechar a conciliação? Após fechar não será possível alterar esta conciliação.'
-                                      : 'Ao fechar a conciliação, o relatório será enviado para a Contabilidade. Continuar?'}
-                                </div>
-                                <div style={{ opacity: 0.8 }}>
-                                  Órgão: {conciliacaoOrgao.trim() || '—'} • Competência:{' '}
-                                  {conciliacaoMonthOptions.find((o) => o.value === conciliacaoMonth)?.label ??
-                                    conciliacaoMonth}
-                                </div>
-                                <div style={{ opacity: 0.75 }}>
-                                  Etapa {conciliacaoCloseStep}/3
-                                </div>
-                              </div>
-
-                              {conciliacaoCloseError ? (
-                                <div className="help" style={{ marginTop: 10, color: 'rgba(245,197,66,0.98)' }}>
-                                  {conciliacaoCloseError}
-                                </div>
-                              ) : null}
-
-                              <div style={{ display: 'flex', gap: 10, marginTop: 14, justifyContent: 'flex-end' }}>
-                                <button
-                                  type="button"
-                                  className="btn btn-ghost"
-                                  disabled={conciliacaoClosing}
-                                  onClick={() => {
-                                    if (conciliacaoClosing) return
-                                    if (conciliacaoCloseStep === 1) {
-                                      setConciliacaoCloseModalOpen(false)
-                                      setConciliacaoCloseError(null)
-                                      setConciliacaoCloseStep(1)
-                                      return
-                                    }
-                                    setConciliacaoCloseError(null)
-                                    setConciliacaoCloseStep((s) => (s === 3 ? 2 : 1))
+                                <div
+                                  style={{
+                                    padding: '14px 16px',
+                                    borderBottom: '1px solid rgba(255,255,255,0.10)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 10,
                                   }}
                                 >
-                                  {conciliacaoCloseStep === 1 ? 'Cancelar' : 'Voltar'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn btn-primary"
-                                  disabled={
-                                    conciliacaoClosing ||
-                                    !conciliacaoOrgao.trim() ||
-                                    !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
-                                  }
-                                  onClick={async () => {
-                                    if (!conciliacaoOrgao.trim()) return
-                                    if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
-
-                                    if (conciliacaoCloseStep < 3) {
+                                  <div style={{ fontWeight: 900 }}>Fechar conciliação</div>
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={() => {
+                                      if (conciliacaoClosing) return
+                                      setConciliacaoCloseModalOpen(false)
                                       setConciliacaoCloseError(null)
-                                      setConciliacaoCloseStep((s) => (s === 1 ? 2 : 3))
-                                      return
-                                    }
+                                      setConciliacaoCloseMode('total')
+                                      setConciliacaoCloseVencimento('')
+                                      setConciliacaoCloseStep(1)
+                                    }}
+                                  >
+                                    Fechar
+                                  </button>
+                                </div>
+                                <div style={{ padding: '14px 16px' }}>
+                                  <div style={{ display: 'grid', gap: 10 }}>
+                                    <div style={{ fontWeight: 850 }}>
+                                      {conciliacaoCloseStep === 1
+                                        ? 'Foi feita a liquidação no SISBR?'
+                                        : conciliacaoCloseStep === 2
+                                          ? 'Tem certeza que deseja fechar a conciliação? Após fechar não será possível alterar esta conciliação.'
+                                          : 'Ao fechar a conciliação, o relatório será enviado para a Contabilidade. Continuar?'}
+                                    </div>
+                                    <div style={{ opacity: 0.8 }}>
+                                      Órgão: {conciliacaoOrgao.trim() || '—'} • Competência:{' '}
+                                      {conciliacaoMonthOptions.find((o) => o.value === conciliacaoMonth)?.label ??
+                                        conciliacaoMonth}
+                                    </div>
+                                    <div style={{ opacity: 0.75 }}>Etapa {conciliacaoCloseStep}/3</div>
+                                  </div>
 
-                                    setConciliacaoError(null)
-                                    setConciliacaoCloseError(null)
-                                    setConciliacaoClosing(true)
-                                    try {
-                                      const evidencePngBase64 = await captureConciliacaoEvidencePngBase64()
-                                      const res = await fetch(
-                                        '/api/consignado/conciliacao/recurso-vs-relatorio/fechar',
-                                        {
-                                          method: 'POST',
-                                          headers: { 'content-type': 'application/json' },
-                                          body: JSON.stringify({
-                                            month: conciliacaoMonth,
-                                            orgao: conciliacaoOrgao.trim(),
-                                            closedBy: accessFixedEmail,
-                                            contabilidadeEmail: notificationEmailContabilidade,
-                                            evidencePngBase64,
-                                          }),
-                                        },
-                                      )
-                                      const json = (await res.json().catch(() => null)) as null | { message?: string }
-                                      if (!res.ok) {
-                                        throw new Error(json?.message || 'Falha ao fechar conciliação.')
+                                  <div
+                                    style={{
+                                      marginTop: 12,
+                                      padding: '10px 12px',
+                                      borderRadius: 12,
+                                      border: '1px solid rgba(255,255,255,0.12)',
+                                      background: 'rgba(255,255,255,0.03)',
+                                    }}
+                                  >
+                                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                                      <label
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: 10,
+                                          cursor: conciliacaoClosing ? 'not-allowed' : 'pointer',
+                                          opacity: conciliacaoClosing ? 0.6 : 1,
+                                        }}
+                                      >
+                                        <input
+                                          type="radio"
+                                          name="conciliacao-close-mode"
+                                          checked={conciliacaoCloseMode === 'total'}
+                                          onChange={() => {
+                                            if (conciliacaoClosing) return
+                                            setConciliacaoCloseMode('total')
+                                            setConciliacaoCloseVencimento('')
+                                          }}
+                                          disabled={conciliacaoClosing}
+                                        />
+                                        <span style={{ fontWeight: 850, opacity: 0.9 }}>
+                                          Fechamento total
+                                        </span>
+                                      </label>
+                                      <label
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: 10,
+                                          cursor:
+                                            conciliacaoClosing || conciliacaoCloseVencimentoOptions.length === 0
+                                              ? 'not-allowed'
+                                              : 'pointer',
+                                          opacity:
+                                            conciliacaoClosing || conciliacaoCloseVencimentoOptions.length === 0
+                                              ? 0.6
+                                              : 1,
+                                        }}
+                                        title={
+                                          conciliacaoCloseVencimentoOptions.length === 0
+                                            ? 'Nenhum vencimento disponível para fechamento parcial.'
+                                            : undefined
+                                        }
+                                      >
+                                        <input
+                                          type="radio"
+                                          name="conciliacao-close-mode"
+                                          checked={conciliacaoCloseMode === 'parcial'}
+                                          onChange={() => {
+                                            if (conciliacaoClosing) return
+                                            if (conciliacaoCloseVencimentoOptions.length === 0) return
+                                            setConciliacaoCloseMode('parcial')
+                                          }}
+                                          disabled={conciliacaoClosing || conciliacaoCloseVencimentoOptions.length === 0}
+                                        />
+                                        <span style={{ fontWeight: 850, opacity: 0.9 }}>
+                                          Fechamento parcial
+                                        </span>
+                                      </label>
+                                    </div>
+
+                                    {conciliacaoCloseMode === 'parcial' ? (
+                                      <div style={{ marginTop: 10 }}>
+                                        <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 6 }}>
+                                          Selecione o vencimento para fechar
+                                        </div>
+                                        <select
+                                          className="control month-select"
+                                          value={conciliacaoCloseVencimento}
+                                          onChange={(e) => setConciliacaoCloseVencimento(e.target.value)}
+                                          disabled={conciliacaoClosing || conciliacaoCloseVencimentoOptions.length === 0}
+                                          style={{ height: 44 }}
+                                        >
+                                          <option value="">Selecione...</option>
+                                          {conciliacaoCloseVencimentoOptions.map((v) => (
+                                            <option key={v} value={v}>
+                                              {v}
+                                            </option>
+                                          ))}
+                                        </select>
+                                        <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+                                          {conciliacaoCloseVencimentoOptions.length === 0
+                                            ? 'Nenhum vencimento disponível para fechamento parcial.'
+                                            : null}
+                                        </div>
+                                      </div>
+                                    ) : null}
+                                  </div>
+
+                                  {conciliacaoCloseError ? (
+                                    <div className="help" style={{ marginTop: 10, color: 'rgba(245,197,66,0.98)' }}>
+                                      {conciliacaoCloseError}
+                                    </div>
+                                  ) : null}
+
+                                  <div style={{ display: 'flex', gap: 10, marginTop: 14, justifyContent: 'flex-end' }}>
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      disabled={conciliacaoClosing}
+                                      onClick={() => {
+                                        if (conciliacaoClosing) return
+                                        if (conciliacaoCloseStep === 1) {
+                                          setConciliacaoCloseModalOpen(false)
+                                          setConciliacaoCloseError(null)
+                                          setConciliacaoCloseMode('total')
+                                          setConciliacaoCloseVencimento('')
+                                          setConciliacaoCloseStep(1)
+                                          return
+                                        }
+                                        setConciliacaoCloseError(null)
+                                        setConciliacaoCloseStep((s) => (s === 3 ? 2 : 1))
+                                      }}
+                                    >
+                                      {conciliacaoCloseStep === 1 ? 'Cancelar' : 'Voltar'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      disabled={
+                                        conciliacaoClosing ||
+                                        !conciliacaoOrgao.trim() ||
+                                        !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth) ||
+                                        (conciliacaoCloseMode === 'parcial' && !conciliacaoCloseVencimento.trim())
                                       }
-                                      setConciliacaoCloseModalOpen(false)
-                                      setConciliacaoCloseStep(1)
-                                      await reloadConciliacaoKeepExpanded()
-                                    } catch (e) {
-                                      const msg = e instanceof Error ? e.message : 'Falha ao fechar conciliação.'
-                                      setConciliacaoCloseError(msg)
-                                    } finally {
-                                      setConciliacaoClosing(false)
-                                    }
-                                  }}
-                                >
-                                  {conciliacaoClosing
-                                    ? 'Fechando...'
-                                    : conciliacaoCloseStep < 3
-                                      ? 'Continuar'
-                                      : 'Fechar conciliação'}
-                                </button>
+                                      onClick={async () => {
+                                        if (!conciliacaoOrgao.trim()) return
+                                        if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
+                                        if (conciliacaoCloseMode === 'parcial' && !conciliacaoCloseVencimento.trim()) return
+
+                                        if (conciliacaoCloseStep < 3) {
+                                          setConciliacaoCloseError(null)
+                                          setConciliacaoCloseStep((s) => (s === 1 ? 2 : 3))
+                                          return
+                                        }
+
+                                        setConciliacaoError(null)
+                                        setConciliacaoCloseError(null)
+                                        setConciliacaoClosing(true)
+                                        try {
+                                          const evidencePngBase64 = await captureConciliacaoEvidencePngBase64()
+                                          const res = await fetch(
+                                            '/api/consignado/conciliacao/recurso-vs-relatorio/fechar',
+                                            {
+                                              method: 'POST',
+                                              headers: { 'content-type': 'application/json' },
+                                              body: JSON.stringify({
+                                                month: conciliacaoMonth,
+                                                orgao: conciliacaoOrgao.trim(),
+                                                vencimento:
+                                                  conciliacaoCloseMode === 'parcial'
+                                                    ? conciliacaoCloseVencimento.trim()
+                                                    : undefined,
+                                                closedBy: accessFixedEmail,
+                                                contabilidadeEmail: notificationEmailContabilidade,
+                                                evidencePngBase64,
+                                              }),
+                                            },
+                                          )
+                                          const json = (await res.json().catch(() => null)) as null | {
+                                            message?: string
+                                          }
+                                          if (!res.ok) {
+                                            throw new Error(json?.message || 'Falha ao fechar conciliação.')
+                                          }
+                                          setConciliacaoCloseModalOpen(false)
+                                          setConciliacaoCloseMode('total')
+                                          setConciliacaoCloseVencimento('')
+                                          setConciliacaoCloseStep(1)
+                                          await reloadConciliacaoKeepExpanded()
+                                        } catch (e) {
+                                          const msg =
+                                            e instanceof Error ? e.message : 'Falha ao fechar conciliação.'
+                                          setConciliacaoCloseError(msg)
+                                        } finally {
+                                          setConciliacaoClosing(false)
+                                        }
+                                      }}
+                                    >
+                                      {conciliacaoClosing
+                                        ? 'Fechando...'
+                                        : conciliacaoCloseStep < 3
+                                          ? 'Continuar'
+                                          : 'Fechar conciliação'}
+                                    </button>
+                                  </div>
+                                </div>
                               </div>
-                            </div>
-                          </div>
-                        </div>
-                      ) : null}
+                            </div>,
+                            document.body,
+                          )
+                        : null}
 
                       {conciliacaoReopenModalOpen ? (
                         <div
@@ -7735,6 +8788,8 @@ export default function CreditoPage() {
                             if (conciliacaoReopening) return
                             setConciliacaoReopenModalOpen(false)
                             setConciliacaoReopenError(null)
+                            setConciliacaoReopenMode('total')
+                            setConciliacaoReopenVencimento('')
                             setConciliacaoReopenPassword('')
                           }}
                         >
@@ -7768,6 +8823,8 @@ export default function CreditoPage() {
                                   if (conciliacaoReopening) return
                                   setConciliacaoReopenModalOpen(false)
                                   setConciliacaoReopenError(null)
+                                  setConciliacaoReopenMode('total')
+                                  setConciliacaoReopenVencimento('')
                                   setConciliacaoReopenPassword('')
                                 }}
                               >
@@ -7775,6 +8832,118 @@ export default function CreditoPage() {
                               </button>
                             </div>
                             <div style={{ padding: '14px 16px' }}>
+                              <div
+                                style={{
+                                  padding: '10px 12px',
+                                  borderRadius: 12,
+                                  border: '1px solid rgba(255,255,255,0.12)',
+                                  background: 'rgba(255,255,255,0.03)',
+                                  marginBottom: 12,
+                                }}
+                              >
+                                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                                  <label
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 10,
+                                      cursor: conciliacaoReopening ? 'not-allowed' : 'pointer',
+                                      opacity: conciliacaoReopening ? 0.6 : 1,
+                                    }}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name="conciliacao-reopen-mode"
+                                      checked={conciliacaoReopenMode === 'total'}
+                                      onChange={() => {
+                                        if (conciliacaoReopening) return
+                                        setConciliacaoReopenMode('total')
+                                        setConciliacaoReopenVencimento('')
+                                      }}
+                                      disabled={conciliacaoReopening}
+                                    />
+                                    <span style={{ fontWeight: 850, opacity: 0.9 }}>Reabrir total</span>
+                                  </label>
+                                  <label
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: 10,
+                                      cursor:
+                                        conciliacaoReopening ||
+                                        conciliacaoTotalIsClosed ||
+                                        conciliacaoReopenVencimentoOptions.length === 0
+                                          ? 'not-allowed'
+                                          : 'pointer',
+                                      opacity:
+                                        conciliacaoReopening ||
+                                        conciliacaoTotalIsClosed ||
+                                        conciliacaoReopenVencimentoOptions.length === 0
+                                          ? 0.6
+                                          : 1,
+                                    }}
+                                    title={
+                                      conciliacaoTotalIsClosed
+                                        ? 'A conciliação está fechada totalmente. Reabra o total para destravar os vencimentos.'
+                                        : conciliacaoReopenVencimentoOptions.length === 0
+                                          ? 'Nenhum vencimento fechado para reabrir.'
+                                          : undefined
+                                    }
+                                  >
+                                    <input
+                                      type="radio"
+                                      name="conciliacao-reopen-mode"
+                                      checked={conciliacaoReopenMode === 'parcial'}
+                                      onChange={() => {
+                                        if (conciliacaoReopening) return
+                                        if (conciliacaoTotalIsClosed) return
+                                        if (conciliacaoReopenVencimentoOptions.length === 0) return
+                                        setConciliacaoReopenMode('parcial')
+                                      }}
+                                      disabled={
+                                        conciliacaoReopening ||
+                                        conciliacaoTotalIsClosed ||
+                                        conciliacaoReopenVencimentoOptions.length === 0
+                                      }
+                                    />
+                                    <span style={{ fontWeight: 850, opacity: 0.9 }}>Reabrir parcial</span>
+                                  </label>
+                                </div>
+
+                                {conciliacaoReopenMode === 'parcial' ? (
+                                  <div style={{ marginTop: 10 }}>
+                                    <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 6 }}>
+                                      Selecione o vencimento para reabrir
+                                    </div>
+                                    <select
+                                      className="control month-select"
+                                      value={conciliacaoReopenVencimento}
+                                      onChange={(e) => setConciliacaoReopenVencimento(e.target.value)}
+                                      disabled={
+                                        conciliacaoReopening ||
+                                        conciliacaoTotalIsClosed ||
+                                        conciliacaoReopenVencimentoOptions.length === 0
+                                      }
+                                      style={{ height: 44 }}
+                                    >
+                                      <option value="">Selecione...</option>
+                                      {conciliacaoReopenVencimentoOptions.map((v) => (
+                                        <option key={v} value={v}>
+                                          {v}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+                                      {conciliacaoTotalIsClosed
+                                        ? 'A conciliação está fechada totalmente. Reabra o total para destravar os vencimentos.'
+                                        : conciliacaoReopenVencimentoOptions.length === 0
+                                          ? 'Nenhum vencimento fechado para reabrir.'
+                                          : null}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+
                               <div className="field">
                                 <label>Senha</label>
                                 <input
@@ -7802,11 +8971,14 @@ export default function CreditoPage() {
                                     conciliacaoReopening ||
                                     !conciliacaoReopenPassword ||
                                     !conciliacaoOrgao.trim() ||
-                                    !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                                    !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth) ||
+                                    (conciliacaoReopenMode === 'parcial' && !conciliacaoReopenVencimento.trim())
                                   }
                                   onClick={async () => {
                                     if (!conciliacaoOrgao.trim()) return
                                     if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
+                                    if (conciliacaoReopenMode === 'parcial' && !conciliacaoReopenVencimento.trim())
+                                      return
                                     setConciliacaoReopenError(null)
                                     setConciliacaoError(null)
                                     setConciliacaoReopening(true)
@@ -7819,6 +8991,10 @@ export default function CreditoPage() {
                                           body: JSON.stringify({
                                             month: conciliacaoMonth,
                                             orgao: conciliacaoOrgao.trim(),
+                                            vencimento:
+                                              conciliacaoReopenMode === 'parcial'
+                                                ? conciliacaoReopenVencimento.trim()
+                                                : undefined,
                                             password: conciliacaoReopenPassword,
                                             reopenedBy: accessFixedEmail,
                                           }),
@@ -7830,6 +9006,8 @@ export default function CreditoPage() {
                                       }
                                       setConciliacaoReopenModalOpen(false)
                                       setConciliacaoReopenPassword('')
+                                      setConciliacaoReopenMode('total')
+                                      setConciliacaoReopenVencimento('')
                                       await reloadConciliacaoKeepExpanded()
                                     } catch (e) {
                                       const msg = e instanceof Error ? e.message : 'Falha ao reabrir conciliação.'
@@ -7874,6 +9052,9 @@ export default function CreditoPage() {
                                     color: 'rgba(255,255,255,0.92)',
                                     boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
                                     overflow: 'hidden',
+                                    maxHeight: '86vh',
+                                    display: 'flex',
+                                    flexDirection: 'column',
                                   }}
                                   onClick={(e) => e.stopPropagation()}
                                 >
@@ -7888,11 +9069,40 @@ export default function CreditoPage() {
                               }}
                             >
                               <div style={{ fontWeight: 900 }}>Ocorrência</div>
-                              <button type="button" className="btn btn-ghost" onClick={() => setOcorrenciaModal(null)}>
-                                Fechar
-                              </button>
+                              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                {!ocorrenciaReadOnly ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    disabled={relatorioOcorrenciaSaving}
+                                    title="Nova ocorrência"
+                                    onClick={() => {
+                                      setRelatorioOcorrenciaError(null)
+                                      setRelatorioOcorrenciaAction('alterar_orgao_relatorio_sisbr')
+                                      setRelatorioOcorrenciaToOrgao('')
+                                      setRelatorioOcorrenciaJustification('')
+                                      setRelatorioOcorrenciaUndoJustification('')
+                                      setRelatorioRepactuacaoStatus('pendente_gerente')
+                                      setRelatorioRepactuacaoGerenteEmail('')
+                                      setRelatorioNaoPossuiRecursoGerenteEmail('')
+                                      setRelatorioRecursoJudicialNovoValor(ocorrenciaModal.value)
+                                      setRelatorioRecursoJudicialAutoJustification(true)
+                                      setOcorrenciaModalShowNew(true)
+                                    }}
+                                  >
+                                    +
+                                  </button>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  onClick={() => setOcorrenciaModal(null)}
+                                >
+                                  Fechar
+                                </button>
+                              </div>
                             </div>
-                            <div style={{ padding: '14px 16px' }}>
+                            <div style={{ padding: '14px 16px', overflowY: 'auto', flex: 1, minHeight: 0 }}>
                               <div style={{ display: 'grid', gap: 6 }}>
                                 <div style={{ fontWeight: 850 }}>{ocorrenciaModal.nome || '-'}</div>
                                 <div style={{ opacity: 0.82 }}>
@@ -7903,42 +9113,181 @@ export default function CreditoPage() {
                                 </div>
                               </div>
 
-                              {ocorrenciaModal.ocorrencia ? (
-                                <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
-                                  <div style={{ opacity: 0.8 }}>
-                                    <span style={{ fontWeight: 750 }}>ID:</span>{' '}
-                                    {String(ocorrenciaModal.ocorrencia.id)}
+                              {ocorrenciaModalOcorrenciasByTipo.length > 0 ? (
+                                <div style={{ marginTop: 14 }}>
+                                  <div style={{ fontWeight: 750, marginBottom: 8 }}>
+                                    Ocorrências registradas
                                   </div>
-                                  <div style={{ opacity: 0.8 }}>
-                                    <span style={{ fontWeight: 750 }}>Data:</span>{' '}
-                                    {ocorrenciaModal.ocorrencia.createdAt || '-'}
-                                  </div>
-                                  <div style={{ opacity: 0.8 }}>
-                                    <span style={{ fontWeight: 750 }}>Ação anterior:</span>{' '}
-                                    {ocorrenciaModal.ocorrencia.action || '-'}
-                                  </div>
-                                  <div>
-                                    <div style={{ fontWeight: 750, marginBottom: 6 }}>Justificativa anterior</div>
-                                    <div style={{ whiteSpace: 'pre-wrap', opacity: 0.86 }}>
-                                      {ocorrenciaModal.ocorrencia.justification || '-'}
-                                    </div>
+                                  <div style={{ display: 'grid', gap: 10 }}>
+                                    {ocorrenciaModalOcorrenciasByTipo.map(({ label, items }) => {
+                                      const open = Boolean(ocorrenciaModalGroupsOpen[label])
+                                      return (
+                                        <div
+                                          key={label}
+                                          style={{
+                                            borderRadius: 12,
+                                            border: '1px solid rgba(255,255,255,0.12)',
+                                            background: 'rgba(255,255,255,0.03)',
+                                            overflow: 'hidden',
+                                          }}
+                                        >
+                                          <button
+                                            type="button"
+                                            className="btn btn-ghost"
+                                            style={{
+                                              width: '100%',
+                                              display: 'flex',
+                                              justifyContent: 'space-between',
+                                              alignItems: 'center',
+                                              padding: '10px 12px',
+                                            }}
+                                            onClick={() =>
+                                              setOcorrenciaModalGroupsOpen((prev) => ({
+                                                ...prev,
+                                                [label]: !open,
+                                              }))
+                                            }
+                                          >
+                                            <span style={{ fontWeight: 850 }}>
+                                              {open ? '▾' : '▸'} {label} ({items.length})
+                                            </span>
+                                          </button>
+                                          {open ? (
+                                            <div style={{ padding: '10px 12px', display: 'grid', gap: 10 }}>
+                                              {items.map((o: any) => (
+                                                <div
+                                                  key={String(o.id)}
+                                                  style={{
+                                                    padding: '10px 12px',
+                                                    borderRadius: 12,
+                                                    border: '1px solid rgba(255,255,255,0.12)',
+                                                    background: 'rgba(255,255,255,0.03)',
+                                                    display: 'grid',
+                                                    gap: 6,
+                                                  }}
+                                                >
+                                                  <div
+                                                    style={{
+                                                      display: 'flex',
+                                                      justifyContent: 'space-between',
+                                                      gap: 10,
+                                                      alignItems: 'center',
+                                                    }}
+                                                  >
+                                                    <div style={{ fontWeight: 850 }}>
+                                                      #{String(o.id)} • {String(o.createdAt || '-')}
+                                                    </div>
+                                                    {!ocorrenciaReadOnly ? (
+                                                      <button
+                                                        type="button"
+                                                        className="btn btn-ghost"
+                                                        disabled={relatorioOcorrenciaSaving}
+                                                        onClick={async () => {
+                                                          setRelatorioOcorrenciaSaving(true)
+                                                          setRelatorioOcorrenciaError(null)
+                                                          try {
+                                                            const res = await fetch(
+                                                              '/api/consignado/conciliacao/recurso-vs-relatorio/desfazer-ocorrencia',
+                                                              {
+                                                                method: 'POST',
+                                                                headers: { 'content-type': 'application/json' },
+                                                                body: JSON.stringify({
+                                                                  id: Number(o.id),
+                                                                  undoJustification: relatorioOcorrenciaUndoJustification,
+                                                                }),
+                                                              },
+                                                            )
+                                                            const json = (await res.json().catch(() => null)) as
+                                                              | null
+                                                              | { message?: string }
+                                                            if (!res.ok) {
+                                                              throw new Error(
+                                                                json?.message || 'Falha ao desfazer ocorrência.',
+                                                              )
+                                                            }
+                                                            await reloadConciliacaoKeepExpanded()
+                                                            setOcorrenciaModal(null)
+                                                          } catch (e) {
+                                                            const msg =
+                                                              e instanceof Error
+                                                                ? e.message
+                                                                : 'Falha ao desfazer ocorrência.'
+                                                            setRelatorioOcorrenciaError(msg)
+                                                          } finally {
+                                                            setRelatorioOcorrenciaSaving(false)
+                                                          }
+                                                        }}
+                                                      >
+                                                        Desfazer
+                                                      </button>
+                                                    ) : null}
+                                                  </div>
+                                                  <div style={{ opacity: 0.86, whiteSpace: 'pre-wrap' }}>
+                                                    {String(o.justification || '-')}
+                                                  </div>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                      )
+                                    })}
                                   </div>
                                 </div>
                               ) : null}
 
-                              {ocorrenciaModal.ocorrencia ? (
+                              {ocorrenciaModalOcorrencias.length > 0 && !ocorrenciaModalShowNew ? (
                                 <div style={{ marginTop: 14 }}>
                                   <div style={{ opacity: 0.82 }}>
-                                    Esta linha já possui ocorrência. Para alterar novamente, primeiro desfaça a
-                                    ocorrência.
+                                    Esta linha já possui ocorrência. Você pode desfazer a ocorrência ou registrar uma
+                                    repactuação (máximo 2).
                                   </div>
+                                  {ocorrenciaModal.repactuacoes.length > 0 ? (
+                                    <div style={{ marginTop: 12 }}>
+                                      <div style={{ fontWeight: 750, marginBottom: 8 }}>Repactuações registradas</div>
+                                      <div style={{ display: 'grid', gap: 8 }}>
+                                        {ocorrenciaModal.repactuacoes.map((it) => (
+                                          <div
+                                            key={it.id}
+                                            style={{
+                                              padding: '10px 12px',
+                                              borderRadius: 12,
+                                              border: '1px solid rgba(255,255,255,0.12)',
+                                              background: 'rgba(255,255,255,0.03)',
+                                              display: 'grid',
+                                              gap: 4,
+                                            }}
+                                          >
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                                              <div style={{ fontWeight: 850 }}>
+                                                {it.status === 'pendente_gerente'
+                                                  ? 'Pendente Gerente'
+                                                  : it.status === 'concluido'
+                                                    ? 'Concluido'
+                                                    : it.status || '-'}
+                                              </div>
+                                              <div style={{ opacity: 0.72, whiteSpace: 'nowrap' }}>
+                                                #{it.id} • {it.createdAt || '-'}
+                                              </div>
+                                            </div>
+                                            {it.gerenteEmail ? (
+                                              <div style={{ opacity: 0.82 }}>Gerente: {it.gerenteEmail}</div>
+                                            ) : null}
+                                            <div style={{ opacity: 0.82, whiteSpace: 'pre-wrap' }}>
+                                              {it.justification || '-'}
+                                            </div>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  ) : null}
                                   <div style={{ marginTop: 12 }}>
                                     <div style={{ fontWeight: 750, marginBottom: 8 }}>
                                       Justificativa para desfazer (opcional)
                                     </div>
                                     <textarea
-                                      value={relatorioOcorrenciaJustification}
-                                      onChange={(e) => setRelatorioOcorrenciaJustification(e.target.value)}
+                                      value={relatorioOcorrenciaUndoJustification}
+                                      onChange={(e) => setRelatorioOcorrenciaUndoJustification(e.target.value)}
                                       rows={3}
                                       style={{
                                         width: '100%',
@@ -7957,11 +9306,68 @@ export default function CreditoPage() {
                                 </div>
                               ) : (
                                 <>
+                                  {ocorrenciaModalOcorrencias.length > 0 && ocorrenciaModalShowNew ? (
+                                    <div
+                                      style={{
+                                        marginTop: 14,
+                                        padding: '10px 12px',
+                                        borderRadius: 12,
+                                        border: '1px solid rgba(255,255,255,0.12)',
+                                        background: 'rgba(255,255,255,0.03)',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        gap: 12,
+                                      }}
+                                    >
+                                      <div style={{ fontWeight: 750 }}>Nova ocorrência</div>
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost"
+                                        disabled={relatorioOcorrenciaSaving}
+                                        onClick={() => {
+                                          setRelatorioOcorrenciaError(null)
+                                          setOcorrenciaModalShowNew(false)
+                                        }}
+                                      >
+                                        Cancelar
+                                      </button>
+                                    </div>
+                                  ) : null}
                                   <div style={{ marginTop: 18 }}>
                                     <div style={{ fontWeight: 750, marginBottom: 8 }}>Ação</div>
                                     <select
                                       value={relatorioOcorrenciaAction}
-                                      onChange={(e) => setRelatorioOcorrenciaAction(e.target.value)}
+                                      onChange={(e) => {
+                                        const next = e.target.value
+                                        setRelatorioOcorrenciaAction(next)
+                                        if (next !== 'alterar_orgao_relatorio_sisbr') {
+                                          setRelatorioOcorrenciaToOrgao('')
+                                        }
+                                        if (next === 'repactuacao_relatorio_sisbr') {
+                                          setRelatorioRepactuacaoStatus('pendente_gerente')
+                                          setRelatorioRepactuacaoGerenteEmail('')
+                                        }
+                                        if (next === 'nao_possui_recurso_relatorio_sisbr') {
+                                          setRelatorioNaoPossuiRecursoGerenteEmail('')
+                                        }
+                                        if (next === 'liquidacao_fora_vencimento_relatorio_sisbr') {
+                                          setRelatorioLiquidacaoForaVencimentoDate('')
+                                          if (!relatorioOcorrenciaJustification.trim()) {
+                                            setRelatorioOcorrenciaJustification('')
+                                          }
+                                        } else {
+                                          setRelatorioLiquidacaoForaVencimentoDate('')
+                                        }
+                                        if (next === 'recurso_judicial_valor_a_menor_relatorio_sisbr') {
+                                          setRelatorioRecursoJudicialNovoValor(ocorrenciaModal.value)
+                                          setRelatorioOcorrenciaJustification('')
+                                          setRelatorioRecursoJudicialAutoJustification(true)
+                                        } else {
+                                          setRelatorioRecursoJudicialNovoValor('')
+                                          setRelatorioRecursoJudicialAutoJustification(false)
+                                        }
+                                      }}
                                       disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
                                       style={{
                                         width: '100%',
@@ -7982,56 +9388,281 @@ export default function CreditoPage() {
                                       >
                                         Alterar Orgão
                                       </option>
-                                    </select>
-                                  </div>
-
-                                  <div style={{ marginTop: 14 }}>
-                                    <div style={{ fontWeight: 750, marginBottom: 8 }}>Órgão de destino</div>
-                                    <select
-                                      value={relatorioOcorrenciaToOrgao}
-                                      onChange={(e) => setRelatorioOcorrenciaToOrgao(e.target.value)}
-                                      disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
-                                      style={{
-                                        width: '100%',
-                                        padding: '10px 12px',
-                                        borderRadius: 12,
-                                        border: '1px solid rgba(255,255,255,0.16)',
-                                        background: 'rgba(255,255,255,0.06)',
-                                        color: 'rgba(255,255,255,0.88)',
-                                        opacity: ocorrenciaReadOnly ? 0.55 : 1,
-                                      }}
-                                    >
                                       <option
-                                        value=""
+                                        value="repactuacao_relatorio_sisbr"
                                         style={{
                                           background: 'rgb(12, 22, 40)',
                                           color: 'rgba(255,255,255,0.92)',
                                         }}
                                       >
-                                        Selecione...
+                                        Repactuação
                                       </option>
-                                      {relatorioOcorrenciaOrgaoOptions.map((o) => (
+                                      <option
+                                        value="liquidacao_ccs_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Liquidação CCS (Excluir do Relatório SISBR)
+                                      </option>
+                                      <option
+                                        value="liquidacao_fora_vencimento_relatorio_sisbr"
+                                        disabled={ocorrenciaModal?.status !== 'conciliado'}
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Liquidação Fora do Vencimento
+                                      </option>
+                                      <option
+                                        value="nao_possui_recurso_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Não possui Recurso
+                                      </option>
+                                      <option
+                                        value="recurso_judicial_valor_a_menor_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Recurso Judicial - Valor a Menor
+                                      </option>
+                                    </select>
+                                  </div>
+
+                                  {relatorioOcorrenciaAction === 'alterar_orgao_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14 }}>
+                                      <div style={{ fontWeight: 750, marginBottom: 8 }}>Órgão de destino</div>
+                                      <select
+                                        value={relatorioOcorrenciaToOrgao}
+                                        onChange={(e) => setRelatorioOcorrenciaToOrgao(e.target.value)}
+                                        disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                        style={{
+                                          width: '100%',
+                                          padding: '10px 12px',
+                                          borderRadius: 12,
+                                          border: '1px solid rgba(255,255,255,0.16)',
+                                          background: 'rgba(255,255,255,0.06)',
+                                          color: 'rgba(255,255,255,0.88)',
+                                          opacity: ocorrenciaReadOnly ? 0.55 : 1,
+                                        }}
+                                      >
                                         <option
-                                          key={o}
-                                          value={o}
+                                          value=""
                                           style={{
                                             background: 'rgb(12, 22, 40)',
                                             color: 'rgba(255,255,255,0.92)',
                                           }}
                                         >
-                                          {o}
+                                          Selecione...
                                         </option>
-                                      ))}
-                                    </select>
-                                  </div>
+                                        {relatorioOcorrenciaOrgaoOptions.map((o) => (
+                                          <option
+                                            key={o}
+                                            value={o}
+                                            style={{
+                                              background: 'rgb(12, 22, 40)',
+                                              color: 'rgba(255,255,255,0.92)',
+                                            }}
+                                          >
+                                            {o}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ) : null}
+
+                                  {relatorioOcorrenciaAction === 'repactuacao_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Status</label>
+                                        <RepactuacaoStatusSelect
+                                          value={relatorioRepactuacaoStatus}
+                                          onChange={setRelatorioRepactuacaoStatus}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>E-mail do gerente responsável</label>
+                                        <input
+                                          className="control"
+                                          type="email"
+                                          value={relatorioRepactuacaoGerenteEmail}
+                                          onChange={(e) => setRelatorioRepactuacaoGerenteEmail(e.target.value)}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: gerente@sicoobjuriscred.com.br"
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction === 'liquidacao_ccs_relatorio_sisbr' ? (
+                                    <div
+                                      style={{
+                                        marginTop: 14,
+                                        padding: '10px 12px',
+                                        borderRadius: 12,
+                                        border: '1px solid rgba(255,255,255,0.12)',
+                                        background: 'rgba(255,255,255,0.03)',
+                                        opacity: 0.92,
+                                      }}
+                                    >
+                                      Esta ação remove a linha do Relatório SISBR para não compor a conciliação.
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction ===
+                                  'liquidacao_fora_vencimento_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data de liquidação (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioLiquidacaoForaVencimentoDate}
+                                          onChange={(e) => {
+                                            const next = e.target.value
+                                            setRelatorioLiquidacaoForaVencimentoDate(next)
+                                            const normalized = next.trim()
+                                            if (
+                                              !relatorioOcorrenciaJustification.trim() ||
+                                              relatorioOcorrenciaJustification
+                                                .trim()
+                                                .toLowerCase()
+                                                .startsWith('liquidação fora do vencimento')
+                                            ) {
+                                              if (normalized) {
+                                                setRelatorioOcorrenciaJustification(
+                                                  `Liquidação fora do vencimento. Data de liquidação: ${normalized}`,
+                                                )
+                                              } else {
+                                                setRelatorioOcorrenciaJustification('')
+                                              }
+                                            }
+                                          }}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 05/06/2026"
+                                        />
+                                      </div>
+                                      <div
+                                        style={{
+                                          padding: '10px 12px',
+                                          borderRadius: 12,
+                                          border: '1px solid rgba(255,255,255,0.12)',
+                                          background: 'rgba(255,255,255,0.03)',
+                                          opacity: 0.92,
+                                        }}
+                                      >
+                                        A data informada será usada no relatório da contabilidade para separar os
+                                        valores por data.
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction === 'nao_possui_recurso_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>E-mail do gerente responsável</label>
+                                        <input
+                                          className="control"
+                                          type="email"
+                                          value={relatorioNaoPossuiRecursoGerenteEmail}
+                                          onChange={(e) =>
+                                            setRelatorioNaoPossuiRecursoGerenteEmail(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: gerente@sicoobjuriscred.com.br"
+                                        />
+                                      </div>
+                                      <div
+                                        style={{
+                                          padding: '10px 12px',
+                                          borderRadius: 12,
+                                          border: '1px solid rgba(255,255,255,0.12)',
+                                          background: 'rgba(255,255,255,0.03)',
+                                          opacity: 0.92,
+                                        }}
+                                      >
+                                        Esta ação exclui a linha do Relatório SISBR, registra a ocorrência e envia a
+                                        mensagem ao gerente.
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction ===
+                                  'recurso_judicial_valor_a_menor_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      {(() => {
+                                        const oldCents = ptBrMoneyToCents(ocorrenciaModal.value)
+                                        const newCents = ptBrMoneyToCents(
+                                          relatorioRecursoJudicialNovoValor || ocorrenciaModal.value,
+                                        )
+                                        const diffCents = Math.max(0, oldCents - newCents)
+                                        return (
+                                          <>
+                                            <div className="field">
+                                              <label>Valor Contrato Original</label>
+                                              <input
+                                                className="control"
+                                                type="text"
+                                                value={`R$ ${centsToPtBr(oldCents)}`}
+                                                disabled
+                                              />
+                                            </div>
+                                            <div className="field">
+                                              <label>Valor Judicial (valor editado)</label>
+                                              <input
+                                                className="control"
+                                                type="text"
+                                                value={relatorioRecursoJudicialNovoValor}
+                                                onChange={(e) =>
+                                                  setRelatorioRecursoJudicialNovoValor(e.target.value)
+                                                }
+                                                disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                                placeholder="ex.: 115,19"
+                                              />
+                                            </div>
+                                            <div
+                                              style={{
+                                                padding: '10px 12px',
+                                                borderRadius: 12,
+                                                border: '1px solid rgba(255,255,255,0.12)',
+                                                background: 'rgba(255,255,255,0.03)',
+                                                opacity: 0.92,
+                                              }}
+                                            >
+                                              Diferença: <b>{`R$ ${centsToPtBr(diffCents)}`}</b>
+                                              <div style={{ marginTop: 6, opacity: 0.9 }}>
+                                                Esta ação altera o valor no SISBR para o valor judicial e registra a
+                                                diferença na ocorrência para contabilidade verificar.
+                                              </div>
+                                            </div>
+                                          </>
+                                        )
+                                      })()}
+                                    </div>
+                                  ) : null}
 
                                   <div style={{ marginTop: 14 }}>
                                     <div style={{ fontWeight: 750, marginBottom: 8 }}>
-                                      Justificativa (obrigatória)
+                                      {relatorioOcorrenciaAction === 'nao_possui_recurso_relatorio_sisbr'
+                                        ? 'Mensagem (obrigatória)'
+                                        : 'Justificativa (obrigatória)'}
                                     </div>
                                     <textarea
                                       value={relatorioOcorrenciaJustification}
-                                      onChange={(e) => setRelatorioOcorrenciaJustification(e.target.value)}
+                                      onChange={(e) => {
+                                        setRelatorioOcorrenciaJustification(e.target.value)
+                                        if (
+                                          relatorioOcorrenciaAction ===
+                                          'recurso_judicial_valor_a_menor_relatorio_sisbr'
+                                        ) {
+                                          setRelatorioRecursoJudicialAutoJustification(false)
+                                        }
+                                      }}
                                       rows={4}
                                       style={{
                                         width: '100%',
@@ -8058,96 +9689,209 @@ export default function CreditoPage() {
 
                               {!ocorrenciaReadOnly ? (
                                 <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-                                  {ocorrenciaModal.ocorrencia ? (
-                                    <button
-                                      type="button"
-                                      className="btn btn-ghost"
-                                      disabled={relatorioOcorrenciaSaving}
-                                      onClick={async () => {
-                                        if (!ocorrenciaModal.ocorrencia) return
-                                        if (conciliacaoData?.closed?.isClosed) return
-                                        setRelatorioOcorrenciaSaving(true)
-                                        setRelatorioOcorrenciaError(null)
-                                        try {
-                                          const res = await fetch(
-                                            '/api/consignado/conciliacao/recurso-vs-relatorio/desfazer-ocorrencia',
-                                            {
-                                              method: 'POST',
-                                              headers: { 'content-type': 'application/json' },
-                                              body: JSON.stringify({
-                                                id: ocorrenciaModal.ocorrencia.id,
-                                                undoJustification: relatorioOcorrenciaJustification,
-                                              }),
-                                            },
-                                          )
-                                          const json = (await res.json().catch(() => null)) as
-                                            | null
-                                            | { message?: string }
-                                          if (!res.ok) {
-                                            throw new Error(json?.message || 'Falha ao desfazer ocorrência.')
-                                          }
-                                          await reloadConciliacaoKeepExpanded()
-                                          setOcorrenciaModal(null)
-                                        } catch (e) {
-                                          const msg =
-                                            e instanceof Error ? e.message : 'Falha ao desfazer ocorrência.'
-                                          setRelatorioOcorrenciaError(msg)
-                                        } finally {
-                                          setRelatorioOcorrenciaSaving(false)
-                                        }
-                                      }}
-                                    >
-                                      {relatorioOcorrenciaSaving ? 'Desfazendo...' : 'Desfazer ocorrência'}
-                                    </button>
-                                  ) : null}
-                                  {!ocorrenciaModal.ocorrencia ? (
+                                  {ocorrenciaModalOcorrencias.length === 0 || ocorrenciaModalShowNew ? (
                                     <button
                                       type="button"
                                       className="btn btn-primary"
                                       disabled={
                                         relatorioOcorrenciaSaving ||
-                                        Boolean(conciliacaoData?.closed?.isClosed) ||
+                                        ocorrenciaReadOnly ||
                                         !conciliacaoMonth ||
-                                        !relatorioOcorrenciaToOrgao ||
                                         !relatorioOcorrenciaJustification.trim() ||
-                                        !ocorrenciaModal.empresa
+                                        (relatorioOcorrenciaAction === 'alterar_orgao_relatorio_sisbr' &&
+                                          (!relatorioOcorrenciaToOrgao || !ocorrenciaModal.empresa)) ||
+                                        (relatorioOcorrenciaAction === 'repactuacao_relatorio_sisbr' &&
+                                          relatorioRepactuacaoStatus === 'pendente_gerente' &&
+                                          !relatorioRepactuacaoGerenteEmail.trim()) ||
+                                        (relatorioOcorrenciaAction === 'nao_possui_recurso_relatorio_sisbr' &&
+                                          !relatorioNaoPossuiRecursoGerenteEmail.trim()) ||
+                                        (relatorioOcorrenciaAction ===
+                                          'liquidacao_fora_vencimento_relatorio_sisbr' &&
+                                          !/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioLiquidacaoForaVencimentoDate.trim(),
+                                          )) ||
+                                        (relatorioOcorrenciaAction ===
+                                          'recurso_judicial_valor_a_menor_relatorio_sisbr' &&
+                                          !relatorioRecursoJudicialNovoValor.trim())
                                       }
                                       onClick={async () => {
-                                        if (!conciliacaoMonth || !relatorioOcorrenciaToOrgao) return
-                                        if (conciliacaoData?.closed?.isClosed) return
-                                        if (!ocorrenciaModal.empresa) {
+                                        if (!conciliacaoMonth) return
+                                        if (ocorrenciaReadOnly) return
+                                        const isAlterarOrgao =
+                                          relatorioOcorrenciaAction === 'alterar_orgao_relatorio_sisbr'
+                                        const isRepactuacao =
+                                          relatorioOcorrenciaAction === 'repactuacao_relatorio_sisbr'
+                                        const isLiquidacaoCcs =
+                                          relatorioOcorrenciaAction === 'liquidacao_ccs_relatorio_sisbr'
+                                        const isNaoPossuiRecurso =
+                                          relatorioOcorrenciaAction === 'nao_possui_recurso_relatorio_sisbr'
+                                        const isLiquidacaoForaVencimento =
+                                          relatorioOcorrenciaAction ===
+                                          'liquidacao_fora_vencimento_relatorio_sisbr'
+                                        const isRecursoJudicialValorAMenor =
+                                          relatorioOcorrenciaAction ===
+                                          'recurso_judicial_valor_a_menor_relatorio_sisbr'
+                                        if (isAlterarOrgao && !relatorioOcorrenciaToOrgao) return
+                                        if (isAlterarOrgao && !ocorrenciaModal.empresa) {
                                           setRelatorioOcorrenciaError(
                                             'Empresa atual (SISBR) não encontrada no registro.',
                                           )
                                           return
                                         }
+                                        if (
+                                          isRepactuacao &&
+                                          relatorioRepactuacaoStatus === 'pendente_gerente' &&
+                                          !relatorioRepactuacaoGerenteEmail.trim()
+                                        ) {
+                                          setRelatorioOcorrenciaError('Informe o e-mail do gerente responsável.')
+                                          return
+                                        }
+                                        if (isNaoPossuiRecurso && !relatorioNaoPossuiRecursoGerenteEmail.trim()) {
+                                          setRelatorioOcorrenciaError('Informe o e-mail do gerente responsável.')
+                                          return
+                                        }
+                                        if (isLiquidacaoForaVencimento) {
+                                          if (ocorrenciaModal.status !== 'conciliado') {
+                                            setRelatorioOcorrenciaError(
+                                              'Para registrar Liquidação Fora do Vencimento, o registro deve estar conciliado.',
+                                            )
+                                            return
+                                          }
+                                          const t = relatorioLiquidacaoForaVencimentoDate.trim()
+                                          if (!t) {
+                                            setRelatorioOcorrenciaError('Informe a data de liquidação (dd/mm/aaaa).')
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(t)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                        }
+                                        if (isRecursoJudicialValorAMenor) {
+                                          if (!relatorioRecursoJudicialNovoValor.trim()) {
+                                            setRelatorioOcorrenciaError('Informe o valor judicial (valor editado).')
+                                            return
+                                          }
+                                          const oldCents = ptBrMoneyToCents(ocorrenciaModal.value)
+                                          const newCents = ptBrMoneyToCents(relatorioRecursoJudicialNovoValor)
+                                          if (!oldCents || !newCents || newCents >= oldCents) {
+                                            setRelatorioOcorrenciaError(
+                                              'O valor judicial deve ser um valor válido e menor que o valor do contrato.',
+                                            )
+                                            return
+                                          }
+                                        }
                                         setRelatorioOcorrenciaSaving(true)
                                         setRelatorioOcorrenciaError(null)
                                         try {
                                           const res = await fetch(
-                                            '/api/consignado/conciliacao/recurso-vs-relatorio/alterar-orgao-relatorio',
+                                            isAlterarOrgao
+                                              ? '/api/consignado/conciliacao/recurso-vs-relatorio/alterar-orgao-relatorio'
+                                              : isLiquidacaoCcs
+                                                ? '/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-ccs-excluir-relatorio'
+                                                : isNaoPossuiRecurso
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/nao-possui-recurso'
+                                                  : isLiquidacaoForaVencimento
+                                                    ? '/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-fora-vencimento'
+                                                : isRecursoJudicialValorAMenor
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/recurso-judicial-valor-a-menor'
+                                                : '/api/consignado/conciliacao/recurso-vs-relatorio/repactuacao-relatorio',
                                             {
                                               method: 'POST',
                                               headers: { 'content-type': 'application/json' },
-                                              body: JSON.stringify({
-                                                month: conciliacaoMonth,
-                                                orgao: conciliacaoOrgao.trim(),
-                                                cpf: ocorrenciaModal.cpf,
-                                                nome: ocorrenciaModal.nome,
-                                                value: ocorrenciaModal.value,
-                                                fromEmpresa: ocorrenciaModal.empresa,
-                                                toOrgao: relatorioOcorrenciaToOrgao,
-                                                action: relatorioOcorrenciaAction,
-                                                justification: relatorioOcorrenciaJustification,
-                                              }),
+                                              body: JSON.stringify(
+                                                isAlterarOrgao
+                                                  ? {
+                                                      month: conciliacaoMonth,
+                                                      orgao: conciliacaoOrgao.trim(),
+                                                      cpf: ocorrenciaModal.cpf,
+                                                      nome: ocorrenciaModal.nome,
+                                                      value: ocorrenciaModal.value,
+                                                      fromEmpresa: ocorrenciaModal.empresa,
+                                                      toOrgao: relatorioOcorrenciaToOrgao,
+                                                      action: relatorioOcorrenciaAction,
+                                                      justification: relatorioOcorrenciaJustification,
+                                                    }
+                                                  : isLiquidacaoCcs
+                                                    ? {
+                                                        month: conciliacaoMonth,
+                                                        orgao: conciliacaoOrgao.trim(),
+                                                        cpf: ocorrenciaModal.cpf,
+                                                        nome: ocorrenciaModal.nome,
+                                                        value: ocorrenciaModal.value,
+                                                        fromEmpresa: ocorrenciaModal.empresa,
+                                                        action: relatorioOcorrenciaAction,
+                                                        justification: relatorioOcorrenciaJustification,
+                                                      }
+                                                    : isNaoPossuiRecurso
+                                                      ? {
+                                                          month: conciliacaoMonth,
+                                                          orgao: conciliacaoOrgao.trim(),
+                                                          cpf: ocorrenciaModal.cpf,
+                                                          nome: ocorrenciaModal.nome,
+                                                          value: ocorrenciaModal.value,
+                                                          fromEmpresa: ocorrenciaModal.empresa,
+                                                          gerenteEmail: relatorioNaoPossuiRecursoGerenteEmail,
+                                                          message: relatorioOcorrenciaJustification,
+                                                          action: relatorioOcorrenciaAction,
+                                                        }
+                                                      : isLiquidacaoForaVencimento
+                                                        ? {
+                                                            month: conciliacaoMonth,
+                                                            orgao: conciliacaoOrgao.trim(),
+                                                            cpf: ocorrenciaModal.cpf,
+                                                            nome: ocorrenciaModal.nome,
+                                                            value: ocorrenciaModal.value,
+                                                            fromEmpresa: ocorrenciaModal.empresa,
+                                                            liquidationDate:
+                                                              relatorioLiquidacaoForaVencimentoDate.trim(),
+                                                            action: relatorioOcorrenciaAction,
+                                                            justification: relatorioOcorrenciaJustification,
+                                                          }
+                                                      : isRecursoJudicialValorAMenor
+                                                        ? {
+                                                            month: conciliacaoMonth,
+                                                            orgao: conciliacaoOrgao.trim(),
+                                                            cpf: ocorrenciaModal.cpf,
+                                                            nome: ocorrenciaModal.nome,
+                                                            value: ocorrenciaModal.value,
+                                                            fromEmpresa: ocorrenciaModal.empresa,
+                                                            newValue: relatorioRecursoJudicialNovoValor,
+                                                            action: relatorioOcorrenciaAction,
+                                                            justification: relatorioOcorrenciaJustification,
+                                                          }
+                                                    : {
+                                                        month: conciliacaoMonth,
+                                                        orgao: conciliacaoOrgao.trim(),
+                                                        cpf: ocorrenciaModal.cpf,
+                                                        nome: ocorrenciaModal.nome,
+                                                        value: ocorrenciaModal.value,
+                                                        status: relatorioRepactuacaoStatus,
+                                                        gerenteEmail: relatorioRepactuacaoGerenteEmail,
+                                                        action: relatorioOcorrenciaAction,
+                                                        justification: relatorioOcorrenciaJustification,
+                                                      },
+                                              ),
                                             },
                                           )
                                           const json = (await res.json().catch(() => null)) as
                                             | null
-                                            | { message?: string }
+                                            | {
+                                                message?: string
+                                                teams?: { attempted?: boolean; sent?: boolean; error?: string | null }
+                                              }
                                           if (!res.ok)
                                             throw new Error(json?.message || 'Falha ao salvar ocorrência.')
                                           await reloadConciliacaoKeepExpanded()
+                                          if (json?.teams && json.teams.sent === false) {
+                                            const details = String(json.teams.error ?? '').trim()
+                                            setRelatorioOcorrenciaError(
+                                              `Ocorrência salva, mas não foi possível enviar no Teams. ${details || 'Verifique o login do Teams.'}`,
+                                            )
+                                            return
+                                          }
                                           setOcorrenciaModal(null)
                                         } catch (e) {
                                           const msg =
@@ -8158,7 +9902,17 @@ export default function CreditoPage() {
                                         }
                                       }}
                                     >
-                                      {relatorioOcorrenciaSaving ? 'Salvando...' : 'Concluir ocorrência'}
+                                      {relatorioOcorrenciaSaving
+                                        ? 'Salvando...'
+                                        : relatorioOcorrenciaAction === 'repactuacao_relatorio_sisbr'
+                                          ? 'Registrar repactuação'
+                                          : relatorioOcorrenciaAction ===
+                                                'liquidacao_ccs_relatorio_sisbr'
+                                            ? 'Excluir do Relatório SISBR'
+                                            : relatorioOcorrenciaAction ===
+                                                  'nao_possui_recurso_relatorio_sisbr'
+                                              ? 'Registrar e enviar'
+                                          : 'Concluir ocorrência'}
                                     </button>
                                   ) : null}
                                 </div>
