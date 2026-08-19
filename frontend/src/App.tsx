@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import PortalHomePage from './pages/PortalHomePage'
 import CreditoPage from './pages/CreditoPage'
+import AutomacaoPage from './pages/AutomacaoPage'
 
 const disableMsal = String((import.meta as any).env?.VITE_DISABLE_MSAL ?? '').trim() === '1'
 
@@ -105,12 +106,20 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
       .then(async (res) => {
         const data = (await res.json().catch(() => null)) as
           | {
-              entries?: Array<{ email?: string; role?: 'admin' | 'usuario' }>
+              entries?: Array<{
+                email?: string
+                role?: 'admin' | 'usuario'
+                menus?: string[]
+                flowStages?: string[]
+              }>
               emails?: string[]
               fixedEmail?: string
               message?: string
             }
           | null
+        // #region debug-point C:access-check-response
+        fetch('/api/consignado/debug/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'access-validation-503',runId:'pre-fix',hypothesisId:'C',location:'App.tsx:access-check:response',msg:'[DEBUG] Resposta da validacao de acesso recebida no frontend',data:{status:res.status,ok:res.ok,message:data?.message??null,hasEntries:Array.isArray(data?.entries),entries:Array.isArray(data?.entries)?data.entries.length:null},ts:Date.now()})}).catch(()=>{})
+        // #endregion
         if (!res.ok) {
           const msg =
             data?.message || `Falha ao validar acesso (HTTP ${res.status}).`
@@ -128,12 +137,18 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
               .map((e) => ({
                 email: String(e.email ?? '').trim().toLowerCase(),
                 role: e.role === 'admin' ? 'admin' : 'usuario',
+                menus: Array.isArray(e.menus) ? e.menus.map((item) => String(item)) : [],
+                flowStages: Array.isArray(e.flowStages)
+                  ? e.flowStages.map((item) => String(item))
+                  : [],
               }))
               .filter((e) => Boolean(e.email))
           : (Array.isArray(data?.emails) ? data?.emails : [])
               .map((email) => ({
                 email: String(email).trim().toLowerCase(),
                 role: String(email).trim().toLowerCase() === fixed ? 'admin' : 'usuario',
+                menus: [],
+                flowStages: [],
               }))
               .filter((e) => Boolean(e.email))
 
@@ -142,6 +157,18 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
         const role = found?.role ?? 'usuario'
         sessionStorage.setItem('consignado_user_email', username)
         sessionStorage.setItem('consignado_user_role', role)
+        sessionStorage.setItem(
+          'consignado_user_menu_permissions',
+          JSON.stringify(Array.isArray(found?.menus) && found?.menus.length > 0 ? found?.menus : []),
+        )
+        sessionStorage.setItem(
+          'consignado_user_flow_stage_permissions',
+          JSON.stringify(
+            Array.isArray(found?.flowStages) && found?.flowStages.length > 0
+              ? found?.flowStages
+              : [],
+          ),
+        )
 
         setAccessAuthorized(Boolean(username) && allowed)
         setAccessMessage(
@@ -175,7 +202,17 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
 
   if (!hasAccount) {
     return (
-      <div className="bg-gray-50 h-screen flex items-center justify-center">
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 24,
+          background: '#f5f7fa',
+          fontFamily: "system-ui, 'Segoe UI', Roboto, sans-serif",
+        }}
+      >
         <style>{`
           @keyframes softPulse {
             0%, 100% { transform: scale(1); filter: brightness(1); }
@@ -184,15 +221,41 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
           .soft-pulse { animation: softPulse 5s ease-in-out infinite; will-change: transform, filter; }
         `}</style>
 
-        <div className="w-full max-w-sm mx-auto rounded-2xl overflow-hidden bg-gradient-to-b from-[#00AE9D] to-[#008C7D] shadow-2xl">
-          <div className="px-8 py-10">
-            <div className="flex items-center justify-center mb-6">
-              <div className="bg-gradient-to-r from-[#00AE9D] to-[#008C7D] p-[2px] rounded-2xl shadow-md soft-pulse">
-                <div className="bg-[#003641] rounded-xl p-3 shadow-md ring-1 ring-black/5 transition-transform duration-300 ease-out hover:scale-105 hover:shadow-lg">
+        <div
+          style={{
+            width: '100%',
+            maxWidth: 420,
+            margin: '0 auto',
+            borderRadius: 16,
+            overflow: 'hidden',
+            background: 'linear-gradient(180deg, #00AE9D, #008C7D)',
+            boxShadow: '0 22px 60px rgba(0,0,0,0.18)',
+          }}
+        >
+          <div style={{ padding: '38px 34px' }}>
+            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 22 }}>
+              <div
+                className="soft-pulse"
+                style={{
+                  padding: 2,
+                  borderRadius: 16,
+                  background: 'linear-gradient(90deg, #00AE9D, #008C7D)',
+                  boxShadow: '0 10px 20px rgba(0,0,0,0.16)',
+                }}
+              >
+                <div
+                  style={{
+                    background: '#003641',
+                    borderRadius: 12,
+                    padding: 12,
+                    boxShadow: '0 10px 20px rgba(0,0,0,0.16)',
+                    border: '1px solid rgba(0,0,0,0.12)',
+                  }}
+                >
                   <img
                     src="/assets/sicoob-juriscred.png"
                     alt="Juriscred"
-                    className="h-10 w-auto"
+                    style={{ height: 40, width: 'auto', display: 'block' }}
                     onError={(e) => {
                       e.currentTarget.onerror = null
                       e.currentTarget.src = '/assets/sicoob-juriscred_Logo Verde.png'
@@ -202,13 +265,24 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
               </div>
             </div>
 
-            <div className="text-center space-y-2">
-              <div className="flex items-center justify-center gap-2">
-                <h1 className="text-3xl font-bold text-white tracking-tight">Acesso Restrito</h1>
-              </div>
-              <div className="flex items-center justify-center gap-2 text-white/95">
+            <div style={{ textAlign: 'center' }}>
+              <h1 style={{ fontSize: 28, fontWeight: 800, color: '#fff', margin: 0 }}>
+                Acesso Restrito
+              </h1>
+              <div
+                style={{
+                  marginTop: 10,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  color: 'rgba(255,255,255,0.95)',
+                }}
+              >
                 <svg
-                  className="h-7 w-7 text-white soft-pulse"
+                  className="soft-pulse"
+                  width="28"
+                  height="28"
                   viewBox="0 0 24 24"
                   fill="none"
                   xmlns="http://www.w3.org/2000/svg"
@@ -232,14 +306,14 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
                   />
                   <rect x="5" y="4" width="14" height="2" rx="1" fill="currentColor" opacity="0.5" />
                 </svg>
-                <span className="text-sm">Portal Administrativo</span>
+                <span style={{ fontSize: 13, fontWeight: 650 }}>Portal Administrativo</span>
               </div>
-              <p className="text-sm text-white/90">
+              <p style={{ margin: '10px 0 0', fontSize: 13, color: 'rgba(255,255,255,0.9)' }}>
                 Autentique-se com sua conta Microsoft para continuar.
               </p>
             </div>
 
-            <div className="mt-8">
+            <div style={{ marginTop: 26 }}>
               <button
                 type="button"
                 onClick={async () => {
@@ -255,16 +329,31 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
                   }
                 }}
                 disabled={loggingIn}
-                className="w-full inline-flex items-center justify-center gap-3 px-5 py-3 rounded-lg font-semibold text-white bg-[#003641] hover:bg-[#004554] transition-all duration-300 ease-out shadow-md hover:shadow-lg active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#003641] disabled:opacity-80 disabled:cursor-not-allowed"
+                style={{
+                  width: '100%',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 10,
+                  padding: '12px 14px',
+                  borderRadius: 12,
+                  border: '1px solid rgba(0,0,0,0.15)',
+                  background: '#003641',
+                  color: '#fff',
+                  fontWeight: 750,
+                  cursor: loggingIn ? 'not-allowed' : 'pointer',
+                  opacity: loggingIn ? 0.82 : 1,
+                  boxShadow: '0 12px 24px rgba(0,0,0,0.18)',
+                }}
               >
-                <span className="inline-flex items-center justify-center">
+                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
                   <svg
                     width="22"
                     height="22"
                     viewBox="0 0 22 22"
                     xmlns="http://www.w3.org/2000/svg"
                     aria-hidden="true"
-                    className="flex-shrink-0"
+                    style={{ flexShrink: 0 }}
                   >
                     <rect x="1" y="1" width="9" height="9" fill="#F25022" />
                     <rect x="12" y="1" width="9" height="9" fill="#7FBA00" />
@@ -280,27 +369,41 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
                 onClick={() => {
                   window.location.href = '/'
                 }}
-                className="mt-3 w-full inline-flex items-center justify-center px-5 py-2 rounded-lg border border-white/60 text-sm font-medium text-white/90 bg-white/5 hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shadow-sm"
+                style={{
+                  marginTop: 10,
+                  width: '100%',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  border: '1px solid rgba(255,255,255,0.55)',
+                  background: 'rgba(255,255,255,0.07)',
+                  color: 'rgba(255,255,255,0.92)',
+                  fontSize: 13,
+                  fontWeight: 650,
+                  cursor: 'pointer',
+                }}
               >
                 Voltar ao Portal
               </button>
 
-              <p className="mt-3 text-center text-xs text-white/80">
+              <p style={{ margin: '12px 0 0', textAlign: 'center', fontSize: 12, color: 'rgba(255,255,255,0.82)' }}>
                 Use sua conta corporativa Microsoft 365
               </p>
-              <p className="mt-1 text-center text-xs text-white/80">
+              <p style={{ margin: '6px 0 0', textAlign: 'center', fontSize: 12, color: 'rgba(255,255,255,0.82)' }}>
                 Solicite Suporte à Equipe de TI:{' '}
                 <a
                   href="mailto:suporte@sicoobjuriscred.com.br"
-                  className="text-white underline hover:text-white"
+                  style={{ color: '#fff', textDecoration: 'underline' }}
                 >
                   suporte@sicoobjuriscred.com.br
                 </a>
               </p>
               {cryptoWarning ? (
-                <p className="mt-2 text-center text-xs text-yellow-200">
+                <p style={{ margin: '10px 0 0', textAlign: 'center', fontSize: 12, color: '#fde68a' }}>
                   Para login via IP, é necessário HTTPS. Acesse por{' '}
-                  <a href="http://localhost:5173/" className="underline hover:text-yellow-100">
+                  <a href="http://localhost:5173/" style={{ color: '#fde68a', textDecoration: 'underline' }}>
                     localhost
                   </a>{' '}
                   ou solicite certificado HTTPS.
@@ -308,10 +411,10 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
               ) : null}
             </div>
 
-            <div className="mt-8 text-center">
+            <div style={{ marginTop: 18, textAlign: 'center' }}>
               <a
                 href="https://www.sicoob.com.br/web/sicoob/politica-privacidade-tratamento-dados"
-                className="text-[11px] text-white underline hover:text-white"
+                style={{ fontSize: 11, color: '#fff', textDecoration: 'underline' }}
                 target="_blank"
                 rel="noopener"
               >
@@ -321,9 +424,19 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        <div className="fixed bottom-3 left-0 right-0 text-center text-xs text-gray-600">
+        <div
+          style={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            bottom: 12,
+            textAlign: 'center',
+            fontSize: 12,
+            color: '#64748b',
+          }}
+        >
           © 2026 Juriscred
-          <span className="block">Desenvolvido pelo Departamento de Tecnologia da Informação.</span>
+          <div>Desenvolvido pelo Departamento de Tecnologia da Informação.</div>
         </div>
       </div>
     )
@@ -339,15 +452,43 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
 
   if (!accessAuthorized) {
     return (
-      <div className="bg-gray-50 h-screen flex items-center justify-center">
-        <div className="w-full max-w-sm mx-auto rounded-2xl overflow-hidden bg-gradient-to-b from-[#00AE9D] to-[#008C7D] shadow-2xl">
-          <div className="px-8 py-10">
-            <div className="flex items-center justify-center mb-6">
-              <div className="bg-[#003641] rounded-xl p-3 shadow-md ring-1 ring-black/5">
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 24,
+          background: '#f5f7fa',
+          fontFamily: "system-ui, 'Segoe UI', Roboto, sans-serif",
+        }}
+      >
+        <div
+          style={{
+            width: '100%',
+            maxWidth: 420,
+            margin: '0 auto',
+            borderRadius: 16,
+            overflow: 'hidden',
+            background: 'linear-gradient(180deg, #00AE9D, #008C7D)',
+            boxShadow: '0 22px 60px rgba(0,0,0,0.18)',
+          }}
+        >
+          <div style={{ padding: '38px 34px' }}>
+            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 22 }}>
+              <div
+                style={{
+                  background: '#003641',
+                  borderRadius: 12,
+                  padding: 12,
+                  boxShadow: '0 10px 20px rgba(0,0,0,0.16)',
+                  border: '1px solid rgba(0,0,0,0.12)',
+                }}
+              >
                 <img
                   src="/assets/sicoob-juriscred.png"
                   alt="Juriscred"
-                  className="h-10 w-auto"
+                  style={{ height: 40, width: 'auto', display: 'block' }}
                   onError={(e) => {
                     e.currentTarget.onerror = null
                     e.currentTarget.src = '/assets/sicoob-juriscred_Logo Verde.png'
@@ -355,17 +496,34 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
                 />
               </div>
             </div>
-            <div className="text-center space-y-2">
-              <h1 className="text-3xl font-bold text-white tracking-tight">Acesso Restrito</h1>
-              <p className="text-sm text-white/90">{accessMessage ?? 'Acesso não autorizado.'}</p>
+            <div style={{ textAlign: 'center' }}>
+              <h1 style={{ fontSize: 28, fontWeight: 800, color: '#fff', margin: 0 }}>
+                Acesso Restrito
+              </h1>
+              <p style={{ margin: '10px 0 0', fontSize: 13, color: 'rgba(255,255,255,0.9)' }}>
+                {accessMessage ?? 'Acesso não autorizado.'}
+              </p>
             </div>
-            <div className="mt-8">
+            <div style={{ marginTop: 26 }}>
               <button
                 type="button"
                 onClick={() => {
                   window.location.href = '/'
                 }}
-                className="w-full inline-flex items-center justify-center px-5 py-2 rounded-lg border border-white/60 text-sm font-medium text-white/90 bg-white/5 hover:bg-white/10 hover:text-white transition-all duration-300 ease-out shadow-sm"
+                style={{
+                  width: '100%',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '10px 14px',
+                  borderRadius: 12,
+                  border: '1px solid rgba(255,255,255,0.55)',
+                  background: 'rgba(255,255,255,0.07)',
+                  color: 'rgba(255,255,255,0.92)',
+                  fontSize: 13,
+                  fontWeight: 650,
+                  cursor: 'pointer',
+                }}
               >
                 Voltar ao Portal
               </button>
@@ -379,16 +537,41 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
                     console.error(e)
                   }
                 }}
-                className="mt-3 w-full inline-flex items-center justify-center gap-3 px-5 py-3 rounded-lg font-semibold text-white bg-[#003641] hover:bg-[#004554] transition-all duration-300 ease-out shadow-md hover:shadow-lg active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-[#003641]"
+                style={{
+                  marginTop: 10,
+                  width: '100%',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 10,
+                  padding: '12px 14px',
+                  borderRadius: 12,
+                  border: '1px solid rgba(0,0,0,0.15)',
+                  background: '#003641',
+                  color: '#fff',
+                  fontWeight: 750,
+                  cursor: 'pointer',
+                  boxShadow: '0 12px 24px rgba(0,0,0,0.18)',
+                }}
               >
                 Sair
               </button>
             </div>
           </div>
         </div>
-        <div className="fixed bottom-3 left-0 right-0 text-center text-xs text-gray-600">
+        <div
+          style={{
+            position: 'fixed',
+            left: 0,
+            right: 0,
+            bottom: 12,
+            textAlign: 'center',
+            fontSize: 12,
+            color: '#64748b',
+          }}
+        >
           © 2026 Juriscred
-          <span className="block">Desenvolvido pelo Departamento de Tecnologia da Informação.</span>
+          <div>Desenvolvido pelo Departamento de Tecnologia da Informação.</div>
         </div>
       </div>
     )
@@ -448,6 +631,14 @@ export default function App() {
         element: (
           <RequireMicrosoftLogin>
             <CreditoPage />
+          </RequireMicrosoftLogin>
+        ),
+      },
+      {
+        path: '/automacao',
+        element: (
+          <RequireMicrosoftLogin>
+            <AutomacaoPage />
           </RequireMicrosoftLogin>
         ),
       },

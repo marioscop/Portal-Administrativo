@@ -11,4 +11,28 @@ backend/Temporario/
 frontend/.certs/
 
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
 *.log
+
+# Arquivos temporários de debug / scripts auxiliares (não são parte do build)
+.dbg/
+*.ps1
+check_*.js
+check_sqlite_*.js
+run_import_*.js
+update_copetencia*.js
+global_count_copetencia.js
+scan_snap_extratos_count.js
+show_empty_copetencia.js
+compare_pdf_*.js
+backend/scripts/*.js
+backend/src/consignado/scripts/
+check_*.js
+create_extratos_table.js
+run_import_extratos_direto.js
+
+# PDFs gerados em Modelos (arquivo de referência pode ficar, mas os TESTEs de comparação gerados:
+Modelos/TESTE_*.pdf
+Modelos/TESTE_V*.pdf

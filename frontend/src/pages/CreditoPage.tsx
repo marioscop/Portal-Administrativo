@@ -1,6 +1,7 @@
 import {
   Fragment,
   type ReactElement,
+  type ReactNode,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -15,25 +16,25 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   BadgeDollarSign,
   ChevronDown,
+  Play,
   FileText,
   Home,
   Info,
   LayoutDashboard,
   Lock,
   LogOut,
-  Megaphone,
   Plus,
   Search,
   ShieldCheck,
   Sparkles,
-  TrendingDown,
-  TrendingUp,
+  X,
   Zap,
   Clock,
   Trash2,
   Unlock,
   Printer,
   FileSpreadsheet,
+  GitBranch,
 } from 'lucide-react'
 
 import ReactECharts from 'echarts-for-react'
@@ -41,19 +42,128 @@ import ReactECharts from 'echarts-for-react'
 type ViewId =
   | 'home'
   | 'dashboard'
+  | 'fluxo-pendencias'
   | 'conciliacao-extratos'
   | 'conciliacao-relatorio'
   | 'relatorios-valores'
+  | 'relatorios-conciliacao-data'
+  | 'relatorios-ocorrencias'
   | 'relatorios-auditoria'
   | 'configuracoes-automacao'
   | 'configuracoes-acessos'
 
+type AccessMenuPermission = ViewId
+type AccessFlowStagePermission = 'financeiro' | 'credito' | 'negocios'
+
+const ALL_ACCESS_MENU_PERMISSIONS: AccessMenuPermission[] = [
+  'home',
+  'dashboard',
+  'fluxo-pendencias',
+  'conciliacao-extratos',
+  'conciliacao-relatorio',
+  'relatorios-valores',
+  'relatorios-conciliacao-data',
+  'relatorios-ocorrencias',
+  'relatorios-auditoria',
+  'configuracoes-automacao',
+  'configuracoes-acessos',
+]
+
+const ALL_ACCESS_FLOW_STAGE_PERMISSIONS: AccessFlowStagePermission[] = [
+  'financeiro',
+  'credito',
+  'negocios',
+]
+
+const ACCESS_MENU_OPTIONS: Array<{ id: AccessMenuPermission; label: string }> = [
+  { id: 'home', label: 'Home' },
+  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'fluxo-pendencias', label: 'Fluxo de Pendências' },
+  { id: 'conciliacao-extratos', label: 'Conciliação • Extratos' },
+  { id: 'conciliacao-relatorio', label: 'Conciliação • Relatório' },
+  { id: 'relatorios-valores', label: 'Relatórios • Conciliação' },
+  { id: 'relatorios-conciliacao-data', label: 'Relatórios • Conciliação por data' },
+  { id: 'relatorios-ocorrencias', label: 'Relatórios • Ocorrências' },
+  { id: 'relatorios-auditoria', label: 'Relatórios • Auditoria' },
+  { id: 'configuracoes-automacao', label: 'Configurações • Automação' },
+  { id: 'configuracoes-acessos', label: 'Configurações • Acessos' },
+]
+
+const ACCESS_FLOW_STAGE_OPTIONS: Array<{
+  id: AccessFlowStagePermission
+  label: string
+}> = [
+  { id: 'financeiro', label: 'Financeiro' },
+  { id: 'credito', label: 'Crédito' },
+  { id: 'negocios', label: 'Negócios' },
+]
+
+function normalizeAccessMenuPermissions(value: unknown): AccessMenuPermission[] {
+  const raw = Array.isArray(value) ? value : []
+  const normalized = raw
+    .map((item) => String(item ?? '').trim())
+    .filter((item): item is AccessMenuPermission =>
+      ALL_ACCESS_MENU_PERMISSIONS.includes(item as AccessMenuPermission),
+    )
+    .filter((item, index, arr) => arr.indexOf(item) === index)
+  const hasAnyLegacyReportAccess =
+    normalized.includes('relatorios-valores') ||
+    normalized.includes('relatorios-ocorrencias') ||
+    normalized.includes('relatorios-auditoria')
+  if (
+    hasAnyLegacyReportAccess &&
+    !normalized.includes('relatorios-conciliacao-data')
+  ) {
+    normalized.push('relatorios-conciliacao-data')
+  }
+  return normalized.length > 0 ? normalized : [...ALL_ACCESS_MENU_PERMISSIONS]
+}
+
+function normalizeAccessFlowStagePermissions(
+  value: unknown,
+  fallbackToAll = true,
+): AccessFlowStagePermission[] {
+  const raw = Array.isArray(value) ? value : []
+  const normalized = raw
+    .map((item) => String(item ?? '').trim().toLowerCase())
+    .filter((item): item is AccessFlowStagePermission =>
+      ALL_ACCESS_FLOW_STAGE_PERMISSIONS.includes(item as AccessFlowStagePermission),
+    )
+    .filter((item, index, arr) => arr.indexOf(item) === index)
+  return normalized.length > 0 || !fallbackToAll
+    ? normalized
+    : [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS]
+}
+
+function readSessionAccessMenuPermissions() {
+  try {
+    return normalizeAccessMenuPermissions(
+      JSON.parse(sessionStorage.getItem('consignado_user_menu_permissions') || '[]'),
+    )
+  } catch {
+    return [...ALL_ACCESS_MENU_PERMISSIONS]
+  }
+}
+
+function readSessionAccessFlowStagePermissions() {
+  try {
+    const raw = sessionStorage.getItem('consignado_user_flow_stage_permissions')
+    if (raw == null) return [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS]
+    return normalizeAccessFlowStagePermissions(JSON.parse(raw), false)
+  } catch {
+    return [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS]
+  }
+}
+
 function parseViewFromHash(hash: string): ViewId | null {
   if (hash === 'home' || hash === 'dashboard') return hash
   if (
+    hash === 'fluxo-pendencias' ||
     hash === 'conciliacao-extratos' ||
     hash === 'conciliacao-relatorio' ||
     hash === 'relatorios-valores' ||
+    hash === 'relatorios-conciliacao-data' ||
+    hash === 'relatorios-ocorrencias' ||
     hash === 'relatorios-auditoria' ||
     hash === 'configuracoes-automacao' ||
     hash === 'configuracoes-acessos'
@@ -64,6 +174,7 @@ function parseViewFromHash(hash: string): ViewId | null {
 }
 
 const STORAGE_KEY = 'credito-automacao-config-v1'
+const CONCILIACAO_FILTERS_STORAGE_KEY = 'credito-conciliacao-filtros-v1'
 
 function useHashView(defaultView: ViewId) {
   const [view, setView] = useState<ViewId>(() => {
@@ -87,6 +198,340 @@ function useHashView(defaultView: ViewId) {
   return { view, setHash }
 }
 
+function getConciliacaoPorDataEventColumnSide(row: {
+  event?: string
+  debitCents?: number
+  creditCents?: number
+}) {
+  const event = String(row?.event ?? '').trim()
+  const debitCents = Number(row?.debitCents ?? 0) || 0
+  const creditCents = Number(row?.creditCents ?? 0) || 0
+
+  if (debitCents !== 0 && creditCents !== 0) {
+    return /^cr[eé]dito\b/i.test(event) ? 'credit' : 'debit'
+  }
+
+  if (debitCents !== 0) return 'debit'
+  if (creditCents !== 0) return 'credit'
+  return null
+}
+
+function formatConciliacaoPorDataEventColumnLabel(event: string, side: 'debit' | 'credit') {
+  const normalized = String(event ?? '').trim()
+  const prefix = side === 'credit' ? 'CRÉDITO' : 'DÉBITO'
+  if (!normalized) return prefix
+  const baseLabel = normalized.replace(/^(d[eé]bito|cr[eé]dito)\b[:\s-]*/i, '').trim()
+  return baseLabel ? `${prefix} - ${baseLabel}` : prefix
+}
+
+function makeConciliacaoPorDataEventColumnKey(label: string) {
+  return label
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+}
+
+function isConciliacaoPorDataDevolucaoEvent(event: unknown) {
+  const normalized = String(event ?? '').trim().toUpperCase()
+  return normalized.startsWith('DEVOLUÇÃO')
+}
+
+function splitConciliacaoPorDataHeaderLabel(label: string) {
+  const normalized = String(label ?? '').trim()
+  if (!normalized) return ['']
+
+  const splitWords = (part: string) => {
+    const words = part.split(/\s+/).filter(Boolean)
+    if (words.length <= 2 || part.length <= 18) return [part]
+    if (words.length === 3) return [words.slice(0, 2).join(' '), words[2]]
+
+    const midpoint = Math.ceil(words.length / 2)
+    return [words.slice(0, midpoint).join(' '), words.slice(midpoint).join(' ')]
+  }
+
+  const dashParts = normalized.split(/\s+-\s+/).map((part) => part.trim()).filter(Boolean)
+  if (dashParts.length > 1) {
+    const [head, ...tail] = dashParts
+    return [head, ...splitWords(tail.join(' - '))]
+  }
+
+  return splitWords(normalized)
+}
+
+function getConciliacaoPorDataEventColumnValue(row: {
+  event?: string
+  debitCents?: number
+  creditCents?: number
+}) {
+  const event = String(row?.event ?? '').trim()
+  const debitCents = Number(row?.debitCents ?? 0) || 0
+  const creditCents = Number(row?.creditCents ?? 0) || 0
+
+  if (debitCents !== 0 && creditCents !== 0) {
+    if (/^cr[eé]dito\b/i.test(event)) return creditCents
+    return debitCents
+  }
+
+  if (debitCents !== 0) return debitCents
+  if (creditCents !== 0) return creditCents
+  return 0
+}
+
+function getConciliacaoPorDataReceivedColumnTotal(
+  rows: Array<{
+    liquidationDate?: string
+    orgao?: string
+    orgaoReceivedCents?: number
+  }>,
+) {
+  const grouped = new Map<string, number>()
+  for (const row of rows) {
+    const liquidationDate = String(row?.liquidationDate ?? '').trim() || '—'
+    const orgao = String(row?.orgao ?? '').trim() || '—'
+    const groupKey = `${liquidationDate}__${orgao}`
+    if (!grouped.has(groupKey)) {
+      grouped.set(groupKey, Number(row?.orgaoReceivedCents ?? 0) || 0)
+    }
+  }
+  return Array.from(grouped.values()).reduce((sum, value) => sum + value, 0)
+}
+
+function normalizeConciliacaoPorDataOrgaoKey(value: unknown) {
+  return String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLocaleLowerCase('pt-BR')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
+type ConciliacaoPorDataValidationStatus = 'pending' | 'approved' | 'rejected'
+
+type ConciliacaoPorDataValidationNotificationResult = {
+  attempted: boolean
+  sent: boolean
+  error: string | null
+  to: string | string[] | null
+}
+
+type ConciliacaoPorDataValidationSnapshot = {
+  monthKey: string
+  orgao: string
+  liquidationDate: string
+  displayDateLabel: string
+  displayDateValue: string
+  recursoRecebidoCents: number
+  totalDebitadoCents: number
+  saldoDevedorCents: number
+  eventColumns: Array<{
+    label: string
+    side: 'debit' | 'credit'
+    valueCents: number
+  }>
+}
+
+type ConciliacaoPorDataValidationProcess = {
+  id: string
+  status: ConciliacaoPorDataValidationStatus
+  requestedAt: string | null
+  requestedBy: string | null
+  accountingEmail: string | null
+  financeEmail: string | null
+  approvedAt: string | null
+  approvedBy: string | null
+  rejectedAt: string | null
+  rejectedBy: string | null
+  rejectionJustification: string | null
+  respondedAt: string | null
+  link: string | null
+  notification: Record<string, ConciliacaoPorDataValidationNotificationResult>
+  decisionNotification: Record<string, ConciliacaoPorDataValidationNotificationResult>
+  rowSnapshot: ConciliacaoPorDataValidationSnapshot | null
+}
+
+type ConciliacaoPorDataValidationModalState = {
+  orgao: string
+  liquidationDate: string
+  process: ConciliacaoPorDataValidationProcess
+  resendPayload: null | {
+    orgaoReceivedCents: number
+    totalDebitCents: number
+    saldoCents: number
+    eventColumns: Array<{
+      label: string
+      side: 'debit' | 'credit'
+      valueCents: number
+    }>
+  }
+}
+
+type ConciliacaoPorDataTarifaItem = {
+  orgao: string
+  linhaCents: number
+  tedCents: number
+  totalCents: number
+  oldestLiquidationDate: string
+}
+
+function buildConciliacaoPorDataRowCompositeKey(liquidationDate: string, orgao: string) {
+  return `${String(liquidationDate ?? '').trim() || '—'}__${String(orgao ?? '').trim() || '—'}`
+}
+
+function formatSisbrEmpresaLabel(value: unknown) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return '-'
+  const parts = raw
+    .split(' - ')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  const shortName = parts.length >= 2 ? parts[1] : ''
+  if (!shortName) return raw
+  const prefix = `(${shortName})`
+  if (raw === prefix || raw.startsWith(`${prefix} `)) return raw
+  return `${prefix} ${raw}`
+}
+
+function normalizeConciliacaoOrgaoLabelKey(value: unknown) {
+  return String(value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[.\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase()
+}
+
+function formatConciliacaoOrgaoLabel(value: unknown) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return '-'
+  const key = normalizeConciliacaoOrgaoLabelKey(raw)
+  const prefix = key.includes('CRED LIQUIDACAO COBRANCA')
+    ? 'ADFEGO'
+    : key.includes('PIX RECEBIDO OUTRA IF')
+      ? 'ELETRA'
+      : ''
+  if (!prefix) return raw
+  if (raw === `(${prefix})` || raw.startsWith(`(${prefix}) `)) return raw
+  return `(${prefix}) ${raw}`
+}
+
+const conciliacaoPorDataExcludedDebitTotalKeys = new Set([
+  'debito_diferenca_de_recursos_judiciais',
+  'debito_nao_possui_recurso',
+  'debito_repactuacao_em_andamento',
+])
+
+function isConciliacaoPorDataExcludedDebitTotalLabel(label: string) {
+  return conciliacaoPorDataExcludedDebitTotalKeys.has(makeConciliacaoPorDataEventColumnKey(label))
+}
+
+function normalizeConciliacaoPorDataValidationNotificationResult(
+  value: unknown,
+): ConciliacaoPorDataValidationNotificationResult | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  const toRaw = raw.to
+  const to =
+    Array.isArray(toRaw)
+      ? toRaw.map((item) => String(item ?? '').trim()).filter(Boolean)
+      : String(toRaw ?? '').trim() || null
+  return {
+    attempted: Boolean(raw.attempted),
+    sent: Boolean(raw.sent),
+    error: String(raw.error ?? '').trim() || null,
+    to,
+  }
+}
+
+function normalizeConciliacaoPorDataValidationProcess(
+  value: unknown,
+): ConciliacaoPorDataValidationProcess | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  const statusRaw = String(raw.status ?? '').trim().toLowerCase()
+  if (statusRaw !== 'pending' && statusRaw !== 'approved' && statusRaw !== 'rejected') return null
+
+  const notificationRaw =
+    raw.notification && typeof raw.notification === 'object'
+      ? (raw.notification as Record<string, unknown>)
+      : {}
+  const decisionNotificationRaw =
+    raw.decisionNotification && typeof raw.decisionNotification === 'object'
+      ? (raw.decisionNotification as Record<string, unknown>)
+      : {}
+
+  const notification = Object.fromEntries(
+    Object.entries(notificationRaw)
+      .map(([key, entry]) => [key, normalizeConciliacaoPorDataValidationNotificationResult(entry)])
+      .filter((entry): entry is [string, ConciliacaoPorDataValidationNotificationResult] => Boolean(entry[1])),
+  )
+  const decisionNotification = Object.fromEntries(
+    Object.entries(decisionNotificationRaw)
+      .map(([key, entry]) => [key, normalizeConciliacaoPorDataValidationNotificationResult(entry)])
+      .filter((entry): entry is [string, ConciliacaoPorDataValidationNotificationResult] => Boolean(entry[1])),
+  )
+
+  const snapshotRaw =
+    raw.rowSnapshot && typeof raw.rowSnapshot === 'object'
+      ? (raw.rowSnapshot as Record<string, unknown>)
+      : null
+  const rowSnapshot = snapshotRaw
+    ? {
+        monthKey: String(snapshotRaw.monthKey ?? '').trim(),
+        orgao: String(snapshotRaw.orgao ?? '').trim(),
+        liquidationDate: String(snapshotRaw.liquidationDate ?? '').trim(),
+        displayDateLabel: String(snapshotRaw.displayDateLabel ?? '').trim() || 'Data de Liquidação',
+        displayDateValue:
+          String(snapshotRaw.displayDateValue ?? '').trim() ||
+          String(snapshotRaw.liquidationDate ?? '').trim(),
+        recursoRecebidoCents: Number(snapshotRaw.recursoRecebidoCents ?? 0) || 0,
+        totalDebitadoCents: Number(snapshotRaw.totalDebitadoCents ?? 0) || 0,
+        saldoDevedorCents: Number(snapshotRaw.saldoDevedorCents ?? 0) || 0,
+        eventColumns: Array.isArray(snapshotRaw.eventColumns)
+          ? snapshotRaw.eventColumns
+              .map((item) => {
+                const entry = item && typeof item === 'object' ? (item as Record<string, unknown>) : null
+                if (!entry) return null
+                const label = String(entry.label ?? '').trim()
+                if (!label) return null
+                return {
+                  label,
+                  side: String(entry.side ?? '').trim().toLowerCase() === 'credit' ? 'credit' : 'debit',
+                  valueCents: Number(entry.valueCents ?? 0) || 0,
+                }
+              })
+              .filter(
+                (
+                  item,
+                ): item is { label: string; side: 'debit' | 'credit'; valueCents: number } =>
+                  Boolean(item),
+              )
+          : [],
+      }
+    : null
+
+  return {
+    id: String(raw.id ?? '').trim(),
+    status: statusRaw,
+    requestedAt: String(raw.requestedAt ?? '').trim() || null,
+    requestedBy: String(raw.requestedBy ?? '').trim() || null,
+    accountingEmail: String(raw.accountingEmail ?? '').trim() || null,
+    financeEmail: String(raw.financeEmail ?? '').trim() || null,
+    approvedAt: String(raw.approvedAt ?? '').trim() || null,
+    approvedBy: String(raw.approvedBy ?? '').trim() || null,
+    rejectedAt: String(raw.rejectedAt ?? '').trim() || null,
+    rejectedBy: String(raw.rejectedBy ?? '').trim() || null,
+    rejectionJustification: String(raw.rejectionJustification ?? '').trim() || null,
+    respondedAt: String(raw.respondedAt ?? '').trim() || null,
+    link: String(raw.link ?? '').trim() || null,
+    notification,
+    decisionNotification,
+    rowSnapshot,
+  }
+}
+
 export default function CreditoPage() {
   const orgaoSort = useMemo(() => {
     const collator = new Intl.Collator('pt-BR', { sensitivity: 'base', numeric: true })
@@ -108,6 +553,8 @@ export default function CreditoPage() {
         importTime?: string
         notificationEmail?: string
         notificationEmailContabilidade?: string
+        occurrencesPanoramaDiretoriaEmail?: string
+        occurrencesPanoramaGerentesEmail?: string
         modalidades?: string[]
       }
     } catch {
@@ -127,6 +574,8 @@ export default function CreditoPage() {
     return raw.trim().toLowerCase() === 'admin' ? 'admin' : 'usuario'
   })
   const [search, setSearch] = useState('')
+  const [recursoNomeFilter, setRecursoNomeFilter] = useState('')
+  const [relatorioNomeFilter, setRelatorioNomeFilter] = useState('')
   const [commandOpen, setCommandOpen] = useState(false)
   const [commandQuery, setCommandQuery] = useState('')
   const commandInputRef = useRef<HTMLInputElement | null>(null)
@@ -162,6 +611,10 @@ export default function CreditoPage() {
   )
   const [notificationEmailContabilidade, setNotificationEmailContabilidade] =
     useState(storedConfig?.notificationEmailContabilidade ?? '')
+  const [occurrencesPanoramaDiretoriaEmail, setOccurrencesPanoramaDiretoriaEmail] =
+    useState(storedConfig?.occurrencesPanoramaDiretoriaEmail ?? '')
+  const [occurrencesPanoramaGerentesEmail, setOccurrencesPanoramaGerentesEmail] =
+    useState(storedConfig?.occurrencesPanoramaGerentesEmail ?? '')
   const [teamsDelegatedConnected, setTeamsDelegatedConnected] = useState(false)
   const [teamsDelegatedDeviceCode, setTeamsDelegatedDeviceCode] = useState<null | {
     userCode: string
@@ -184,10 +637,37 @@ export default function CreditoPage() {
   >({
     'mario.junior@sicoobjuriscred.com.br': 'admin',
   })
+  const [accessMenusByEmail, setAccessMenusByEmail] = useState<
+    Record<string, AccessMenuPermission[]>
+  >({
+    'mario.junior@sicoobjuriscred.com.br': [...ALL_ACCESS_MENU_PERMISSIONS],
+  })
+  const [accessFlowStagesByEmail, setAccessFlowStagesByEmail] = useState<
+    Record<string, AccessFlowStagePermission[]>
+  >({
+    'mario.junior@sicoobjuriscred.com.br': [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS],
+  })
   const [accessEmailDraft, setAccessEmailDraft] = useState('')
   const [accessEmailsLoading, setAccessEmailsLoading] = useState(false)
   const [accessEmailsSaving, setAccessEmailsSaving] = useState(false)
   const [accessEmailsError, setAccessEmailsError] = useState<string | null>(null)
+  const [accessEmailSearchResults, setAccessEmailSearchResults] = useState<
+    Array<{ displayName: string; email: string }>
+  >([])
+  const [accessEmailSearchLoading, setAccessEmailSearchLoading] = useState(false)
+  const [accessEmailSearchError, setAccessEmailSearchError] = useState<string | null>(null)
+  const accessEmailSearchRef = useRef<number | null>(null)
+  const [accessExpandedEmail, setAccessExpandedEmail] = useState<string | null>(null)
+  const currentSessionUserEmail =
+    String(sessionStorage.getItem('consignado_user_email') || '')
+      .trim()
+      .toLowerCase() || accessFixedEmail.trim().toLowerCase()
+  const [userMenuPermissions, setUserMenuPermissions] = useState<
+    AccessMenuPermission[]
+  >(() => readSessionAccessMenuPermissions())
+  const [userFlowStagePermissions, setUserFlowStagePermissions] = useState<
+    AccessFlowStagePermission[]
+  >(() => readSessionAccessFlowStagePermissions())
   const [modalidades, setModalidades] = useState<string[]>(
     storedConfig?.modalidades ?? ['CCCP', 'RCCP', 'PCCN', 'RCCC'],
   )
@@ -224,25 +704,209 @@ export default function CreditoPage() {
   const [extratosConsolidacaoRecursoSavedMsg, setExtratosConsolidacaoRecursoSavedMsg] = useState<string | null>(
     null,
   )
+  const [relatorioConsolidacaoRecurso, setRelatorioConsolidacaoRecurso] = useState<
+    Array<{ recursoTable: string; targetRecursoTable: string; createdAt: string }>
+  >([])
+  const [recursoTableOptions, setRecursoTableOptions] = useState<string[]>([])
+  const [recursoTableOptionsLoading, setRecursoTableOptionsLoading] = useState(false)
+  const [relatorioConsolidacaoRecursoDraft, setRelatorioConsolidacaoRecursoDraft] = useState<{
+    recursoTable: string
+    targetRecursoTable: string
+  }>({ recursoTable: '', targetRecursoTable: '' })
+  const [relatorioConsolidacaoRecursoLoading, setRelatorioConsolidacaoRecursoLoading] = useState(false)
+  const [relatorioConsolidacaoRecursoError, setRelatorioConsolidacaoRecursoError] = useState<string | null>(null)
+  const [relatorioConsolidacaoRecursoSavedMsg, setRelatorioConsolidacaoRecursoSavedMsg] = useState<string | null>(
+    null,
+  )
   const [modalidadeDraft, setModalidadeDraft] = useState('')
   const timeSelectRef = useRef<HTMLSelectElement | null>(null)
   const [importingNow, setImportingNow] = useState(false)
   const [manualImportTarget, setManualImportTarget] = useState<
-    'relatorio' | 'extratos' | 'recurso_alego' | 'recurso_mpgo'
+    | 'relatorio'
+    | 'extratos'
+    | 'recurso_alego'
+    | 'recurso_neoconsig_demais'
+    | 'recurso_adfego'
+    | 'recurso_tce'
+    | 'recurso_tcm'
+    | 'recurso_tre'
+    | 'recurso_trt'
+    | 'recurso_eletra'
+    | 'recurso_mpgo'
+    | 'recurso_tjgo'
   >('relatorio')
   const [recursoAlegoUrl, setRecursoAlegoUrl] = useState('')
+  const [relatorioSisbrUrl, setRelatorioSisbrUrl] = useState('')
+  const [recursoNeoconsigDemaisUrl, setRecursoNeoconsigDemaisUrl] = useState('')
+  const [recursoAdfegoUrl, setRecursoAdfegoUrl] = useState('')
+  const [recursoTceUrl, setRecursoTceUrl] = useState('')
+  const [recursoTcmUrl, setRecursoTcmUrl] = useState('')
+  const [recursoTreUrl, setRecursoTreUrl] = useState('')
+  const [recursoTrtUrl, setRecursoTrtUrl] = useState('')
+  const [recursoEletraUrl, setRecursoEletraUrl] = useState('')
   const [recursoMpgoUrl, setRecursoMpgoUrl] = useState('')
+  const [recursoTjgoUrl, setRecursoTjgoUrl] = useState('')
   const [importNowMessage, setImportNowMessage] = useState<null | {
     kind: 'success' | 'error'
     text: string
   }>(null)
+  type ManualImportTarget =
+    | 'relatorio'
+    | 'extratos'
+    | 'recurso_alego'
+    | 'recurso_neoconsig_demais'
+    | 'recurso_adfego'
+    | 'recurso_tce'
+    | 'recurso_tcm'
+    | 'recurso_tre'
+    | 'recurso_trt'
+    | 'recurso_eletra'
+    | 'recurso_mpgo'
+    | 'recurso_tjgo'
+  type ImportJobProgressFile = {
+    fileName?: string
+    idx?: number
+    status?: 'queued' | 'running' | 'done' | 'error'
+    insertedRows?: number
+    skippedRows?: number
+    totalRows?: number
+    errorMessage?: string | null
+  }
+  type ImportJobRecord = {
+    jobId: string
+    kind?: string
+    status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+    createdAtIso?: string
+    startedAtIso?: string
+    finishedAtIso?: string
+    heartbeatAtIso?: string
+    optsSnapshot?: unknown
+    totalRowsInserted?: number
+    totalRowsSkipped?: number
+    progressFiles?: ImportJobProgressFile[]
+    totalFilesMatched?: number
+    totalFilesScanned?: number
+    preImportSnapshotPath?: string | null
+    errorMessage?: string | null
+    errorStack?: string | null
+    resultSummary?: unknown
+    resultsPerKind?: Record<
+      string,
+      {
+        error?: string | null
+        importedFiles?: Array<{ name?: string; insertedRows?: number; skippedRows?: number }>
+        totalFilesScanned?: number
+        totalFilesMatched?: number
+        totalRowsInserted?: number
+        totalRowsSkipped?: number
+        skippedDuplicates?: number
+        skippedNoCpf?: number
+        movedToImportados?: boolean
+        moveError?: string | null
+        dbFilePath?: string | null
+        tableName?: string | null
+        rows?: number
+        columns?: number
+      }
+    >
+  }
+  type ImportProgressModalState =
+    | null
+    | {
+        phase: 'running'
+        jobId: string
+        target: ManualImportTarget
+        folderUrl: string
+        startedAtIso?: string
+        lastPoll: ImportJobRecord | null
+        initialError?: string | null
+      }
+    | {
+        phase: 'done'
+        jobId?: string
+        target: ManualImportTarget
+        folderUrl: string
+        finalJob?: ImportJobRecord | null
+        syncResult?: Record<string, unknown> | null
+        syncError?: string | null
+        mode?: 'async' | 'sync'
+      }
+  const [importProgressModal, setImportProgressModal] =
+    useState<ImportProgressModalState>(null)
+  const importModalOpen = Boolean(importProgressModal)
+  const importJobPollTimerRef = useRef<number | null>(null)
+  const clearImportJobPollTimer = () => {
+    try {
+      if (importJobPollTimerRef.current != null) {
+        const t = importJobPollTimerRef.current
+        window.clearInterval(t)
+      }
+    } finally {
+      importJobPollTimerRef.current = null
+    }
+  }
+  const closeImportProgressModal = () => {
+    clearImportJobPollTimer()
+    setImportProgressModal(null)
+    setImportingNow(false)
+  }
+  useEffect(() => {
+    return () => {
+      clearImportJobPollTimer()
+    }
+  }, [])
   const settingsLocked = userRole !== 'admin'
+  const userMenuPermissionSet = useMemo(
+    () =>
+      new Set<AccessMenuPermission>(
+        userRole === 'admin'
+          ? ALL_ACCESS_MENU_PERMISSIONS
+          : userMenuPermissions,
+      ),
+    [userMenuPermissions, userRole],
+  )
+  const userFlowStagePermissionSet = useMemo(
+    () => new Set<AccessFlowStagePermission>(userFlowStagePermissions),
+    [userFlowStagePermissions],
+  )
+  const canAccessMenu = (menu: AccessMenuPermission) =>
+    userRole === 'admin' || userMenuPermissionSet.has(menu)
+  const canActOnFlowStage = (stage: AccessFlowStagePermission) =>
+    userFlowStagePermissionSet.has(stage)
+  const hasAnyReportsMenu =
+    canAccessMenu('relatorios-valores') ||
+    canAccessMenu('relatorios-conciliacao-data') ||
+    canAccessMenu('relatorios-ocorrencias') ||
+    canAccessMenu('relatorios-auditoria')
+  const hasAnySettingsMenu =
+    canAccessMenu('configuracoes-automacao') || canAccessMenu('configuracoes-acessos')
   const [conciliacaoMonth, setConciliacaoMonth] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(CONCILIACAO_FILTERS_STORAGE_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw) as { month?: unknown }
+        const saved = String(parsed?.month ?? '').trim()
+        if (saved) return saved
+      }
+    } catch {
+      void 0
+    }
     const now = new Date()
     const mm = String(now.getMonth() + 1).padStart(2, '0')
     return `${now.getFullYear()}-${mm}`
   })
-  const [conciliacaoOrgao, setConciliacaoOrgao] = useState('')
+  const [conciliacaoOrgao, setConciliacaoOrgao] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(CONCILIACAO_FILTERS_STORAGE_KEY)
+      if (raw) {
+        const parsed = JSON.parse(raw) as { orgao?: unknown }
+        return String(parsed?.orgao ?? '').trim()
+      }
+    } catch {
+      void 0
+    }
+    return ''
+  })
   const [conciliacaoMonthOptions, setConciliacaoMonthOptions] = useState<
     Array<{ value: string; label: string }>
   >([])
@@ -298,9 +962,23 @@ export default function CreditoPage() {
       cpf: string
       nome: string
       value: string
+      sourceRecursoTable?: string | null
+      hideInFront?: boolean
       vencimento: string | null
       status: 'conciliado' | 'pendencia'
       pairId: string | null
+      ocorrencia?: null | {
+        id: number
+        createdAt: string
+        action: string
+        justification: string
+      }
+      ocorrencias?: Array<{
+        id: number
+        createdAt: string
+        action: string
+        justification: string
+      }>
     }>
     relatorio: Array<{
       cpf: string
@@ -319,6 +997,14 @@ export default function CreditoPage() {
         justification: string
         status?: string | null
         gerenteEmail?: string | null
+        liquidationDate?: string | null
+        liquidatedValue?: string | null
+        devolucaoDate?: string | null
+        devolucaoValue?: string | null
+        debitAccountDate?: string | null
+        debitAccountValue?: string | null
+        noDebitInAccount?: boolean | null
+        differenceValue?: string | null
       }
       repactuacoes?: Array<{
         id: number
@@ -334,19 +1020,38 @@ export default function CreditoPage() {
     cpf: string
     nome: string
     value: string
+    sourceRecursoTable?: string | null
     vencimento: string | null
+    allowActionChange?: boolean
   }>(null)
   const [cloneSisbrLoading, setCloneSisbrLoading] = useState(false)
   const [cloneSisbrError, setCloneSisbrError] = useState<string | null>(null)
   const [cloneSisbrAction, setCloneSisbrAction] = useState<CloneSisbrAction>('clonar_para_relatorio_sisbr')
   const [cloneSisbrJustification, setCloneSisbrJustification] = useState('')
   const [cloneSisbrDevolucaoDate, setCloneSisbrDevolucaoDate] = useState('')
+  const [cloneSisbrVencimentoDate, setCloneSisbrVencimentoDate] = useState('')
   const [cloneSisbrContext, setCloneSisbrContext] = useState<null | {
     targetEmpresa: string
     sourceEmpresas: string[]
     totalMatches: number
     willUpdateCount: number
   }>(null)
+  const [cloneSisbrTransferModal, setCloneSisbrTransferModal] = useState<null | {
+    fromEmpresa: string
+    options: string[]
+  }>(null)
+  const [cloneSisbrTransferLoading, setCloneSisbrTransferLoading] = useState(false)
+  const [cloneSisbrTransferError, setCloneSisbrTransferError] = useState<string | null>(null)
+  const [inclusaoAcordoJudicialRecursoModalOpen, setInclusaoAcordoJudicialRecursoModalOpen] =
+    useState(false)
+  const [inclusaoAcordoJudicialRelatorioModalOpen, setInclusaoAcordoJudicialRelatorioModalOpen] =
+    useState(false)
+  const [inclusaoAcordoJudicialNome, setInclusaoAcordoJudicialNome] = useState('')
+  const [inclusaoAcordoJudicialCpf, setInclusaoAcordoJudicialCpf] = useState('')
+  const [inclusaoAcordoJudicialValor, setInclusaoAcordoJudicialValor] = useState('')
+  const [inclusaoAcordoJudicialCompetencia, setInclusaoAcordoJudicialCompetencia] = useState('')
+  const [inclusaoAcordoJudicialSaving, setInclusaoAcordoJudicialSaving] = useState(false)
+  const [inclusaoAcordoJudicialError, setInclusaoAcordoJudicialError] = useState<string | null>(null)
   const [tarifaModalOpen, setTarifaModalOpen] = useState(false)
   const [tarifaTypeDraft, setTarifaTypeDraft] = useState<'linha' | 'ted'>('linha')
   const [tarifaDraft, setTarifaDraft] = useState('')
@@ -355,6 +1060,22 @@ export default function CreditoPage() {
   const [conciliacaoClosing, setConciliacaoClosing] = useState(false)
   const [conciliacaoReopening, setConciliacaoReopening] = useState(false)
   const [conciliacaoResending, setConciliacaoResending] = useState(false)
+
+  const getSavedTarifaDraft = (type: 'linha' | 'ted') => {
+    if (!conciliacaoData) return ''
+    if (type === 'ted') {
+      return conciliacaoData.tarifaTedApplied ? String(conciliacaoData.totals.tarifaTed?.text ?? '').trim() : ''
+    }
+    return conciliacaoData.tarifaApplied ? String(conciliacaoData.totals.tarifaLinha?.text ?? '').trim() : ''
+  }
+
+  const getInitialTarifaType = (): 'linha' | 'ted' => {
+    if (!conciliacaoData) return 'linha'
+    const linhaSaved = conciliacaoData.tarifaApplied && Boolean(getSavedTarifaDraft('linha'))
+    const tedSaved = conciliacaoData.tarifaTedApplied && Boolean(getSavedTarifaDraft('ted'))
+    if (tedSaved && !linhaSaved) return 'ted'
+    return 'linha'
+  }
   const [conciliacaoCloseModalOpen, setConciliacaoCloseModalOpen] = useState(false)
   const [conciliacaoCloseStep, setConciliacaoCloseStep] = useState<1 | 2 | 3>(1)
   const [conciliacaoCloseError, setConciliacaoCloseError] = useState<string | null>(null)
@@ -364,6 +1085,7 @@ export default function CreditoPage() {
   const [conciliacaoReopenMode, setConciliacaoReopenMode] = useState<'total' | 'parcial'>('total')
   const [conciliacaoReopenVencimento, setConciliacaoReopenVencimento] = useState('')
   const [conciliacaoReopenPassword, setConciliacaoReopenPassword] = useState('')
+  const [conciliacaoReopenJustification, setConciliacaoReopenJustification] = useState('')
   const [conciliacaoReopenError, setConciliacaoReopenError] = useState<string | null>(null)
   const [conciliacaoClosedBalloonVisible, setConciliacaoClosedBalloonVisible] = useState(false)
   const conciliacaoLockBalloonAnchorRef = useRef<HTMLDivElement | null>(null)
@@ -382,6 +1104,14 @@ export default function CreditoPage() {
       createdAt: string
       action: string
       justification: string
+      liquidationDate?: string | null
+      liquidatedValue?: string | null
+      devolucaoDate?: string | null
+      devolucaoValue?: string | null
+      debitAccountDate?: string | null
+      debitAccountValue?: string | null
+      noDebitInAccount?: boolean | null
+      differenceValue?: string | null
       status?: string | null
       gerenteEmail?: string | null
     }
@@ -390,6 +1120,14 @@ export default function CreditoPage() {
       createdAt: string
       action: string
       justification: string
+      liquidationDate?: string | null
+      liquidatedValue?: string | null
+      devolucaoDate?: string | null
+      devolucaoValue?: string | null
+      debitAccountDate?: string | null
+      debitAccountValue?: string | null
+      noDebitInAccount?: boolean | null
+      differenceValue?: string | null
       status?: string | null
       gerenteEmail?: string | null
     }>
@@ -420,6 +1158,65 @@ export default function CreditoPage() {
   const [relatorioOcorrenciaUndoJustification, setRelatorioOcorrenciaUndoJustification] = useState('')
   const [relatorioLiquidacaoForaVencimentoDate, setRelatorioLiquidacaoForaVencimentoDate] =
     useState('')
+  const [
+    relatorioLiquidacaoAntecipadaViaCaixaAutoJustification,
+    setRelatorioLiquidacaoAntecipadaViaCaixaAutoJustification,
+  ] = useState(false)
+  const [
+    relatorioLiquidacaoAntecipadaViaCaixaDate,
+    setRelatorioLiquidacaoAntecipadaViaCaixaDate,
+  ] = useState('')
+  const [
+    relatorioLiquidacaoAntecipadaViaCaixaValor,
+    setRelatorioLiquidacaoAntecipadaViaCaixaValor,
+  ] = useState('')
+  const [relatorioAntecipadoDevolvidoDate, setRelatorioAntecipadoDevolvidoDate] = useState('')
+  const [relatorioDevolucaoParcialLiquidacaoDate, setRelatorioDevolucaoParcialLiquidacaoDate] =
+    useState('')
+  const [relatorioDevolucaoParcialDevolucaoDate, setRelatorioDevolucaoParcialDevolucaoDate] =
+    useState('')
+  const [relatorioDevolucaoParcialDevolucaoValor, setRelatorioDevolucaoParcialDevolucaoValor] =
+    useState('')
+  const [relatorioEstornoLiquidacaoDate, setRelatorioEstornoLiquidacaoDate] = useState('')
+  const [relatorioEstornoDate, setRelatorioEstornoDate] = useState('')
+  const [relatorioEstornoValor, setRelatorioEstornoValor] = useState('')
+  const [relatorioEstornoAutoJustification, setRelatorioEstornoAutoJustification] = useState(false)
+  const [relatorioRecursoRecebidoMenorLiquidacaoDate, setRelatorioRecursoRecebidoMenorLiquidacaoDate] =
+    useState('')
+  const [relatorioRecursoRecebidoMenorDebitoDate, setRelatorioRecursoRecebidoMenorDebitoDate] =
+    useState('')
+  const [relatorioRecursoRecebidoMenorDebitoValor, setRelatorioRecursoRecebidoMenorDebitoValor] =
+    useState('')
+  const [
+    relatorioRecursoRecebidoMenorDifferenceValor,
+    setRelatorioRecursoRecebidoMenorDifferenceValor,
+  ] = useState('')
+  const [
+    relatorioRecursoRecebidoMenorNoDebitInAccount,
+    setRelatorioRecursoRecebidoMenorNoDebitInAccount,
+  ] = useState(false)
+  const [relatorioRecursoRecebidoMaiorLiquidacaoDate, setRelatorioRecursoRecebidoMaiorLiquidacaoDate] =
+    useState('')
+  const [relatorioRecursoRecebidoMaiorDevolucaoDate, setRelatorioRecursoRecebidoMaiorDevolucaoDate] =
+    useState('')
+  const [relatorioRecursoRecebidoMaiorDevolucaoValor, setRelatorioRecursoRecebidoMaiorDevolucaoValor] =
+    useState('')
+  const [
+    relatorioRecursoRecebidoMaiorAutoJustification,
+    setRelatorioRecursoRecebidoMaiorAutoJustification,
+  ] = useState(false)
+  const [
+    relatorioLiquidacaoRecursoJudicalAutoJustification,
+    setRelatorioLiquidacaoRecursoJudicalAutoJustification,
+  ] = useState(false)
+  const [relatorioLiquidacaoRecursoJudicalDate, setRelatorioLiquidacaoRecursoJudicalDate] =
+    useState('')
+  const [relatorioLiquidacaoRecursoJudicalValor, setRelatorioLiquidacaoRecursoJudicalValor] =
+    useState('')
+  const [
+    relatorioRecursoRecebidoMenorAutoJustification,
+    setRelatorioRecursoRecebidoMenorAutoJustification,
+  ] = useState(false)
   const [relatorioRecursoJudicialNovoValor, setRelatorioRecursoJudicialNovoValor] = useState('')
   const [relatorioRecursoJudicialAutoJustification, setRelatorioRecursoJudicialAutoJustification] =
     useState(false)
@@ -432,7 +1229,68 @@ export default function CreditoPage() {
   const [relatorioOcorrenciaSaving, setRelatorioOcorrenciaSaving] = useState(false)
   const [relatorioOcorrenciaError, setRelatorioOcorrenciaError] = useState<string | null>(null)
   const [conciliacaoExportingXlsx, setConciliacaoExportingXlsx] = useState(false)
+  const [relatoriosOcorrenciasExportingXlsx, setRelatoriosOcorrenciasExportingXlsx] = useState(false)
   const [conciliacaoExportingPdf, setConciliacaoExportingPdf] = useState(false)
+  const [conciliacaoPorDataExportingXlsx, setConciliacaoPorDataExportingXlsx] = useState(false)
+  const [conciliacaoPorDataExportingPdf, setConciliacaoPorDataExportingPdf] = useState(false)
+  const conciliacaoPorDataType = 'todos' as const
+  const [conciliacaoPorDataLiquidationDate, setConciliacaoPorDataLiquidationDate] = useState('')
+  const [conciliacaoPorDataLoading, setConciliacaoPorDataLoading] = useState(false)
+  const [conciliacaoPorDataError, setConciliacaoPorDataError] = useState<string | null>(null)
+  const [conciliacaoPorDataData, setConciliacaoPorDataData] = useState<null | {
+    monthKey: string
+    orgaoRaw: string
+    mode: 'todos' | 'vencimento' | 'data_liquidacao' | 'liquidacao' | 'devolucao'
+    modeLabel: string
+    availableLiquidationDates: string[]
+    selectedLiquidationDate: string
+    rows: Array<{
+      date: string
+      liquidationDate: string
+      orgaoReceivedDate: string
+      orgao: string
+      orgaoReceivedCents: number
+      event: string
+      debitCents: number
+      creditCents: number
+      saldoCents: number
+      validation: ConciliacaoPorDataValidationProcess | null
+    }>
+    tarifasByOrgao: ConciliacaoPorDataTarifaItem[]
+    totals: {
+      debitCents: number
+      creditCents: number
+      saldoFinalCents: number
+      tarifaCents: number
+    }
+  }>(null)
+  const [conciliacaoPorDataValidationSubmittingKey, setConciliacaoPorDataValidationSubmittingKey] =
+    useState<string | null>(null)
+  const [conciliacaoPorDataValidationModal, setConciliacaoPorDataValidationModal] =
+    useState<ConciliacaoPorDataValidationModalState | null>(null)
+  const [conciliacaoExportModalOpen, setConciliacaoExportModalOpen] = useState(false)
+  const [conciliacaoExportModalFormat, setConciliacaoExportModalFormat] = useState<'pdf' | 'xlsx'>('pdf')
+  const [conciliacaoExportModalMode, setConciliacaoExportModalMode] = useState<'total' | 'vencimento'>('total')
+  const [conciliacaoExportModalVencimento, setConciliacaoExportModalVencimento] = useState('')
+  const [relatoriosOcorrenciasActionFilter, setRelatoriosOcorrenciasActionFilter] = useState('')
+  const [relatoriosOcorrenciasApiItems, setRelatoriosOcorrenciasApiItems] = useState<any[]>([])
+  const [relatoriosOcorrenciasApiLoading, setRelatoriosOcorrenciasApiLoading] = useState(false)
+  const [relatoriosOcorrenciasApiError, setRelatoriosOcorrenciasApiError] = useState<string | null>(null)
+  const getRelatorioNovaLiquidacaoDate = (modal: typeof ocorrenciaModal): string => {
+    if (!modal) return ''
+    const occs = Array.isArray(modal.ocorrencias)
+      ? modal.ocorrencias
+      : modal.ocorrencia
+        ? [modal.ocorrencia]
+        : []
+    for (const occ of occs) {
+      const action = String(occ?.action ?? '').trim()
+      if (action !== 'liquidacao_fora_vencimento_relatorio_sisbr') continue
+      const liq = String(occ?.liquidationDate ?? '').trim()
+      if (/^\d{2}\/\d{2}\/\d{4}$/.test(liq)) return liq
+    }
+    return ''
+  }
   const [auditoriaMonth, setAuditoriaMonth] = useState('')
   const [auditoriaOrgao, setAuditoriaOrgao] = useState('')
   const [auditoriaGroup, setAuditoriaGroup] = useState('')
@@ -473,18 +1331,107 @@ export default function CreditoPage() {
     | { months: string[]; dbFilePath?: string }
     | { message: string }
 
+  type FluxoPendenciaStage = 'financeiro' | 'credito' | 'negocios'
+  type FluxoPendenciaAction = 'mover' | 'concluir' | 'reabrir'
+  type FluxoPendenciaHistoryItem = {
+    createdAt: string
+    createdBy: string | null
+    action: string
+    fromStage: string | null
+    toStage: string | null
+    note: string
+    source: 'ocorrencia' | 'fluxo'
+  }
+  type FluxoPendenciaItem = {
+    id: number
+    createdAt: string
+    createdBy: string | null
+    cpf: string
+    nome: string
+    value: string
+    action: string
+    justification: string
+    gerenteEmail: string | null
+    stage: FluxoPendenciaStage
+    status: 'aberta' | 'concluida'
+    slaStartedAt: string | null
+    slaDueAt: string | null
+    slaSeconds: number | null
+    slaStoppedAt: string | null
+    updatedAt: string | null
+    updatedBy: string | null
+    vencimento: string | null
+    history: FluxoPendenciaHistoryItem[]
+  }
+  type FluxoPendenciaModalState = {
+    id: number
+    nome: string
+    action: FluxoPendenciaAction
+    fromStage: FluxoPendenciaStage
+    toStage?: FluxoPendenciaStage
+    allowedToStages?: FluxoPendenciaStage[]
+    title: string
+    confirmLabel: string
+    accent: string
+  }
+  type FluxoPendenciaHistoryModalState = {
+    id: number
+    nome: string
+    accent: string
+    stage: FluxoPendenciaStage
+    history: FluxoPendenciaHistoryItem[]
+  }
+
   const conciliacaoFetchRef = useRef(0)
-  const dashboardAutoPickRef = useRef<string | null>(null)
-  const homeAutoPickRef = useRef<string | null>(null)
   const [conciliacaoLoadedAtIso, setConciliacaoLoadedAtIso] = useState<string | null>(null)
   const [userDisplayName, setUserDisplayName] = useState<string | null>(null)
   const [userPhotoUrl, setUserPhotoUrl] = useState<string | null>(null)
+  const [fluxoPendenciasLoading, setFluxoPendenciasLoading] = useState(false)
+  const [fluxoPendenciasError, setFluxoPendenciasError] = useState<string | null>(null)
+  const [fluxoPendenciasIncludeConcluidas, setFluxoPendenciasIncludeConcluidas] = useState(false)
+  const [fluxoPendenciasVencimento, setFluxoPendenciasVencimento] = useState('')
+  const [fluxoPendenciasItems, setFluxoPendenciasItems] = useState<null | FluxoPendenciaItem[]>(null)
+  const [fluxoPendenciasNowMs, setFluxoPendenciasNowMs] = useState(() => Date.now())
+  const [fluxoPendenciaDestinoOpen, setFluxoPendenciaDestinoOpen] = useState(false)
+  const fluxoPendenciaDestinoRef = useRef<HTMLDivElement | null>(null)
+  const [fluxoPendenciaModal, setFluxoPendenciaModal] = useState<FluxoPendenciaModalState | null>(null)
+  const [fluxoPendenciaModalNote, setFluxoPendenciaModalNote] = useState('')
+  const [fluxoPendenciaModalGerenteEmail, setFluxoPendenciaModalGerenteEmail] = useState('')
+  const [fluxoPendenciaGerenteQuery, setFluxoPendenciaGerenteQuery] = useState('')
+  const [fluxoPendenciaGerenteResults, setFluxoPendenciaGerenteResults] = useState<
+    Array<{ displayName: string; email: string }>
+  >([])
+  const [fluxoPendenciaGerenteLoading, setFluxoPendenciaGerenteLoading] = useState(false)
+  const [fluxoPendenciaGerenteError, setFluxoPendenciaGerenteError] = useState<string | null>(null)
+  const fluxoPendenciaGerenteSearchRef = useRef<number | null>(null)
+  const [fluxoPendenciaHistoryModal, setFluxoPendenciaHistoryModal] = useState<FluxoPendenciaHistoryModalState | null>(
+    null,
+  )
+  const [homeOcorrenciasAbertasItems, setHomeOcorrenciasAbertasItems] = useState<FluxoPendenciaItem[] | null>(
+    null,
+  )
+  const [homeOcorrenciasAbertasLoading, setHomeOcorrenciasAbertasLoading] = useState(false)
+  const [homeOcorrenciasAbertasError, setHomeOcorrenciasAbertasError] = useState<string | null>(null)
+  const [homeConciliacaoStatuses, setHomeConciliacaoStatuses] = useState<
+    Array<{
+      orgao: string
+      vencimento: string
+      status: 'aberta' | 'fechada'
+      contabilidadeValidated: boolean
+      recursoRecebidoCents: number
+      liquidadoCents: number
+      saldoCents: number
+    }>
+  >([])
+  const [homeConciliacaoStatusesLoading, setHomeConciliacaoStatusesLoading] = useState(false)
+  const [homeConciliacaoStatusesError, setHomeConciliacaoStatusesError] = useState<string | null>(null)
 
   const isMain = view === 'home' || view === 'dashboard'
   const closedVencimentos = Array.isArray((conciliacaoData as any)?.closed?.closedVencimentos)
     ? ((conciliacaoData as any).closed.closedVencimentos as string[])
     : []
   const conciliacaoTotalIsClosed = Boolean(conciliacaoData?.closed?.isClosed)
+  const conciliacaoHasAnyFechamento = conciliacaoTotalIsClosed || closedVencimentos.length > 0
   const isVencimentoLocked = (v: unknown) =>
     conciliacaoTotalIsClosed || closedVencimentos.includes(normalizeVencimentoLabel(v))
   const vencimentoSelecionado = relatorioVencimentoFilter.trim()
@@ -550,7 +1497,21 @@ export default function CreditoPage() {
   }, [commandOpen])
 
   useEffect(() => {
-    if (!conciliacaoIsClosed) {
+    try {
+      window.localStorage.setItem(
+        CONCILIACAO_FILTERS_STORAGE_KEY,
+        JSON.stringify({
+          month: conciliacaoMonth,
+          orgao: conciliacaoOrgao.trim(),
+        }),
+      )
+    } catch {
+      void 0
+    }
+  }, [conciliacaoMonth, conciliacaoOrgao])
+
+  useEffect(() => {
+    if (!conciliacaoHasAnyFechamento) {
       setConciliacaoClosedBalloonVisible(false)
       setConciliacaoLockBalloonPos(null)
       return
@@ -578,7 +1539,652 @@ export default function CreditoPage() {
       alive = false
       window.clearInterval(intervalId)
     }
-  }, [conciliacaoIsClosed])
+  }, [conciliacaoHasAnyFechamento])
+
+  useEffect(() => {
+    if (view !== 'fluxo-pendencias') return
+    let cancelled = false
+    const orgao = conciliacaoOrgao.trim()
+    const monthOk = conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+    const targetOrgaos = orgao
+      ? [orgao]
+      : Array.from(new Set(orgaoDePara.map((item) => String(item?.extratos || '').trim()).filter(Boolean)))
+    if (targetOrgaos.length === 0 || !monthOk || conciliacaoMonthsLoading || orgaoDeParaLoading) {
+      setFluxoPendenciasItems(null)
+      setFluxoPendenciasError(null)
+      setFluxoPendenciasLoading(false)
+      return
+    }
+    Promise.resolve().then(() => {
+      setFluxoPendenciasLoading(true)
+      setFluxoPendenciasError(null)
+    })
+    Promise.allSettled(
+      targetOrgaos.map(async (targetOrgao) => {
+        const params = new URLSearchParams()
+        params.set('month', conciliacaoMonth)
+        params.set('orgao', targetOrgao)
+        if (fluxoPendenciasVencimento.trim()) params.set('vencimento', fluxoPendenciasVencimento.trim())
+        if (fluxoPendenciasIncludeConcluidas) params.set('includeConcluidas', '1')
+        const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo?${params.toString()}`)
+        const data = (await res.json().catch(() => null)) as any
+        if (!res.ok) {
+          throw new Error(data?.message || `Falha ao carregar fluxo de pendências (HTTP ${res.status}).`)
+        }
+        return Array.isArray(data?.items) ? data.items : []
+      }),
+    )
+      .then((results) => {
+        if (cancelled) return
+        const fulfilled = results.filter(
+          (result): result is PromiseFulfilledResult<any[]> => result.status === 'fulfilled',
+        )
+        const rejected = results.filter((result) => result.status === 'rejected')
+        const items = fulfilled.flatMap((result) => result.value)
+        const filtered = fluxoPendenciasIncludeConcluidas
+          ? items.filter((i: any) => String(i?.status) === 'concluida')
+          : items.filter((i: any) => String(i?.status) !== 'concluida')
+        setFluxoPendenciasItems(filtered)
+        if (fulfilled.length === 0 && rejected.length > 0) {
+          const firstReason = rejected[0]?.reason
+          throw firstReason instanceof Error
+            ? firstReason
+            : new Error('Falha ao carregar fluxo de pendências.')
+        }
+        if (rejected.length > 0) {
+          console.warn('Alguns órgãos falharam ao carregar o fluxo de pendências.', rejected)
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setFluxoPendenciasItems(null)
+        setFluxoPendenciasError(e instanceof Error ? e.message : 'Falha ao carregar fluxo de pendências.')
+      })
+      .finally(() => {
+        if (cancelled) return
+        setFluxoPendenciasLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    view,
+    conciliacaoMonth,
+    conciliacaoMonthOptions,
+    conciliacaoMonthsLoading,
+    conciliacaoOrgao,
+    orgaoDePara,
+    orgaoDeParaLoading,
+    fluxoPendenciasVencimento,
+    fluxoPendenciasIncludeConcluidas,
+  ])
+
+  useEffect(() => {
+    if (view !== 'fluxo-pendencias') return
+    setFluxoPendenciasNowMs(Date.now())
+    const id = window.setInterval(() => setFluxoPendenciasNowMs(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [view])
+
+  useEffect(() => {
+    if (!fluxoPendenciaDestinoOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFluxoPendenciaDestinoOpen(false)
+    }
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node | null
+      if (!target) return
+      const el = fluxoPendenciaDestinoRef.current
+      if (!el) return
+      if (!el.contains(target)) setFluxoPendenciaDestinoOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('mousedown', onMouseDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('mousedown', onMouseDown)
+    }
+  }, [fluxoPendenciaDestinoOpen])
+
+  useEffect(() => {
+    if (view !== 'dashboard') return
+    let cancelled = false
+    const orgao = conciliacaoOrgao.trim()
+    const monthOk = conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+    const targetOrgaos = orgao
+      ? [orgao]
+      : view === 'dashboard'
+        ? Array.from(new Set(orgaoDePara.map((item) => String(item?.extratos || '').trim()).filter(Boolean)))
+        : []
+    if (targetOrgaos.length === 0 || !monthOk || conciliacaoMonthsLoading || orgaoDeParaLoading) {
+      setHomeOcorrenciasAbertasItems(null)
+      setHomeOcorrenciasAbertasError(null)
+      setHomeOcorrenciasAbertasLoading(false)
+      return
+    }
+
+    Promise.resolve().then(() => {
+      setHomeOcorrenciasAbertasLoading(true)
+      setHomeOcorrenciasAbertasError(null)
+    })
+
+    Promise.allSettled(
+      targetOrgaos.map(async (targetOrgao) => {
+        const params = new URLSearchParams()
+        params.set('month', conciliacaoMonth)
+        params.set('orgao', targetOrgao)
+        const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo?${params.toString()}`)
+        const data = (await res.json().catch(() => null)) as any
+        if (!res.ok) {
+          throw new Error(data?.message || `Falha ao carregar ocorrências do fluxo (HTTP ${res.status}).`)
+        }
+        return Array.isArray(data?.items) ? data.items : []
+      }),
+    )
+      .then((results) => {
+        if (cancelled) return
+        const fulfilled = results.filter(
+          (result): result is PromiseFulfilledResult<any[]> => result.status === 'fulfilled',
+        )
+        const rejected = results.filter((result) => result.status === 'rejected')
+        const items = fulfilled.flatMap((result) => result.value)
+        setHomeOcorrenciasAbertasItems(items)
+        if (fulfilled.length === 0 && rejected.length > 0) {
+          const firstReason = rejected[0]?.reason
+          throw firstReason instanceof Error
+            ? firstReason
+            : new Error('Falha ao carregar ocorrências do fluxo.')
+        }
+        if (rejected.length > 0) {
+          console.warn('Alguns órgãos falharam ao carregar o fluxo de pendências do dashboard.', rejected)
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setHomeOcorrenciasAbertasItems(null)
+        setHomeOcorrenciasAbertasError(e instanceof Error ? e.message : 'Falha ao carregar ocorrências do fluxo.')
+      })
+      .finally(() => {
+        if (cancelled) return
+        setHomeOcorrenciasAbertasLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    view,
+    conciliacaoMonth,
+    conciliacaoMonthOptions,
+    conciliacaoMonthsLoading,
+    conciliacaoOrgao,
+    orgaoDePara,
+    orgaoDeParaLoading,
+  ])
+
+  const fluxoPendenciaStageMeta: Record<
+    FluxoPendenciaStage,
+    {
+      label: string
+      columnBorder: string
+      columnBackground: string
+      cardBorder: string
+      cardBackground: string
+      badgeBackground: string
+    }
+  > = {
+    financeiro: {
+      label: 'Financeiro',
+      columnBorder: 'rgba(59, 130, 246, 0.36)',
+      columnBackground: 'linear-gradient(180deg, rgba(37, 99, 235, 0.14), rgba(12, 22, 40, 0.72))',
+      cardBorder: 'rgba(96, 165, 250, 0.44)',
+      cardBackground: 'rgba(37, 99, 235, 0.10)',
+      badgeBackground: 'rgba(59, 130, 246, 0.16)',
+    },
+    credito: {
+      label: 'Crédito',
+      columnBorder: 'rgba(168, 85, 247, 0.36)',
+      columnBackground: 'linear-gradient(180deg, rgba(126, 34, 206, 0.14), rgba(12, 22, 40, 0.72))',
+      cardBorder: 'rgba(192, 132, 252, 0.44)',
+      cardBackground: 'rgba(126, 34, 206, 0.10)',
+      badgeBackground: 'rgba(168, 85, 247, 0.16)',
+    },
+    negocios: {
+      label: 'Negócios',
+      columnBorder: 'rgba(16, 185, 129, 0.36)',
+      columnBackground: 'linear-gradient(180deg, rgba(5, 150, 105, 0.14), rgba(12, 22, 40, 0.72))',
+      cardBorder: 'rgba(52, 211, 153, 0.44)',
+      cardBackground: 'rgba(5, 150, 105, 0.10)',
+      badgeBackground: 'rgba(16, 185, 129, 0.16)',
+    },
+  }
+
+  const dashboardPendenciasCategoriaChart = useMemo(() => {
+    const items = Array.isArray(homeOcorrenciasAbertasItems) ? homeOcorrenciasAbertasItems : []
+    if (items.length === 0) return null
+
+    const pendingItems = items.filter((item) => String(item?.status) !== 'concluida')
+    if (pendingItems.length === 0) return null
+
+    const gerenteLabel = (emailRaw: string | null | undefined) => {
+      const email = String(emailRaw || '').trim().toLowerCase()
+      if (!email) return 'Negócios • Sem gerente'
+      const base = email.includes('@') ? email.split('@')[0] : email
+      const pretty = base
+        .split(/[._-]+/g)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ')
+      return `Negócios • ${pretty || email}`
+    }
+
+    const financeCount = pendingItems.filter((item) => item.stage === 'financeiro').length
+    const creditoCount = pendingItems.filter((item) => item.stage === 'credito').length
+    const negociosMap = new Map<string, number>()
+    for (const item of pendingItems) {
+      if (item.stage !== 'negocios') continue
+      const label = gerenteLabel(item.gerenteEmail)
+      negociosMap.set(label, (negociosMap.get(label) ?? 0) + 1)
+    }
+
+    const negociosEntries = Array.from(negociosMap.entries()).sort((a, b) => b[1] - a[1])
+    const palette = [
+      '#34D399',
+      '#10B981',
+      '#059669',
+      '#6EE7B7',
+      '#2DD4BF',
+      '#14B8A6',
+      '#22C55E',
+      '#84CC16',
+    ]
+
+    const series: any[] = []
+    series.push({
+      name: 'Financeiro',
+      type: 'bar',
+      stack: 'pendencias-categoria',
+      barWidth: 26,
+      itemStyle: { color: '#3B82F6', borderRadius: [8, 8, 8, 8] },
+      emphasis: { focus: 'series' },
+      label: {
+        show: financeCount > 0,
+        position: 'inside',
+        color: '#ffffff',
+        fontWeight: 900,
+        formatter: '{c}',
+      },
+      data: [financeCount, 0, 0],
+    })
+    series.push({
+      name: 'Crédito',
+      type: 'bar',
+      stack: 'pendencias-categoria',
+      barWidth: 26,
+      itemStyle: { color: '#A855F7', borderRadius: [8, 8, 8, 8] },
+      emphasis: { focus: 'series' },
+      label: {
+        show: creditoCount > 0,
+        position: 'inside',
+        color: '#ffffff',
+        fontWeight: 900,
+        formatter: '{c}',
+      },
+      data: [0, creditoCount, 0],
+    })
+    if (negociosEntries.length === 0) {
+      series.push({
+        name: 'Negócios',
+        type: 'bar',
+        stack: 'pendencias-categoria',
+        barWidth: 26,
+        itemStyle: { color: '#10B981', borderRadius: [8, 8, 8, 8] },
+        emphasis: { focus: 'series' },
+        data: [0, 0, 0],
+      })
+    } else {
+      negociosEntries.forEach(([label, count], idx) => {
+        series.push({
+          name: label,
+          type: 'bar',
+          stack: 'pendencias-categoria',
+          barWidth: 26,
+          itemStyle: { color: palette[idx % palette.length], borderRadius: [8, 8, 8, 8] },
+          emphasis: { focus: 'series' },
+          label: {
+            show: count > 0,
+            position: 'inside',
+            color: '#052E16',
+            fontWeight: 900,
+            formatter: '{c}',
+          },
+          data: [0, 0, count],
+        })
+      })
+    }
+
+    const maxValue = Math.max(
+      1,
+      financeCount,
+      creditoCount,
+      negociosEntries.reduce((acc, [, count]) => acc + count, 0),
+    )
+
+    return {
+      total: pendingItems.length,
+      negociosEntries,
+      option: {
+        backgroundColor: 'transparent',
+        animationDuration: 500,
+        grid: { left: 12, right: 18, top: 42, bottom: 28, containLabel: true },
+        legend: {
+          top: 0,
+          left: 0,
+          textStyle: { color: 'rgba(255,255,255,0.72)', fontWeight: 700, fontSize: 11 },
+          itemWidth: 14,
+          itemHeight: 10,
+        },
+        tooltip: {
+          trigger: 'axis',
+          axisPointer: { type: 'shadow' },
+          backgroundColor: 'rgba(15, 23, 42, 0.96)',
+          borderColor: 'rgba(255,255,255,0.10)',
+          textStyle: { color: 'rgba(255,255,255,0.92)' },
+        },
+        xAxis: {
+          type: 'value',
+          minInterval: 1,
+          max: Math.max(maxValue, 1),
+          axisLabel: { color: 'rgba(255,255,255,0.62)', fontWeight: 700 },
+          splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+        },
+        yAxis: {
+          type: 'category',
+          data: ['Financeiro', 'Crédito', 'Negócios'],
+          axisLabel: { color: 'rgba(255,255,255,0.84)', fontWeight: 800 },
+          axisLine: { show: false },
+          axisTick: { show: false },
+        },
+        series,
+      },
+    }
+  }, [homeOcorrenciasAbertasItems])
+
+  const openFluxoPendenciaModal = (
+    item: FluxoPendenciaItem,
+    action: FluxoPendenciaAction,
+    toStage?: FluxoPendenciaStage,
+    allowedToStages?: FluxoPendenciaStage[],
+  ) => {
+    const allowed =
+      action === 'mover' && Array.isArray(allowedToStages) && allowedToStages.length > 0
+        ? allowedToStages
+        : undefined
+    const nextStage =
+      action === 'mover'
+        ? toStage ?? (allowed && allowed.length === 1 ? allowed[0] : undefined)
+        : action === 'reabrir'
+          ? toStage ?? 'financeiro'
+          : undefined
+    const targetLabel = nextStage ? fluxoPendenciaStageMeta[nextStage].label : ''
+    const title =
+      action === 'concluir'
+        ? 'Concluir pendência'
+        : action === 'reabrir'
+          ? 'Reabrir pendência'
+          : nextStage
+            ? `Encaminhar para ${targetLabel}`
+            : 'Encaminhar pendência'
+    const confirmLabel =
+      action === 'concluir'
+        ? 'Concluir'
+        : action === 'reabrir'
+          ? 'Reabrir'
+          : nextStage
+            ? `Enviar para ${targetLabel}`
+            : 'Encaminhar'
+    setFluxoPendenciasError(null)
+    setFluxoPendenciaModalNote('')
+    setFluxoPendenciaModalGerenteEmail('')
+    setFluxoPendenciaGerenteQuery('')
+    setFluxoPendenciaGerenteResults([])
+    setFluxoPendenciaGerenteError(null)
+    setFluxoPendenciaDestinoOpen(false)
+    setFluxoPendenciaModal({
+      id: item.id,
+      nome: String(item.nome || '').trim(),
+      action,
+      fromStage: item.stage,
+      toStage: nextStage,
+      allowedToStages: allowed,
+      title,
+      confirmLabel,
+      accent: fluxoPendenciaStageMeta[item.stage].cardBorder,
+    })
+  }
+
+  const getFluxoPendenciaHistoryActionLabel = (entry: FluxoPendenciaHistoryItem) => {
+    if (entry.source === 'ocorrencia') return 'Abertura da ocorrência'
+    if (entry.action === 'concluir') return 'Conclusão'
+    if (entry.action === 'reabrir') return 'Reabertura'
+    if (entry.action === 'mover') {
+      const fromLabel = entry.fromStage && entry.fromStage in fluxoPendenciaStageMeta
+        ? fluxoPendenciaStageMeta[entry.fromStage as FluxoPendenciaStage].label
+        : entry.fromStage || 'Origem'
+      const toLabel = entry.toStage && entry.toStage in fluxoPendenciaStageMeta
+        ? fluxoPendenciaStageMeta[entry.toStage as FluxoPendenciaStage].label
+        : entry.toStage || 'Destino'
+      return `Movido de ${fromLabel} para ${toLabel}`
+    }
+    return entry.action || 'Movimentação'
+  }
+
+  const toHms = (ms: number) => {
+    const total = Math.max(0, Math.floor(ms / 1000))
+    const h = Math.floor(total / 3600)
+    const m = Math.floor((total % 3600) / 60)
+    const s = total % 60
+    return `${String(h).padStart(2, '0')}h:${String(m).padStart(2, '0')}m:${String(s).padStart(2, '0')}s`
+  }
+
+  const openFluxoPendenciaHistoryModal = (item: FluxoPendenciaItem) => {
+    const history = Array.isArray(item.history) ? [...item.history] : []
+    history.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    setFluxoPendenciaHistoryModal({
+      id: item.id,
+      nome: String(item.nome || '').trim(),
+      accent: fluxoPendenciaStageMeta[item.stage].cardBorder,
+      stage: item.stage,
+      history,
+    })
+  }
+
+  const fluxoPendenciaGerenteRequired =
+    fluxoPendenciaModal?.action === 'mover' &&
+    (fluxoPendenciaModal?.toStage === 'credito' || fluxoPendenciaModal?.toStage === 'negocios')
+
+  useEffect(() => {
+    if (!fluxoPendenciaModal || !fluxoPendenciaGerenteRequired) {
+      setFluxoPendenciaGerenteResults([])
+      setFluxoPendenciaGerenteError(null)
+      setFluxoPendenciaGerenteLoading(false)
+      return
+    }
+
+    const q = fluxoPendenciaGerenteQuery.trim()
+    if (q.length < 2) {
+      setFluxoPendenciaGerenteResults([])
+      setFluxoPendenciaGerenteError(null)
+      setFluxoPendenciaGerenteLoading(false)
+      return
+    }
+
+    if (fluxoPendenciaGerenteSearchRef.current) {
+      window.clearTimeout(fluxoPendenciaGerenteSearchRef.current)
+      fluxoPendenciaGerenteSearchRef.current = null
+    }
+
+    let cancelled = false
+    fluxoPendenciaGerenteSearchRef.current = window.setTimeout(() => {
+      Promise.resolve().then(() => {
+        if (cancelled) return
+        setFluxoPendenciaGerenteLoading(true)
+        setFluxoPendenciaGerenteError(null)
+      })
+
+      const params = new URLSearchParams()
+      params.set('q', q)
+      params.set('limit', '10')
+      fetch(`/api/consignado/graph/users/search?${params.toString()}`)
+        .then(async (res) => {
+          const data = (await res.json().catch(() => null)) as any
+          if (!res.ok) throw new Error(data?.message || `Falha ao buscar usuários (HTTP ${res.status}).`)
+          const items = Array.isArray(data?.items) ? data.items : []
+          const warning = typeof data?.warning === 'string' ? data.warning.trim() : ''
+          if (cancelled) return
+          setFluxoPendenciaGerenteResults(
+            items
+              .map((i: any) => ({
+                displayName: String(i?.displayName ?? '').trim(),
+                email: String(i?.email ?? '').trim().toLowerCase(),
+              }))
+              .filter((i: any) => Boolean(i.displayName) && Boolean(i.email) && String(i.email).includes('@')),
+          )
+          setFluxoPendenciaGerenteError(items.length > 0 ? null : warning || null)
+        })
+        .catch((e) => {
+          if (cancelled) return
+          setFluxoPendenciaGerenteResults([])
+          setFluxoPendenciaGerenteError(e instanceof Error ? e.message : 'Falha ao buscar usuários.')
+        })
+        .finally(() => {
+          if (cancelled) return
+          setFluxoPendenciaGerenteLoading(false)
+        })
+    }, 280)
+
+    return () => {
+      cancelled = true
+    }
+  }, [fluxoPendenciaModal, fluxoPendenciaGerenteQuery, fluxoPendenciaGerenteRequired])
+
+  useEffect(() => {
+    if (view !== 'configuracoes-acessos') {
+      setAccessEmailSearchResults([])
+      setAccessEmailSearchError(null)
+      setAccessEmailSearchLoading(false)
+      return
+    }
+
+    const q = accessEmailDraft.trim()
+    if (q.length < 2) {
+      setAccessEmailSearchResults([])
+      setAccessEmailSearchError(null)
+      setAccessEmailSearchLoading(false)
+      return
+    }
+
+    if (accessEmailSearchRef.current) {
+      window.clearTimeout(accessEmailSearchRef.current)
+      accessEmailSearchRef.current = null
+    }
+
+    let cancelled = false
+    accessEmailSearchRef.current = window.setTimeout(() => {
+      Promise.resolve().then(() => {
+        if (cancelled) return
+        setAccessEmailSearchLoading(true)
+        setAccessEmailSearchError(null)
+      })
+
+      const params = new URLSearchParams()
+      params.set('q', q)
+      params.set('limit', '10')
+      fetch(`/api/consignado/graph/users/search?${params.toString()}`)
+        .then(async (res) => {
+          const data = (await res.json().catch(() => null)) as any
+          if (!res.ok) throw new Error(data?.message || `Falha ao buscar usuários (HTTP ${res.status}).`)
+          const items = Array.isArray(data?.items) ? data.items : []
+          const warning = typeof data?.warning === 'string' ? data.warning.trim() : ''
+          if (cancelled) return
+          setAccessEmailSearchResults(
+            items
+              .map((i: any) => ({
+                displayName: String(i?.displayName ?? '').trim(),
+                email: String(i?.email ?? '').trim().toLowerCase(),
+              }))
+              .filter(
+                (i: any) =>
+                  Boolean(i.displayName) && Boolean(i.email) && String(i.email).includes('@'),
+              ),
+          )
+          setAccessEmailSearchError(warning || null)
+        })
+        .catch((e) => {
+          if (cancelled) return
+          setAccessEmailSearchResults([])
+          setAccessEmailSearchError(
+            e instanceof Error ? e.message : 'Falha ao buscar usuários.',
+          )
+        })
+        .finally(() => {
+          if (cancelled) return
+          setAccessEmailSearchLoading(false)
+        })
+    }, 280)
+
+    return () => {
+      cancelled = true
+    }
+  }, [accessEmailDraft, view])
+
+  const doUpdateFluxoPendencia = async (payload: {
+    id: number
+    action: FluxoPendenciaAction
+    toStage?: FluxoPendenciaStage
+    note: string
+    gerenteEmail?: string | null
+    requestedBy?: string | null
+  }) => {
+    setFluxoPendenciasLoading(true)
+    setFluxoPendenciasError(null)
+    try {
+      const res = await fetch('/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const json = (await res.json().catch(() => null)) as any
+      if (!res.ok) throw new Error(json?.message || 'Falha ao atualizar fluxo.')
+      const params = new URLSearchParams()
+      params.set('month', conciliacaoMonth)
+      params.set('orgao', conciliacaoOrgao.trim())
+      if (fluxoPendenciasVencimento.trim()) params.set('vencimento', fluxoPendenciasVencimento.trim())
+      if (fluxoPendenciasIncludeConcluidas) params.set('includeConcluidas', '1')
+      const r2 = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo?${params.toString()}`)
+      const j2 = (await r2.json().catch(() => null)) as any
+      if (!r2.ok) throw new Error(j2?.message || 'Falha ao recarregar fluxo.')
+      const items = Array.isArray(j2?.items) ? j2.items : []
+      const filtered = fluxoPendenciasIncludeConcluidas
+        ? items.filter((i: any) => String(i?.status) === 'concluida')
+        : items.filter((i: any) => String(i?.status) !== 'concluida')
+      setFluxoPendenciasItems(filtered)
+      setFluxoPendenciaModal(null)
+      setFluxoPendenciaModalNote('')
+      setFluxoPendenciaHistoryModal(null)
+      toast.success('Fluxo atualizado com justificativa.')
+      if (json?.notification?.teams && json.notification.teams.sent === false) {
+        const details = String(json.notification.teams.error ?? '').trim()
+        toast.error(`Fluxo salvo, mas não foi possível enviar no Teams. ${details || 'Reconecte o Teams.'}`)
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao atualizar fluxo.'
+      setFluxoPendenciasError(msg)
+      toast.error(msg)
+    } finally {
+      setFluxoPendenciasLoading(false)
+    }
+  }
 
   useEffect(() => {
     if (view !== 'relatorios-auditoria') return
@@ -748,6 +2354,8 @@ export default function CreditoPage() {
           importTime,
           notificationEmail,
           notificationEmailContabilidade,
+          occurrencesPanoramaDiretoriaEmail,
+          occurrencesPanoramaGerentesEmail,
           modalidades,
         }),
       )
@@ -760,13 +2368,91 @@ export default function CreditoPage() {
     modalidades,
     notificationEmail,
     notificationEmailContabilidade,
+    occurrencesPanoramaDiretoriaEmail,
+    occurrencesPanoramaGerentesEmail,
     sharePointFolderPath,
   ])
 
   useEffect(() => {
+    const username = String(
+      sessionStorage.getItem('consignado_user_email') || '',
+    )
+      .trim()
+      .toLowerCase()
     const raw = sessionStorage.getItem('consignado_user_role') || ''
-    setUserRole(raw.trim().toLowerCase() === 'admin' ? 'admin' : 'usuario')
+    const sessionRole = raw.trim().toLowerCase() === 'admin' ? 'admin' : 'usuario'
+    setUserRole(sessionRole)
+    setUserMenuPermissions(
+      sessionRole === 'admin'
+        ? [...ALL_ACCESS_MENU_PERMISSIONS]
+        : readSessionAccessMenuPermissions(),
+    )
+    setUserFlowStagePermissions(readSessionAccessFlowStagePermissions())
+    if (!username) return
+
+    let cancelled = false
+    fetch('/api/consignado/access/emails')
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as
+          | {
+              entries?: Array<{
+                email?: string
+                role?: 'admin' | 'usuario'
+                menus?: AccessMenuPermission[]
+                flowStages?: AccessFlowStagePermission[]
+              }>
+              message?: string
+            }
+          | null
+        if (!res.ok) {
+          throw new Error(
+            data?.message || `Falha ao atualizar permissões (HTTP ${res.status}).`,
+          )
+        }
+        return Array.isArray(data?.entries) ? data.entries : []
+      })
+      .then((entries) => {
+        if (cancelled) return
+        const found = entries.find(
+          (entry) => String(entry?.email ?? '').trim().toLowerCase() === username,
+        )
+        if (!found) return
+        const nextRole = found.role === 'admin' ? 'admin' : 'usuario'
+        const nextMenus =
+          nextRole === 'admin'
+            ? [...ALL_ACCESS_MENU_PERMISSIONS]
+            : normalizeAccessMenuPermissions(found.menus)
+        const nextFlowStages =
+          normalizeAccessFlowStagePermissions(found.flowStages, false)
+        sessionStorage.setItem('consignado_user_role', nextRole)
+        sessionStorage.setItem(
+          'consignado_user_menu_permissions',
+          JSON.stringify(nextMenus),
+        )
+        sessionStorage.setItem(
+          'consignado_user_flow_stage_permissions',
+          JSON.stringify(nextFlowStages),
+        )
+        setUserRole(nextRole)
+        setUserMenuPermissions(nextMenus)
+        setUserFlowStagePermissions(nextFlowStages)
+      })
+      .catch(() => {
+        void 0
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [view])
+
+  useEffect(() => {
+    if (userRole === 'admin') return
+    if (canAccessMenu(view)) return
+    const fallback =
+      ALL_ACCESS_MENU_PERMISSIONS.find((menu) => userMenuPermissionSet.has(menu)) || 'home'
+    if (fallback !== view) setHash(fallback)
+  }, [canAccessMenu, setHash, userMenuPermissionSet, userRole, view])
 
   useEffect(() => {
     if (view !== 'configuracoes-acessos') return
@@ -781,7 +2467,12 @@ export default function CreditoPage() {
       .then(async (res) => {
         const data = (await res.json().catch(() => null)) as
           | {
-              entries?: Array<{ email?: string; role?: 'admin' | 'usuario' }>
+              entries?: Array<{
+                email?: string
+                role?: 'admin' | 'usuario'
+                menus?: AccessMenuPermission[]
+                flowStages?: AccessFlowStagePermission[]
+              }>
               emails?: string[]
               fixedEmail?: string
               message?: string
@@ -801,13 +2492,25 @@ export default function CreditoPage() {
           .trim()
           .toLowerCase()
         const entriesRaw = Array.isArray(data?.entries) ? data?.entries : null
-        const entries: Array<{ email: string; role: 'admin' | 'usuario' }> =
+        const entries: Array<{
+          email: string
+          role: 'admin' | 'usuario'
+          menus: AccessMenuPermission[]
+          flowStages: AccessFlowStagePermission[]
+        }> =
           entriesRaw
             ? entriesRaw
                 .map(
-                  (e): { email: string; role: 'admin' | 'usuario' } => ({
+                  (e): {
+                    email: string
+                    role: 'admin' | 'usuario'
+                    menus: AccessMenuPermission[]
+                    flowStages: AccessFlowStagePermission[]
+                  } => ({
                     email: String(e.email ?? '').trim().toLowerCase(),
                     role: e.role === 'admin' ? 'admin' : 'usuario',
+                    menus: normalizeAccessMenuPermissions(e.menus),
+                    flowStages: normalizeAccessFlowStagePermissions(e.flowStages, false),
                   }),
                 )
                 .filter((e) => Boolean(e.email))
@@ -816,12 +2519,19 @@ export default function CreditoPage() {
                 )
             : (Array.isArray(data?.emails) ? data?.emails : [])
                 .map(
-                  (email): { email: string; role: 'admin' | 'usuario' } => ({
+                  (email): {
+                    email: string
+                    role: 'admin' | 'usuario'
+                    menus: AccessMenuPermission[]
+                    flowStages: AccessFlowStagePermission[]
+                  } => ({
                     email: String(email).trim().toLowerCase(),
                     role:
                       String(email).trim().toLowerCase() === fixed
                         ? 'admin'
                         : 'usuario',
+                    menus: [...ALL_ACCESS_MENU_PERMISSIONS],
+                    flowStages: [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS],
                   }),
                 )
                 .filter((e) => Boolean(e.email))
@@ -829,7 +2539,12 @@ export default function CreditoPage() {
                   (e, i, arr) => arr.findIndex((x) => x.email === e.email) === i,
                 )
 
-        const fixedEntry = { email: fixed, role: 'admin' as const }
+        const fixedEntry = {
+          email: fixed,
+          role: 'admin' as const,
+          menus: [...ALL_ACCESS_MENU_PERMISSIONS],
+          flowStages: [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS],
+        }
         const withFixed = entries.some((e) => e.email === fixed)
           ? entries.map((e) => (e.email === fixed ? fixedEntry : e))
           : [fixedEntry, ...entries]
@@ -841,10 +2556,27 @@ export default function CreditoPage() {
           },
           {} as Record<string, 'admin' | 'usuario'>,
         )
+        const menuMap = withFixed.reduce(
+          (acc, e) => {
+            acc[e.email] = e.menus
+            return acc
+          },
+          {} as Record<string, AccessMenuPermission[]>,
+        )
+        const flowStageMap = withFixed.reduce(
+          (acc, e) => {
+            acc[e.email] = e.flowStages
+            return acc
+          },
+          {} as Record<string, AccessFlowStagePermission[]>,
+        )
 
         setAccessFixedEmail(fixed)
         setAccessEmails(withFixed.map((e) => e.email))
         setAccessRoleByEmail(roleMap)
+        setAccessMenusByEmail(menuMap)
+        setAccessFlowStagesByEmail(flowStageMap)
+        setAccessExpandedEmail(null)
       })
       .catch((e) => {
         if (cancelled) return
@@ -915,10 +2647,21 @@ export default function CreditoPage() {
 
   const saveAutomationConfigToServer = async (next: {
     sharePointFolderUrl: string | null
+    relatorioSisbrUrl: string | null
     recursoAlegoUrl: string | null
+    recursoNeoconsigDemaisUrl: string | null
+    recursoAdfegoUrl: string | null
+    recursoTceUrl: string | null
+    recursoTcmUrl: string | null
+    recursoTreUrl: string | null
+    recursoTrtUrl: string | null
+    recursoEletraUrl: string | null
     recursoMpgoUrl: string | null
+    recursoTjgoUrl: string | null
     notificationEmail: string | null
     notificationEmailContabilidade: string | null
+    occurrencesPanoramaDiretoriaEmail?: string | null
+    occurrencesPanoramaGerentesEmail?: string | null
   }) => {
     setSharePointFolderPathSavedMsg(null)
     setSharePointFolderPathError(null)
@@ -929,13 +2672,49 @@ export default function CreditoPage() {
           next.sharePointFolderUrl && next.sharePointFolderUrl.trim()
             ? next.sharePointFolderUrl.trim()
             : null,
+        relatorioSisbrUrl:
+          next.relatorioSisbrUrl && next.relatorioSisbrUrl.trim()
+            ? next.relatorioSisbrUrl.trim()
+            : null,
         recursoAlegoUrl:
           next.recursoAlegoUrl && next.recursoAlegoUrl.trim()
             ? next.recursoAlegoUrl.trim()
             : null,
+        recursoNeoconsigDemaisUrl:
+          next.recursoNeoconsigDemaisUrl && next.recursoNeoconsigDemaisUrl.trim()
+            ? next.recursoNeoconsigDemaisUrl.trim()
+            : null,
+        recursoAdfegoUrl:
+          next.recursoAdfegoUrl && next.recursoAdfegoUrl.trim()
+            ? next.recursoAdfegoUrl.trim()
+            : null,
+        recursoTceUrl:
+          next.recursoTceUrl && next.recursoTceUrl.trim()
+            ? next.recursoTceUrl.trim()
+            : null,
+        recursoTcmUrl:
+          next.recursoTcmUrl && next.recursoTcmUrl.trim()
+            ? next.recursoTcmUrl.trim()
+            : null,
+        recursoTreUrl:
+          next.recursoTreUrl && next.recursoTreUrl.trim()
+            ? next.recursoTreUrl.trim()
+            : null,
+        recursoTrtUrl:
+          next.recursoTrtUrl && next.recursoTrtUrl.trim()
+            ? next.recursoTrtUrl.trim()
+            : null,
+        recursoEletraUrl:
+          next.recursoEletraUrl && next.recursoEletraUrl.trim()
+            ? next.recursoEletraUrl.trim()
+            : null,
         recursoMpgoUrl:
           next.recursoMpgoUrl && next.recursoMpgoUrl.trim()
             ? next.recursoMpgoUrl.trim()
+            : null,
+        recursoTjgoUrl:
+          next.recursoTjgoUrl && next.recursoTjgoUrl.trim()
+            ? next.recursoTjgoUrl.trim()
             : null,
         notificationEmail:
           next.notificationEmail && next.notificationEmail.trim()
@@ -944,6 +2723,16 @@ export default function CreditoPage() {
         notificationEmailContabilidade:
           next.notificationEmailContabilidade && next.notificationEmailContabilidade.trim()
             ? next.notificationEmailContabilidade.trim()
+            : null,
+        occurrencesPanoramaDiretoriaEmail:
+          next.occurrencesPanoramaDiretoriaEmail &&
+          next.occurrencesPanoramaDiretoriaEmail.trim()
+            ? next.occurrencesPanoramaDiretoriaEmail.trim()
+            : null,
+        occurrencesPanoramaGerentesEmail:
+          next.occurrencesPanoramaGerentesEmail &&
+          next.occurrencesPanoramaGerentesEmail.trim()
+            ? next.occurrencesPanoramaGerentesEmail.trim()
             : null,
       }
       const res = await fetch('/api/consignado/automation/config', {
@@ -979,10 +2768,21 @@ export default function CreditoPage() {
           | null
           | {
               sharePointFolderUrl?: string | null
+              relatorioSisbrUrl?: string | null
               recursoAlegoUrl?: string | null
+              recursoNeoconsigDemaisUrl?: string | null
+              recursoAdfegoUrl?: string | null
+              recursoTceUrl?: string | null
+              recursoTcmUrl?: string | null
+              recursoTreUrl?: string | null
+              recursoTrtUrl?: string | null
+              recursoEletraUrl?: string | null
               recursoMpgoUrl?: string | null
+              recursoTjgoUrl?: string | null
               notificationEmail?: string | null
               notificationEmailContabilidade?: string | null
+              occurrencesPanoramaDiretoriaEmail?: string | null
+              occurrencesPanoramaGerentesEmail?: string | null
               teamsDelegatedConnected?: boolean
               message?: string
             }
@@ -991,21 +2791,55 @@ export default function CreditoPage() {
         }
         if (cancelled) return
         const remote = typeof data?.sharePointFolderUrl === 'string' ? data!.sharePointFolderUrl!.trim() : ''
+        const remoteRelatorioSisbr =
+          typeof data?.relatorioSisbrUrl === 'string' ? data!.relatorioSisbrUrl!.trim() : ''
         const remoteAlego = typeof data?.recursoAlegoUrl === 'string' ? data!.recursoAlegoUrl!.trim() : ''
+        const remoteNeoconsigDemais =
+          typeof data?.recursoNeoconsigDemaisUrl === 'string' ? data!.recursoNeoconsigDemaisUrl!.trim() : ''
+        const remoteAdfego =
+          typeof data?.recursoAdfegoUrl === 'string' ? data!.recursoAdfegoUrl!.trim() : ''
+        const remoteTce = typeof data?.recursoTceUrl === 'string' ? data!.recursoTceUrl!.trim() : ''
+        const remoteTcm = typeof data?.recursoTcmUrl === 'string' ? data!.recursoTcmUrl!.trim() : ''
+        const remoteTre = typeof data?.recursoTreUrl === 'string' ? data!.recursoTreUrl!.trim() : ''
+        const remoteTrt = typeof data?.recursoTrtUrl === 'string' ? data!.recursoTrtUrl!.trim() : ''
+        const remoteEletra =
+          typeof data?.recursoEletraUrl === 'string' ? data!.recursoEletraUrl!.trim() : ''
         const remoteMpgo = typeof data?.recursoMpgoUrl === 'string' ? data!.recursoMpgoUrl!.trim() : ''
+        const remoteTjgo = typeof data?.recursoTjgoUrl === 'string' ? data!.recursoTjgoUrl!.trim() : ''
         const remoteNotificationEmail =
           typeof data?.notificationEmail === 'string' ? data!.notificationEmail!.trim() : ''
         const remoteNotificationEmailContabilidade =
           typeof data?.notificationEmailContabilidade === 'string'
             ? data!.notificationEmailContabilidade!.trim()
             : ''
+        const remoteOccurrencesPanoramaDiretoriaEmail =
+          typeof data?.occurrencesPanoramaDiretoriaEmail === 'string'
+            ? data!.occurrencesPanoramaDiretoriaEmail!.trim()
+            : ''
+        const remoteOccurrencesPanoramaGerentesEmail =
+          typeof data?.occurrencesPanoramaGerentesEmail === 'string'
+            ? data!.occurrencesPanoramaGerentesEmail!.trim()
+            : ''
         const remoteTeamsDelegatedConnected = data?.teamsDelegatedConnected === true
         if (remote) setSharePointFolderPath(remote)
+        if (remoteRelatorioSisbr) setRelatorioSisbrUrl(remoteRelatorioSisbr)
         if (remoteAlego) setRecursoAlegoUrl(remoteAlego)
+        if (remoteNeoconsigDemais) setRecursoNeoconsigDemaisUrl(remoteNeoconsigDemais)
+        if (remoteAdfego) setRecursoAdfegoUrl(remoteAdfego)
+        if (remoteTce) setRecursoTceUrl(remoteTce)
+        if (remoteTcm) setRecursoTcmUrl(remoteTcm)
+        if (remoteTre) setRecursoTreUrl(remoteTre)
+        if (remoteTrt) setRecursoTrtUrl(remoteTrt)
+        if (remoteEletra) setRecursoEletraUrl(remoteEletra)
         if (remoteMpgo) setRecursoMpgoUrl(remoteMpgo)
+        if (remoteTjgo) setRecursoTjgoUrl(remoteTjgo)
         if (remoteNotificationEmail) setNotificationEmail(remoteNotificationEmail)
         if (remoteNotificationEmailContabilidade)
           setNotificationEmailContabilidade(remoteNotificationEmailContabilidade)
+        if (remoteOccurrencesPanoramaDiretoriaEmail)
+          setOccurrencesPanoramaDiretoriaEmail(remoteOccurrencesPanoramaDiretoriaEmail)
+        if (remoteOccurrencesPanoramaGerentesEmail)
+          setOccurrencesPanoramaGerentesEmail(remoteOccurrencesPanoramaGerentesEmail)
         setTeamsDelegatedConnected(remoteTeamsDelegatedConnected)
 
         const shouldMigrateSharePoint = !remote
@@ -1018,6 +2852,8 @@ export default function CreditoPage() {
                 sharePointFolderPath?: string
                 notificationEmail?: string
                 notificationEmailContabilidade?: string
+                  occurrencesPanoramaDiretoriaEmail?: string
+                  occurrencesPanoramaGerentesEmail?: string
               })
             : null
           const local = typeof parsed?.sharePointFolderPath === 'string' ? parsed.sharePointFolderPath.trim() : ''
@@ -1026,6 +2862,14 @@ export default function CreditoPage() {
           const localNotificationEmailContabilidade =
             typeof parsed?.notificationEmailContabilidade === 'string'
               ? parsed.notificationEmailContabilidade.trim()
+              : ''
+          const localOccurrencesPanoramaDiretoriaEmail =
+            typeof parsed?.occurrencesPanoramaDiretoriaEmail === 'string'
+              ? parsed.occurrencesPanoramaDiretoriaEmail.trim()
+              : ''
+          const localOccurrencesPanoramaGerentesEmail =
+            typeof parsed?.occurrencesPanoramaGerentesEmail === 'string'
+              ? parsed.occurrencesPanoramaGerentesEmail.trim()
               : ''
 
           if (
@@ -1037,11 +2881,28 @@ export default function CreditoPage() {
           if (!local && !localNotificationEmail && !localNotificationEmailContabilidade) return
           await saveAutomationConfigToServer({
             sharePointFolderUrl: shouldMigrateSharePoint ? local : remote || null,
+            relatorioSisbrUrl: remoteRelatorioSisbr || null,
             recursoAlegoUrl: remoteAlego || null,
+            recursoNeoconsigDemaisUrl: remoteNeoconsigDemais || null,
+            recursoAdfegoUrl: remoteAdfego || null,
+            recursoTceUrl: remoteTce || null,
+            recursoTcmUrl: remoteTcm || null,
+            recursoTreUrl: remoteTre || null,
+            recursoTrtUrl: remoteTrt || null,
+            recursoEletraUrl: remoteEletra || null,
             recursoMpgoUrl: remoteMpgo || null,
+            recursoTjgoUrl: remoteTjgo || null,
             notificationEmail: remoteNotificationEmail || localNotificationEmail || null,
             notificationEmailContabilidade:
               remoteNotificationEmailContabilidade || localNotificationEmailContabilidade || null,
+            occurrencesPanoramaDiretoriaEmail:
+              remoteOccurrencesPanoramaDiretoriaEmail ||
+              localOccurrencesPanoramaDiretoriaEmail ||
+              null,
+            occurrencesPanoramaGerentesEmail:
+              remoteOccurrencesPanoramaGerentesEmail ||
+              localOccurrencesPanoramaGerentesEmail ||
+              null,
           })
         } catch {
           return
@@ -1070,10 +2931,23 @@ export default function CreditoPage() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           sharePointFolderUrl: sharePointFolderPath.trim() || null,
+          relatorioSisbrUrl: relatorioSisbrUrl.trim() || null,
           recursoAlegoUrl: recursoAlegoUrl.trim() || null,
+          recursoNeoconsigDemaisUrl: recursoNeoconsigDemaisUrl.trim() || null,
+          recursoAdfegoUrl: recursoAdfegoUrl.trim() || null,
+          recursoTceUrl: recursoTceUrl.trim() || null,
+          recursoTcmUrl: recursoTcmUrl.trim() || null,
+          recursoTreUrl: recursoTreUrl.trim() || null,
+          recursoTrtUrl: recursoTrtUrl.trim() || null,
+          recursoEletraUrl: recursoEletraUrl.trim() || null,
           recursoMpgoUrl: recursoMpgoUrl.trim() || null,
+          recursoTjgoUrl: recursoTjgoUrl.trim() || null,
           notificationEmail: notificationEmail.trim() || null,
           notificationEmailContabilidade: notificationEmailContabilidade.trim() || null,
+          occurrencesPanoramaDiretoriaEmail:
+            occurrencesPanoramaDiretoriaEmail.trim() || null,
+          occurrencesPanoramaGerentesEmail:
+            occurrencesPanoramaGerentesEmail.trim() || null,
         }),
       })
     } catch {
@@ -1083,12 +2957,27 @@ export default function CreditoPage() {
 
   const refreshTeamsDelegatedConnectedFromServer = async () => {
     try {
-      const res = await fetch('/api/consignado/automation/config')
-      const data = (await res.json().catch(() => null)) as null | {
-        teamsDelegatedConnected?: boolean
+      const res = await fetch('/api/consignado/teams/delegated/status')
+      const data = (await res.json().catch(() => null)) as
+        | null
+        | {
+            connected?: boolean
+            hasRefreshToken?: boolean
+            hasDeviceCode?: boolean
+            deviceCodeExpiresAt?: string | null
+            deviceCodeExpired?: boolean
+            status?: 'connected' | 'pending' | 'expired' | 'disconnected'
+          }
+      if (!res.ok) {
+        const resFallback = await fetch('/api/consignado/automation/config')
+        const fallbackData = (await resFallback.json().catch(() => null)) as null | {
+          teamsDelegatedConnected?: boolean
+        }
+        if (!resFallback.ok) return
+        setTeamsDelegatedConnected(fallbackData?.teamsDelegatedConnected === true)
+        return
       }
-      if (!res.ok) return
-      setTeamsDelegatedConnected(data?.teamsDelegatedConnected === true)
+      setTeamsDelegatedConnected(data?.connected === true)
     } catch {
       return
     }
@@ -1136,9 +3025,9 @@ export default function CreditoPage() {
   const finishTeamsDelegatedLogin = async () => {
     if (settingsLocked) return
     setTeamsDelegatedLoading(true)
-    const toastId = toast.loading('Aguardando autorização do Teams...')
+    const toastId = toast.loading('Aguardando autorização do Teams (aguarde até 4 minutos)...')
     try {
-      for (let i = 0; i < 40; i += 1) {
+      for (let i = 0; i < 120; i += 1) {
         const res = await fetch('/api/consignado/teams/delegated/finish', { method: 'POST' })
         const data = (await res.json().catch(() => null)) as null | { status?: string; message?: string }
         if (!res.ok) {
@@ -1146,7 +3035,7 @@ export default function CreditoPage() {
         }
         const status = String(data?.status ?? '').trim()
         if (status === 'pending') {
-          await new Promise((r) => window.setTimeout(r, 1500))
+          await new Promise((r) => window.setTimeout(r, 2000))
           continue
         }
         if (status === 'connected') {
@@ -1164,7 +3053,7 @@ export default function CreditoPage() {
         toast.error('Resposta inválida ao concluir login do Teams.', { id: toastId })
         return
       }
-      toast.error('Não foi possível concluir o login do Teams.', { id: toastId })
+      toast.error('Não foi possível concluir o login do Teams (tempo esgotado).', { id: toastId })
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Falha ao concluir login do Teams.'
       toast.error(msg, { id: toastId })
@@ -1238,6 +3127,93 @@ export default function CreditoPage() {
       .finally(() => {
         if (cancelled) return
         setOrgaoValuesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [view])
+
+  useEffect(() => {
+    if (view !== 'configuracoes-automacao') return
+    let cancelled = false
+    Promise.resolve().then(() => {
+      setRecursoTableOptionsLoading(true)
+    })
+    fetch('/api/consignado/recurso-tables')
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as
+          | null
+          | { values?: Array<string | { value?: string }>; message?: string }
+        if (!res.ok) {
+          throw new Error(
+            data?.message || `Falha ao carregar tabelas de recurso (HTTP ${res.status}).`,
+          )
+        }
+        if (cancelled) return
+        const values = Array.isArray(data?.values)
+          ? data!.values!
+              .map((v) => (typeof v === 'string' ? v : typeof v?.value === 'string' ? v.value : ''))
+              .filter(Boolean)
+          : []
+        setRecursoTableOptions(values)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setRecursoTableOptions([])
+      })
+      .finally(() => {
+        if (cancelled) return
+        setRecursoTableOptionsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [view])
+
+  useEffect(() => {
+    if (view !== 'configuracoes-automacao') return
+    let cancelled = false
+    Promise.resolve().then(() => {
+      setRelatorioConsolidacaoRecursoLoading(true)
+      setRelatorioConsolidacaoRecursoError(null)
+    })
+    fetch('/api/consignado/relatorio-consolidacao-recurso')
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as
+          | null
+          | {
+              items?: Array<{ recursoTable?: string; targetRecursoTable?: string; createdAt?: string }>
+              message?: string
+            }
+        if (!res.ok) {
+          throw new Error(
+            data?.message ||
+              `Falha ao carregar consolidação de relatório (HTTP ${res.status}).`,
+          )
+        }
+        if (cancelled) return
+        const items = Array.isArray(data?.items)
+          ? data!.items!
+              .map((i) => ({
+                recursoTable: typeof i.recursoTable === 'string' ? i.recursoTable : '',
+                targetRecursoTable:
+                  typeof i.targetRecursoTable === 'string' ? i.targetRecursoTable : '',
+                createdAt: typeof i.createdAt === 'string' ? i.createdAt : '',
+              }))
+              .filter((i) => Boolean(i.recursoTable) && Boolean(i.targetRecursoTable))
+          : []
+        setRelatorioConsolidacaoRecurso(items)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        const msg =
+          e instanceof Error ? e.message : 'Falha ao carregar consolidação de relatório.'
+        setRelatorioConsolidacaoRecursoError(msg)
+        setRelatorioConsolidacaoRecurso([])
+      })
+      .finally(() => {
+        if (cancelled) return
+        setRelatorioConsolidacaoRecursoLoading(false)
       })
     return () => {
       cancelled = true
@@ -1335,9 +3311,12 @@ export default function CreditoPage() {
     if (
       view !== 'configuracoes-automacao' &&
       view !== 'conciliacao-extratos' &&
+      view !== 'fluxo-pendencias' &&
       view !== 'home' &&
       view !== 'dashboard' &&
       view !== 'relatorios-valores' &&
+      view !== 'relatorios-conciliacao-data' &&
+      view !== 'relatorios-ocorrencias' &&
       view !== 'relatorios-auditoria'
     )
       return
@@ -1382,9 +3361,12 @@ export default function CreditoPage() {
 
   const title = useMemo(() => {
     if (view === 'dashboard') return 'Dashboard'
+    if (view === 'fluxo-pendencias') return 'Fluxo de Pendências'
     if (view === 'conciliacao-extratos') return 'Conciliação • Extratos'
     if (view === 'conciliacao-relatorio') return 'Conciliação • Relatório'
     if (view === 'relatorios-valores') return 'Conciliação'
+    if (view === 'relatorios-conciliacao-data') return 'Conciliação por data'
+    if (view === 'relatorios-ocorrencias') return 'Ocorrências'
     if (view === 'relatorios-auditoria') return 'Auditoria Sistêmica'
     if (view === 'configuracoes-automacao') return 'Automação'
     if (view === 'configuracoes-acessos') return 'Acessos'
@@ -1393,12 +3375,18 @@ export default function CreditoPage() {
 
   const subtitle = useMemo(() => {
     if (view === 'dashboard') return 'KPIs, alertas e performance do portfólio'
+    if (view === 'fluxo-pendencias')
+      return 'Acompanhe e movimente pendências por área (Financeiro → Crédito → Negócios)'
     if (view === 'conciliacao-extratos')
       return 'Importação e conciliação a partir dos extratos'
     if (view === 'conciliacao-relatorio')
       return 'Importação e conciliação a partir do relatório'
     if (view === 'relatorios-valores')
       return 'Relatórios e extratos para conciliação de consignados'
+    if (view === 'relatorios-conciliacao-data')
+      return 'Exporte a conciliação consolidada por vencimento ou por data de devolução'
+    if (view === 'relatorios-ocorrencias')
+      return 'Listagem de ocorrências por competência, órgão e vencimento'
     if (view === 'relatorios-auditoria') return 'Trilha e consistência de importações'
     if (view === 'configuracoes-automacao')
       return 'SharePoint, agendamento e notificações'
@@ -1435,18 +3423,90 @@ export default function CreditoPage() {
   function formatOcorrenciaActionLabel(v: unknown) {
     const t = String(v ?? '').trim()
     if (!t) return '-'
+    if (t === 'inclusao_servidor_acordo_judicial_tjgo') return 'Inclusão de Servidor'
+    if (t === 'clonar_para_relatorio_sisbr' || t.startsWith('clonar_para_relatorio_sisbr'))
+      return 'Clonar para Relatório SISBR'
     if (t === 'alterar_orgao_relatorio_sisbr' || t.startsWith('alterar_orgao_relatorio')) return 'Alterar Órgão'
     if (t === 'repactuacao_relatorio_sisbr' || t.startsWith('repactuacao')) return 'Repactuação'
+    if (
+      t === 'liquidacao_fora_vencimento_relatorio_sisbr' ||
+      t.startsWith('liquidacao_fora_vencimento')
+    )
+      return 'Liquidação Fora do Vencimento'
+    if (
+      t === 'liquidacao_antecipada_via_caixa_relatorio_sisbr' ||
+      t.startsWith('liquidacao_antecipada_via_caixa')
+    )
+      return 'Liquidação Antecipada Via Caixa'
     if (t === 'liquidacao_ccs_relatorio_sisbr' || t.startsWith('liquidacao_ccs')) return 'Liquidação CCS'
+    if (
+      t === 'liquidacao_processo_judicial_relatorio_sisbr' ||
+      t.startsWith('liquidacao_processo_judicial')
+    )
+      return 'Liquidação Processo Judicial'
     if (t === 'nao_possui_recurso_relatorio_sisbr' || t.startsWith('nao_possui_recurso')) return 'Não possui Recurso'
+    if (
+      t === 'liquidacao_recurso_judicial_relatorio_sisbr' ||
+      t.startsWith('liquidacao_recurso_judicial')
+    )
+      return 'Liquidação de Recurso Judical'
+    if (t === 'recurso_recebido_a_maior_relatorio_sisbr' || t.startsWith('recurso_recebido_a_maior'))
+      return 'Recurso Recebido a Maior'
+    if (
+      t === 'devolucao_parcial_averbacao_relatorio_sisbr' ||
+      t.startsWith('devolucao_parcial_averbacao')
+    )
+      return 'Devolução Parcial (Averbação)'
+    if (t === 'recurso_recebido_a_menor_relatorio_sisbr' || t.startsWith('recurso_recebido_a_menor'))
+      return 'Recurso Recebido a Menor'
     if (
       t === 'recurso_judicial_valor_a_menor_relatorio_sisbr' ||
       t.startsWith('recurso_judicial_valor_a_menor')
     )
       return 'Recurso Judicial - Valor a Menor'
+    if (t === 'estorno_valores_relatorio_sisbr' || t.startsWith('estorno_valores'))
+      return 'Estorno de Valores'
     if (t === 'quitado_recurso' || t.startsWith('quitado_recurso')) return 'Quitado'
+    if (t === 'antecipado_devolvido_relatorio_sisbr' || t.startsWith('antecipado_devolvido'))
+      return 'Antecipado Devolvido'
     return t
   }
+  function hasNaoPossuiRecursoOcorrencia(item: any) {
+    const occs = Array.isArray(item?.ocorrencias)
+      ? item.ocorrencias
+      : item?.ocorrencia
+        ? [item.ocorrencia]
+        : []
+    return occs.some((occ: any) => {
+      const action = String(occ?.action ?? '').trim()
+      return action === 'nao_possui_recurso_relatorio_sisbr' || action.startsWith('nao_possui_recurso')
+    })
+  }
+  function defaultRecursoCompetencia(monthKey: string, recursoTable?: string | null) {
+    const m = String(monthKey || '').trim().match(/^(\d{4})-(\d{2})$/)
+    if (!m) return ''
+    let year = Number(m[1])
+    let month = Number(m[2])
+    if (recursoTable === 'Recurso TJGO') {
+      month -= 1
+      if (month <= 0) {
+        month = 12
+        year -= 1
+      }
+    }
+    return `${String(month).padStart(2, '0')}/${year}`
+  }
+  const inclusaoServidorDisponivel = Boolean(conciliacaoData?.recursoTable?.trim())
+  const inclusaoAcordoJudicialActiveTarget: 'recurso' | 'relatorio' =
+    inclusaoAcordoJudicialRelatorioModalOpen ? 'relatorio' : 'recurso'
+  const inclusaoAcordoJudicialTargetLabel =
+    inclusaoAcordoJudicialActiveTarget === 'relatorio'
+      ? 'Relatório SISBR'
+      : conciliacaoData?.recursoTable || 'Recurso do Órgão'
+  const inclusaoAcordoJudicialModalTitle =
+    inclusaoAcordoJudicialActiveTarget === 'relatorio'
+      ? 'Inclusão de Servidor (Relatório SISBR)'
+      : `Inclusão de Servidor (${conciliacaoData?.recursoTable || 'Recurso do Órgão'})`
   type CloneSisbrAction = 'clonar_para_relatorio_sisbr' | 'quitado_recurso'
   type RepactuacaoStatus = 'pendente_gerente' | 'concluido'
   const repactuacaoStatusLabel = (s: RepactuacaoStatus) =>
@@ -1698,16 +3758,312 @@ export default function CreditoPage() {
     return t
   }
 
+  const getRelatorioLinkedVencimento = (row: any) =>
+    normalizeVencimentoLabel((row as any)?.vencimentoRef ?? (row as any)?.vencimento)
+
   const relatorioVencimentoOptions = useMemo(() => {
-    if (view !== 'conciliacao-extratos') return []
+    if (
+      view !== 'conciliacao-extratos' &&
+      view !== 'relatorios-valores' &&
+      view !== 'relatorios-ocorrencias'
+    )
+      return []
     if (!conciliacaoData) return []
     const base = conciliacaoOnlyDiff
       ? conciliacaoData.relatorio.filter((x) => x.status === 'pendencia')
       : conciliacaoData.relatorio
-    const unique = Array.from(new Set(base.map((r) => normalizeVencimentoLabel((r as any).vencimento))))
+    const unique = Array.from(new Set(base.map((r) => getRelatorioLinkedVencimento(r))))
     unique.sort((a, b) => (vencimentoSortKey(a) || a).localeCompare(vencimentoSortKey(b) || b, 'pt-BR'))
     return unique
   }, [conciliacaoData, conciliacaoOnlyDiff, view])
+
+  const relatoriosValoresListaRows = useMemo(() => {
+    if (view !== 'relatorios-valores' || !conciliacaoData) return []
+    const wantedVencimento = relatorioVencimentoFilter.trim()
+    const relatorioAll = Array.isArray(conciliacaoData.relatorio) ? conciliacaoData.relatorio : []
+    const relatorioFiltered = conciliacaoOnlyDiff
+      ? relatorioAll.filter((x: any) => x?.status === 'pendencia')
+      : relatorioAll
+    const byVencimento = wantedVencimento
+      ? relatorioFiltered.filter((r: any) => getRelatorioLinkedVencimento(r) === wantedVencimento)
+      : relatorioFiltered
+    return byVencimento.map((r: any, idx: number) => {
+      const ocorrencia = r?.ocorrencia ?? null
+      return {
+        key: `relatorio-${String(r?.cpf ?? '').trim()}-${String(r?.value ?? '').trim()}-${idx}`,
+        origem: 'Relatório SISBR',
+        cpf: String(r?.cpf ?? '').trim() || '-',
+        nome: String(r?.nome ?? '').trim() || '-',
+        valor: String(r?.value ?? '0,00'),
+        vencimento: getRelatorioLinkedVencimento(r) || '—',
+        status: r?.status === 'conciliado' ? 'Conciliado' : 'Pendente',
+        ocorrencia: ocorrencia
+          ? [ocorrencia.action, ocorrencia.justification].filter(Boolean).join(' • ')
+          : '—',
+      }
+    })
+  }, [conciliacaoData, conciliacaoOnlyDiff, relatorioVencimentoFilter, view])
+
+  const relatoriosOcorrenciasRows = useMemo(() => {
+    if (view === 'relatorios-ocorrencias') {
+      const wantedVencimento = relatorioVencimentoFilter.trim()
+      const rows = relatoriosOcorrenciasApiItems.map((raw: any) => ({
+        key: String(
+          raw?.key ??
+            `${raw?.dataHora ?? ''}|${raw?.orgao ?? ''}|${raw?.cpf ?? ''}|${raw?.acao ?? ''}|${raw?.valor ?? ''}`,
+        ),
+        origem: String(raw?.origem ?? '').trim(),
+        competencia: String(raw?.competencia ?? '').trim(),
+        orgao: String(raw?.orgao ?? '').trim(),
+        vencimento: String(raw?.vencimento ?? '').trim(),
+        dataHora: String(raw?.dataHora ?? '').trim(),
+        cpf: String(raw?.cpf ?? '').trim(),
+        nome: String(raw?.nome ?? '').trim(),
+        valor: String(raw?.valor ?? '').trim(),
+        dataQuitacao: String(raw?.dataQuitacao ?? '').trim(),
+        acaoKey: String(raw?.acaoKey ?? raw?.action ?? '').trim(),
+        acao: String(raw?.acao ?? '').trim(),
+        justificativa: String(raw?.justificativa ?? '').trim(),
+        status: String(raw?.status ?? '').trim(),
+        gerenteEmail: String(raw?.gerenteEmail ?? '').trim(),
+      }))
+      return wantedVencimento
+        ? rows.filter((row) => String(row.vencimento ?? '').trim() === wantedVencimento)
+        : rows
+    }
+    if (!conciliacaoData) return []
+    const wantedVencimento = relatorioVencimentoFilter.trim()
+    const rows: Array<{
+      key: string
+      origem: string
+      competencia: string
+      orgao: string
+      vencimento: string
+      dataHora: string
+      cpf: string
+      nome: string
+      valor: string
+      dataQuitacao: string
+      acaoKey: string
+      acao: string
+      justificativa: string
+      status: string
+      gerenteEmail: string
+    }> = []
+
+    const pushOcorrencias = (
+      origem: string,
+      base: { cpf?: string | null; nome?: string | null; value?: string | null; vencimento?: string | null },
+      ocorrencias: any[],
+    ) => {
+      for (const occ of ocorrencias) {
+        const vencimento =
+          origem === 'Relatório SISBR'
+            ? getRelatorioLinkedVencimento({
+                ...(base as any),
+                ...(occ && typeof occ === 'object' ? { vencimentoRef: (occ as any).vencimentoRef ?? null } : {}),
+              })
+            : normalizeVencimentoLabel(base?.vencimento)
+        if (wantedVencimento && vencimento !== wantedVencimento) continue
+        rows.push({
+          key: `${origem}-${String(occ?.id ?? Math.random())}-${String(base?.cpf ?? '')}-${String(occ?.createdAt ?? '')}`,
+          origem,
+          competencia: conciliacaoMonthLabel || conciliacaoMonth,
+          orgao: conciliacaoOrgao.trim(),
+          vencimento,
+          dataHora: String(occ?.createdAt ?? '').trim(),
+          cpf: String(base?.cpf ?? '').trim(),
+          nome: String(base?.nome ?? '').trim(),
+          valor: String(base?.value ?? '').trim(),
+          dataQuitacao: String(occ?.devolucaoDate ?? occ?.liquidationDate ?? '').trim(),
+          acaoKey: String(occ?.action ?? '').trim(),
+          acao: formatOcorrenciaActionLabel(occ?.action),
+          justificativa: String(occ?.justification ?? '').trim(),
+          status: String(occ?.status ?? '').trim(),
+          gerenteEmail: String(occ?.gerenteEmail ?? '').trim(),
+        })
+      }
+    }
+
+    for (const rec of conciliacaoData.recurso ?? []) {
+      const occs = Array.isArray((rec as any)?.ocorrencias)
+        ? ((rec as any).ocorrencias as any[])
+        : rec?.ocorrencia
+          ? [rec.ocorrencia]
+          : []
+      pushOcorrencias(
+        'Recurso do Órgão',
+        {
+          cpf: rec.cpf,
+          nome: rec.nome,
+          value: rec.value,
+          vencimento: rec.vencimento,
+        },
+        occs,
+      )
+    }
+
+    for (const rel of conciliacaoData.relatorio ?? []) {
+      const occs = Array.isArray((rel as any)?.ocorrencias)
+        ? ((rel as any).ocorrencias as any[])
+        : rel?.ocorrencia
+          ? [rel.ocorrencia]
+          : []
+      pushOcorrencias(
+        'Relatório SISBR',
+        {
+          cpf: rel.cpf,
+          nome: rel.nome,
+          value: rel.value,
+          vencimento: rel.vencimento,
+        },
+        occs,
+      )
+    }
+
+    rows.sort((a, b) => {
+      const ta = String(a.dataHora || '')
+      const tb = String(b.dataHora || '')
+      if (ta && tb && ta !== tb) return tb.localeCompare(ta)
+      return (
+        (vencimentoSortKey(a.vencimento) || a.vencimento).localeCompare(
+          vencimentoSortKey(b.vencimento) || b.vencimento,
+          'pt-BR',
+        ) ||
+        a.nome.localeCompare(b.nome, 'pt-BR') ||
+        a.cpf.localeCompare(b.cpf, 'pt-BR')
+      )
+    })
+
+    return rows
+  }, [
+    conciliacaoData,
+    conciliacaoMonth,
+    conciliacaoMonthLabel,
+    conciliacaoOrgao,
+    relatorioVencimentoFilter,
+    relatoriosOcorrenciasApiItems,
+    view,
+  ])
+
+  useEffect(() => {
+    if (view !== 'relatorios-ocorrencias') return
+    const monthOk = conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+    if (!monthOk || conciliacaoMonthsLoading) {
+      setRelatoriosOcorrenciasApiItems([])
+      setRelatoriosOcorrenciasApiError(null)
+      setRelatoriosOcorrenciasApiLoading(false)
+      return
+    }
+    let cancelled = false
+    Promise.resolve().then(() => {
+      setRelatoriosOcorrenciasApiLoading(true)
+      setRelatoriosOcorrenciasApiError(null)
+    })
+    const orgaoQuery = conciliacaoOrgao.trim()
+      ? `&orgao=${encodeURIComponent(conciliacaoOrgao.trim())}`
+      : ''
+    fetch(
+      `/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencias?month=${encodeURIComponent(conciliacaoMonth)}${orgaoQuery}`,
+    )
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as any
+        if (!res.ok) {
+          throw new Error(data?.message || `Falha ao listar ocorrências (HTTP ${res.status}).`)
+        }
+        return data
+      })
+      .then((data) => {
+        if (cancelled) return
+        const items = Array.isArray(data?.items) ? data.items : []
+        setRelatoriosOcorrenciasApiItems(items)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setRelatoriosOcorrenciasApiItems([])
+        setRelatoriosOcorrenciasApiError(e instanceof Error ? e.message : 'Falha ao listar ocorrências.')
+      })
+      .finally(() => {
+        if (cancelled) return
+        setRelatoriosOcorrenciasApiLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [view, conciliacaoMonth, conciliacaoMonthOptions, conciliacaoMonthsLoading, conciliacaoOrgao])
+
+  const relatoriosOcorrenciasActionOptions = useMemo(() => {
+    const map = new Map<string, string>()
+    // Add static options first (all possible actions)
+    const staticOptions = [
+      { key: 'inclusao_servidor_acordo_judicial_tjgo', label: 'Inclusão de Servidor' },
+      { key: 'clonar_para_relatorio_sisbr', label: 'Clonar para Relatório SISBR' },
+      { key: 'alterar_orgao_relatorio_sisbr', label: 'Alterar Órgão' },
+      { key: 'repactuacao_relatorio_sisbr', label: 'Repactuação' },
+      { key: 'liquidacao_fora_vencimento_relatorio_sisbr', label: 'Liquidação Fora do Vencimento' },
+      { key: 'liquidacao_antecipada_via_caixa_relatorio_sisbr', label: 'Liquidação Antecipada Via Caixa' },
+      { key: 'liquidacao_ccs_relatorio_sisbr', label: 'Liquidação CCS' },
+      {
+        key: 'liquidacao_processo_judicial_relatorio_sisbr',
+        label: 'Liquidação Processo Judicial',
+      },
+      { key: 'nao_possui_recurso_relatorio_sisbr', label: 'Não possui Recurso' },
+      { key: 'liquidacao_recurso_judicial_relatorio_sisbr', label: 'Liquidação de Recurso Judical' },
+      { key: 'recurso_recebido_a_maior_relatorio_sisbr', label: 'Recurso Recebido a Maior' },
+      { key: 'devolucao_parcial_averbacao_relatorio_sisbr', label: 'Devolução Parcial (Averbação)' },
+      { key: 'recurso_recebido_a_menor_relatorio_sisbr', label: 'Recurso Recebido a Menor' },
+      { key: 'recurso_judicial_valor_a_menor_relatorio_sisbr', label: 'Recurso Judicial - Valor a Menor' },
+      { key: 'estorno_valores_relatorio_sisbr', label: 'Estorno de Valores' },
+      { key: 'quitado_recurso', label: 'Quitado' },
+      { key: 'antecipado_devolvido_relatorio_sisbr', label: 'Antecipado Devolvido' },
+    ]
+    for (const opt of staticOptions) {
+      if (!map.has(opt.key)) map.set(opt.key, opt.label)
+    }
+    // Then add existing actions from data (in case there are custom ones)
+    for (const row of relatoriosOcorrenciasRows) {
+      const key = String((row as any)?.acaoKey ?? '').trim()
+      const label = String((row as any)?.acao ?? '').trim()
+      if (!key || !label || label === '-') continue
+      if (!map.has(key)) map.set(key, label)
+    }
+    return Array.from(map.entries())
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'))
+  }, [relatoriosOcorrenciasRows])
+
+  useEffect(() => {
+    const wantedKey = relatoriosOcorrenciasActionFilter.trim()
+    if (!wantedKey) return
+    if (!relatoriosOcorrenciasActionOptions.some((o) => o.value === wantedKey)) {
+      setRelatoriosOcorrenciasActionFilter('')
+    }
+  }, [relatoriosOcorrenciasActionFilter, relatoriosOcorrenciasActionOptions])
+
+  const relatoriosOcorrenciasRowsFiltered = useMemo(() => {
+    const wantedKey = relatoriosOcorrenciasActionFilter.trim()
+    if (!wantedKey) return relatoriosOcorrenciasRows
+    return relatoriosOcorrenciasRows.filter((row) => String((row as any)?.acaoKey ?? '').trim() === wantedKey)
+  }, [relatoriosOcorrenciasActionFilter, relatoriosOcorrenciasRows])
+
+  const relatoriosOcorrenciasVencimentoOptions = useMemo(() => {
+    if (view !== 'relatorios-ocorrencias') return relatorioVencimentoOptions
+    const normalize = (v: unknown) => String(v ?? '').trim()
+    const parseKey = (v: string) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v.trim())
+      return m ? `${m[3]}${m[2]}${m[1]}` : v
+    }
+    const unique = Array.from(
+      new Set(
+        relatoriosOcorrenciasApiItems
+          .map((it: any) => normalize(it?.vencimento))
+          .filter((v) => Boolean(v) && v !== '-'),
+      ),
+    )
+    unique.sort((a, b) => parseKey(a).localeCompare(parseKey(b), 'pt-BR'))
+    return unique
+  }, [view, relatorioVencimentoOptions, relatoriosOcorrenciasApiItems])
 
   const conciliacaoCloseVencimentoOptions = useMemo(() => {
     return relatorioVencimentoOptions.filter((v) => !closedVencimentos.includes(v))
@@ -1736,101 +4092,86 @@ export default function CreditoPage() {
   ])
 
   useEffect(() => {
-    if (view !== 'dashboard') return
-    if (conciliacaoOrgao.trim()) return
-    if (conciliacaoMonthOptions.length === 0) return
-    if (conciliacaoOrgaoOptions.length === 0) return
-
-    const monthWanted =
-      conciliacaoMonthOptions.find((o) => o.value === conciliacaoMonth)?.value ??
-      conciliacaoMonthOptions[0].value
-
-    if (monthWanted !== conciliacaoMonth) {
-      setConciliacaoMonth(monthWanted)
-      return
-    }
-
-    if (dashboardAutoPickRef.current === monthWanted) return
-    dashboardAutoPickRef.current = monthWanted
-
-    let cancelled = false
-    ;(async () => {
-      for (const orgao of conciliacaoOrgaoOptions) {
-        if (cancelled) return
-        try {
-          const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(monthWanted)}&orgao=${encodeURIComponent(orgao)}`
-          const res = await fetch(url)
-          if (!res.ok) continue
-          const data = (await res.json().catch(() => null)) as any
-          const recurso = Array.isArray(data?.recurso) ? data.recurso : []
-          const relatorio = Array.isArray(data?.relatorio) ? data.relatorio : []
-          const hasPendencia =
-            recurso.some((x: any) => x?.status === 'pendencia') ||
-            relatorio.some((x: any) => x?.status === 'pendencia')
-          if (hasPendencia) {
-            if (!cancelled) setConciliacaoOrgao(orgao)
-            return
-          }
-        } catch {
-          continue
-        }
-      }
-      if (!cancelled) setConciliacaoOrgao(conciliacaoOrgaoOptions[0] ?? '')
-    })()
-
-    return () => {
-      cancelled = true
-    }
-  }, [conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, conciliacaoOrgaoOptions, view])
-
-  useEffect(() => {
     if (view !== 'home') return
-    if (conciliacaoMonthOptions.length === 0) return
-    if (conciliacaoOrgaoOptions.length === 0) return
-
-    const monthWanted =
-      conciliacaoMonthOptions.find((o) => o.value === conciliacaoMonth)?.value ??
-      conciliacaoMonthOptions[0].value
-
-    if (monthWanted !== conciliacaoMonth) {
-      setConciliacaoMonth(monthWanted)
+    const monthOk = conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+    if (!monthOk || conciliacaoMonthsLoading) {
+      setHomeConciliacaoStatuses([])
+      setHomeConciliacaoStatusesError(null)
+      setHomeConciliacaoStatusesLoading(false)
       return
     }
 
-    const selected = conciliacaoOrgao.trim()
-    const shouldPick =
-      !selected || !conciliacaoOrgaoOptions.some((o) => o.trim() === selected)
-    if (!shouldPick) return
-
-    const runKey = `${monthWanted}|${selected}`
-    if (homeAutoPickRef.current === runKey) return
-    homeAutoPickRef.current = runKey
-
     let cancelled = false
-    ;(async () => {
-      for (const orgao of conciliacaoOrgaoOptions) {
-        if (cancelled) return
-        try {
-          const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(monthWanted)}&orgao=${encodeURIComponent(orgao)}`
-          const res = await fetch(url)
-          if (!res.ok) continue
-          const data = (await res.json().catch(() => null)) as any
-          const isClosed = Boolean(data?.closed?.isClosed)
-          if (!isClosed) {
-            if (!cancelled) setConciliacaoOrgao(orgao)
-            return
-          }
-        } catch {
-          continue
+    Promise.resolve().then(() => {
+      setHomeConciliacaoStatusesLoading(true)
+      setHomeConciliacaoStatusesError(null)
+    })
+
+    fetch(
+      `/api/consignado/conciliacao/recurso-vs-relatorio/home-status?month=${encodeURIComponent(conciliacaoMonth)}`,
+    )
+      .then(async (res) => {
+        const data = (await res.json().catch(() => null)) as
+          | null
+          | {
+              items?: Array<{
+                orgao?: string
+                vencimento?: string
+                status?: 'aberta' | 'fechada'
+                contabilidadeValidated?: boolean
+                recursoRecebidoCents?: number
+                liquidadoCents?: number
+                saldoCents?: number
+              }>
+              message?: string
+            }
+        if (!res.ok) {
+          throw new Error(data?.message || `Falha ao carregar status da home (HTTP ${res.status}).`)
         }
-      }
-      if (!cancelled) setConciliacaoOrgao(conciliacaoOrgaoOptions[0] ?? '')
-    })()
+        if (cancelled) return
+        const items = Array.isArray(data?.items)
+          ? data.items
+              .map(
+                (
+                  item,
+                ): {
+                  orgao: string
+                  vencimento: string
+                  status: 'aberta' | 'fechada'
+                  contabilidadeValidated: boolean
+                  recursoRecebidoCents: number
+                  liquidadoCents: number
+                  saldoCents: number
+                } => ({
+                orgao: String(item?.orgao ?? '').trim(),
+                vencimento: String(item?.vencimento ?? '').trim() || '-',
+                status: item?.status === 'fechada' ? 'fechada' : 'aberta',
+                contabilidadeValidated: Boolean(item?.contabilidadeValidated),
+                recursoRecebidoCents: Number(item?.recursoRecebidoCents ?? 0) || 0,
+                liquidadoCents: Number(item?.liquidadoCents ?? 0) || 0,
+                saldoCents: Number(item?.saldoCents ?? 0) || 0,
+                }),
+              )
+              .filter((item) => Boolean(item.orgao))
+          : []
+        setHomeConciliacaoStatuses(items)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setHomeConciliacaoStatuses([])
+        setHomeConciliacaoStatusesError(
+          e instanceof Error ? e.message : 'Falha ao carregar status da home.',
+        )
+      })
+      .finally(() => {
+        if (cancelled) return
+        setHomeConciliacaoStatusesLoading(false)
+      })
 
     return () => {
       cancelled = true
     }
-  }, [conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, conciliacaoOrgaoOptions, view])
+  }, [conciliacaoMonth, conciliacaoMonthOptions, conciliacaoMonthsLoading, view])
 
   const relatorioOcorrenciaOrgaoOptions = useMemo(() => {
     const base =
@@ -1867,6 +4208,296 @@ export default function CreditoPage() {
     return `${dd}/${mm}/${yyyy} ${hh}:${mi}`
   }
 
+  const getConciliacaoPorDataValidationStatusMeta = (
+    status: ConciliacaoPorDataValidationStatus | null | undefined,
+  ) => {
+    if (status === 'approved') {
+      return {
+        label: 'Validado',
+        accent: '#22c55e',
+        color: '#bbf7d0',
+        background: 'rgba(20,83,45,0.24)',
+      }
+    }
+    if (status === 'rejected') {
+      return {
+        label: 'Não validado',
+        accent: '#ef4444',
+        color: '#fecaca',
+        background: 'rgba(127,29,29,0.24)',
+      }
+    }
+    return {
+      label: 'Pendente',
+      accent: '#f59e0b',
+      color: '#fde68a',
+      background: 'rgba(120,53,15,0.26)',
+    }
+  }
+
+  const applyConciliacaoPorDataValidationProcess = (
+    liquidationDate: string,
+    process: ConciliacaoPorDataValidationProcess,
+  ) => {
+    setConciliacaoPorDataData((prev) => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        rows: prev.rows.map((row) =>
+          String(row.liquidationDate ?? '').trim() === liquidationDate.trim()
+            ? { ...row, validation: process }
+            : row,
+        ),
+      }
+    })
+  }
+
+  const requestConciliacaoPorDataValidationNow = async (row: {
+    liquidationDate: string
+    orgao: string
+    displayDateLabel?: string
+    displayDateValue?: string
+    orgaoReceivedCents: number
+    totalDebitCents: number
+    saldoCents: number
+    values: Record<string, number>
+    eventColumns: Array<{
+      label: string
+      side: 'debit' | 'credit'
+      valueCents: number
+    }>
+  }) => {
+    if (!conciliacaoPorDataData) return
+    if (!row.liquidationDate.trim() || row.liquidationDate === '—') {
+      toast.error('Data de liquidação inválida para solicitar a validação.')
+      return
+    }
+    const dateKey = row.liquidationDate.trim()
+    setConciliacaoPorDataValidationSubmittingKey(dateKey)
+    try {
+      const eventColumns = row.eventColumns
+        .map((item) => ({
+          label: item.label,
+          side: item.side,
+          valueCents: Number(item.valueCents ?? 0) || 0,
+        }))
+        .filter((item) => item.valueCents !== 0)
+      const res = await fetch('/api/consignado/conciliacao/recurso-vs-relatorio/data/validacao/solicitar', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          month: conciliacaoPorDataData.monthKey,
+          orgao: 'Todos os órgãos',
+          liquidationDate: row.liquidationDate,
+          requestedBy: currentSessionUserEmail || userDisplayName || null,
+          rowSnapshot: {
+            monthKey: conciliacaoPorDataData.monthKey,
+            orgao: 'Todos os órgãos',
+            liquidationDate: row.liquidationDate,
+            displayDateLabel: String(row.displayDateLabel ?? '').trim() || undefined,
+            displayDateValue: String(row.displayDateValue ?? '').trim() || undefined,
+            recursoRecebidoCents: row.orgaoReceivedCents,
+            totalDebitadoCents: row.totalDebitCents,
+            saldoDevedorCents: row.saldoCents,
+            eventColumns,
+          },
+        }),
+      })
+      const json = (await res.json().catch(() => null)) as
+        | null
+        | {
+            message?: string
+            created?: boolean
+            resent?: boolean
+            process?: unknown
+          }
+      if (!res.ok) {
+        throw new Error(json?.message || 'Falha ao enviar a solicitação para a contabilidade.')
+      }
+      const process = normalizeConciliacaoPorDataValidationProcess(json?.process)
+      if (!process) {
+        throw new Error('A API retornou um processo de validação inválido.')
+      }
+      applyConciliacaoPorDataValidationProcess(row.liquidationDate, process)
+      setConciliacaoPorDataValidationModal({
+        orgao: 'Todos os órgãos',
+        liquidationDate: row.liquidationDate,
+        process,
+        resendPayload: {
+          orgaoReceivedCents: row.orgaoReceivedCents,
+          totalDebitCents: row.totalDebitCents,
+          saldoCents: row.saldoCents,
+          eventColumns,
+        },
+      })
+      toast.success(
+        json?.resent
+          ? 'Solicitação reenviada para nova aprovação da contabilidade.'
+          : json?.created === false
+          ? 'Já existia um processo de validação para esta linha.'
+          : 'Solicitação enviada para a contabilidade.',
+      )
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : 'Falha ao enviar a solicitação para a contabilidade.'
+      toast.error(message)
+    } finally {
+      setConciliacaoPorDataValidationSubmittingKey(null)
+    }
+  }
+
+  const buildConciliacaoPorDataAggregateRowForValidation = (liquidationDate: string) => {
+    const dateKey = String(liquidationDate ?? '').trim()
+    if (!dateKey || !conciliacaoPorDataData) return null
+
+    const targetRows = conciliacaoPorDataData.rows.filter(
+      (row) => String(row?.liquidationDate ?? '').trim() === dateKey,
+    )
+    if (targetRows.length === 0) return null
+    if (targetRows.every((row) => isConciliacaoPorDataDevolucaoEvent(row?.event))) return null
+
+    const tarifasByOrgao = new Map(
+      (conciliacaoPorDataData.tarifasByOrgao ?? []).map((item) => [
+        normalizeConciliacaoPorDataOrgaoKey(item.orgao),
+        {
+          totalCents: Number(item.totalCents ?? 0) || 0,
+          oldestLiquidationDate: String(item.oldestLiquidationDate ?? '').trim(),
+        },
+      ]),
+    )
+
+    const orgaoGroups = new Map<
+      string,
+      {
+        orgao: string
+        orgaoReceivedCents: number
+        totalDebitCents: number
+        totalCreditCents: number
+        eventColumnsMap: Record<string, { label: string; side: 'debit' | 'credit'; valueCents: number }>
+      }
+    >()
+    const displayDates = new Set<string>()
+
+    for (const row of targetRows) {
+      const orgao = String(row?.orgao ?? '').trim() || '—'
+      const orgaoKey = normalizeConciliacaoPorDataOrgaoKey(orgao)
+      const grouped =
+        orgaoGroups.get(orgaoKey) ?? {
+          orgao,
+          orgaoReceivedCents: 0,
+          totalDebitCents: 0,
+          totalCreditCents: 0,
+          eventColumnsMap: {},
+        }
+
+      grouped.orgaoReceivedCents = Math.max(
+        grouped.orgaoReceivedCents,
+        Number(row?.orgaoReceivedCents ?? 0) || 0,
+      )
+
+      const eventValue = getConciliacaoPorDataEventColumnValue(row)
+      const eventSide = getConciliacaoPorDataEventColumnSide(row)
+      const eventLabel =
+        eventValue !== 0 && eventSide ? formatConciliacaoPorDataEventColumnLabel(row.event, eventSide) : null
+      const excludeFromDebitTotals =
+        eventSide === 'debit' && eventLabel !== null && isConciliacaoPorDataExcludedDebitTotalLabel(eventLabel)
+
+      grouped.totalDebitCents += excludeFromDebitTotals ? 0 : Number(row?.debitCents ?? 0) || 0
+      grouped.totalCreditCents += Number(row?.creditCents ?? 0) || 0
+
+      const rowDate = String(row?.date ?? '').trim()
+      if (rowDate && rowDate !== '—') displayDates.add(rowDate)
+
+      if (eventValue !== 0 && eventSide) {
+        const label = eventLabel ?? formatConciliacaoPorDataEventColumnLabel(row.event, eventSide)
+        const key = `${eventSide}__${label}`
+        grouped.eventColumnsMap[key] = {
+          label,
+          side: eventSide,
+          valueCents: (grouped.eventColumnsMap[key]?.valueCents ?? 0) + eventValue,
+        }
+      }
+
+      orgaoGroups.set(orgaoKey, grouped)
+    }
+
+    for (const [orgaoKey, grouped] of orgaoGroups.entries()) {
+      const tarifaMeta = tarifasByOrgao.get(orgaoKey)
+      const tarifaCents =
+        tarifaMeta?.oldestLiquidationDate && tarifaMeta.oldestLiquidationDate === dateKey
+          ? Number(tarifaMeta.totalCents ?? 0) || 0
+          : 0
+      if (tarifaCents !== 0) {
+        grouped.totalDebitCents += tarifaCents
+        const label = 'DÉBITO - TARIFAS'
+        const key = `debit__${label}`
+        grouped.eventColumnsMap[key] = {
+          label,
+          side: 'debit',
+          valueCents: (grouped.eventColumnsMap[key]?.valueCents ?? 0) + tarifaCents,
+        }
+      }
+    }
+
+    const aggregateEventMap = new Map<
+      string,
+      {
+        label: string
+        side: 'debit' | 'credit'
+        valueCents: number
+      }
+    >()
+    let recursoRecebidoCents = 0
+    let totalDebitadoCents = 0
+    let totalCreditCents = 0
+
+    for (const grouped of orgaoGroups.values()) {
+      recursoRecebidoCents += grouped.orgaoReceivedCents
+      totalDebitadoCents += grouped.totalDebitCents
+      totalCreditCents += grouped.totalCreditCents
+      for (const [key, col] of Object.entries(grouped.eventColumnsMap)) {
+        const current = aggregateEventMap.get(key) ?? {
+          label: col.label,
+          side: col.side,
+          valueCents: 0,
+        }
+        current.valueCents += col.valueCents
+        aggregateEventMap.set(key, current)
+      }
+    }
+
+    const eventColumns = Array.from(aggregateEventMap.values()).sort((a, b) => {
+      if (a.side !== b.side) return a.side === 'debit' ? -1 : 1
+      return a.label.localeCompare(b.label, 'pt-BR')
+    })
+    const displayDateValue =
+      displayDates.size === 1 ? Array.from(displayDates)[0] ?? dateKey : dateKey
+    const displayDateLabel =
+      displayDates.size === 1 && displayDateValue !== dateKey ? 'Data de Vencimento' : 'Data de Liquidação'
+    const orgaoBreakdown = Array.from(orgaoGroups.values())
+      .map((grouped) => ({
+        orgao: grouped.orgao,
+        orgaoReceivedCents: grouped.orgaoReceivedCents,
+        totalDebitCents: grouped.totalDebitCents,
+        totalCreditCents: grouped.totalCreditCents,
+        saldoCents: grouped.totalDebitCents - grouped.orgaoReceivedCents + grouped.totalCreditCents,
+      }))
+      .sort((a, b) => String(a.orgao ?? '').localeCompare(String(b.orgao ?? ''), 'pt-BR'))
+
+    return {
+      liquidationDate: dateKey,
+      orgao: 'Todos os órgãos',
+      displayDateLabel,
+      displayDateValue,
+      orgaoReceivedCents: recursoRecebidoCents,
+      totalDebitCents: totalDebitadoCents,
+      saldoCents: totalDebitadoCents - recursoRecebidoCents + totalCreditCents,
+      values: {},
+      eventColumns,
+      orgaoBreakdown,
+    }
+  }
+
   const ptBrMoneyToCents = (value: string) => {
     const cleaned = String(value ?? '')
       .trim()
@@ -1876,6 +4507,101 @@ export default function CreditoPage() {
     const n = Number(cleaned)
     if (!Number.isFinite(n)) return 0
     return Math.round(n * 100)
+  }
+
+  const sumRecursoRecebidoMenorDebitoCentsFromRelatorioRows = (
+    rows: Array<{ ocorrencia: any | null; ocorrencias?: any[] }> | null,
+  ) => {
+    const list = Array.isArray(rows) ? rows : []
+    const seen = new Set<number>()
+    let total = 0
+    for (const r of list) {
+      const occsRaw = [
+        ...(r?.ocorrencia ? [r.ocorrencia] : []),
+        ...(Array.isArray(r?.ocorrencias) ? r.ocorrencias : []),
+      ]
+      for (const o of occsRaw) {
+        const id = Number(o?.id)
+        if (!Number.isFinite(id) || id <= 0) continue
+        if (seen.has(id)) continue
+        seen.add(id)
+        if (Boolean(o?.noDebitInAccount)) continue
+        const action = String(o?.action ?? '').trim()
+        const isRecursoRecebidoMenor =
+          action === 'recurso_recebido_a_menor_relatorio_sisbr' || action.startsWith('recurso_recebido_a_menor')
+        if (!isRecursoRecebidoMenor) continue
+        const valueRaw = String(o?.debitAccountValue ?? '').trim()
+        if (!valueRaw) continue
+        total += ptBrMoneyToCents(valueRaw)
+      }
+    }
+    return total
+  }
+
+  const sumRecursoRecebidoMaiorDevolucaoCentsFromRelatorioRows = (
+    rows: Array<{ ocorrencia: any | null; ocorrencias?: any[] }> | null,
+  ) => {
+    const list = Array.isArray(rows) ? rows : []
+    const seen = new Set<number>()
+    let total = 0
+    for (const r of list) {
+      const occsRaw = [
+        ...(r?.ocorrencia ? [r.ocorrencia] : []),
+        ...(Array.isArray(r?.ocorrencias) ? r.ocorrencias : []),
+      ]
+      for (const o of occsRaw) {
+        const id = Number(o?.id)
+        if (!Number.isFinite(id) || id <= 0) continue
+        if (seen.has(id)) continue
+        seen.add(id)
+        const action = String(o?.action ?? '').trim()
+        const isRecursoRecebidoMaior =
+          action === 'recurso_recebido_a_maior_relatorio_sisbr' || action.startsWith('recurso_recebido_a_maior')
+        if (!isRecursoRecebidoMaior) continue
+        const valueRaw = String(o?.devolucaoValue ?? '').trim()
+        if (!valueRaw) continue
+        total += ptBrMoneyToCents(valueRaw)
+      }
+    }
+    return total
+  }
+
+  const buildRecursoRecebidoMenorDefaultJustification = (
+    debitValueRaw: string,
+    differenceValueRaw: string,
+    noDebitInAccount: boolean,
+  ) => {
+    if (noDebitInAccount) {
+      const cents = ptBrMoneyToCents(differenceValueRaw)
+      const label = cents > 0 ? `R$ ${centsToPtBr(cents)}` : '[inserir valor]'
+      return `Diferença identificada no repasse (recurso recebido a menor) no valor de ${label}, sem débito em conta corrente do cooperado.`
+    }
+    const debitCents = ptBrMoneyToCents(debitValueRaw)
+    const debitLabel = debitCents > 0 ? `R$ ${centsToPtBr(debitCents)}` : '[inserir valor]'
+    return `Valor debitado da diferença ${debitLabel} debitado em conta do cooperado, ja autorizada pela cooperada.`
+  }
+
+  const buildRecursoRecebidoMaiorDefaultJustification = (devolucaoValueRaw: string) => {
+    const devolucaoCents = ptBrMoneyToCents(devolucaoValueRaw)
+    const devolucaoLabel = devolucaoCents > 0 ? `R$ ${centsToPtBr(devolucaoCents)}` : '[inserir valor]'
+    return `Valor Recebido a Maior ${devolucaoLabel} realizao o crédito na conta do cooperado.`
+  }
+
+  const buildDevolucaoParcialAverbacaoDefaultJustification = (devolucaoValueRaw: string) => {
+    const devolucaoCents = ptBrMoneyToCents(devolucaoValueRaw)
+    const devolucaoLabel = devolucaoCents > 0 ? `R$ ${centsToPtBr(devolucaoCents)}` : '[inserir valor]'
+    return `Devolução Parcial (Averbação) com valor devolvido de ${devolucaoLabel}.`
+  }
+
+  const buildLiquidacaoRecursoJudicalDefaultJustification = (liquidatedValueRaw: string) => {
+    const liquidatedCents = ptBrMoneyToCents(liquidatedValueRaw)
+    const liquidatedLabel = liquidatedCents > 0 ? `R$ ${centsToPtBr(liquidatedCents)}` : '[inserir valor]'
+    return `Realizado a liquidação em conformidade ao acordo judical ${liquidatedLabel}.`
+  }
+
+  const buildLiquidacaoAntecipadaViaCaixaDefaultJustification = (antecipacaoValueRaw: string) => {
+    const label = antecipacaoValueRaw.trim() ? antecipacaoValueRaw.trim() : '[inserir valor]'
+    return `Contrato Antecipado via Caixa no valor de ${label}`
   }
 
   useEffect(() => {
@@ -1906,6 +4632,112 @@ export default function CreditoPage() {
     relatorioOcorrenciaAction,
     relatorioRecursoJudicialAutoJustification,
     relatorioRecursoJudicialNovoValor,
+  ])
+
+  useEffect(() => {
+    if (relatorioOcorrenciaAction !== 'recurso_recebido_a_menor_relatorio_sisbr') return
+    if (!ocorrenciaModal) return
+    const cpfDigits = String(ocorrenciaModal.cpf ?? '').replace(/\D/g, '')
+    const wantedCents = ptBrMoneyToCents(String(ocorrenciaModal.value ?? ''))
+    const recurso = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
+    const candidates = recurso
+      .filter((x) => !x?.hideInFront)
+      .filter((x) => String(x?.cpf ?? '').replace(/\D/g, '') === cpfDigits)
+      .filter((x) => x?.status === 'pendencia')
+      .map((x) => ({ cents: ptBrMoneyToCents(String(x?.value ?? '')) }))
+      .filter((x) => x.cents > 0 && x.cents < wantedCents)
+      .sort((a, b) => b.cents - a.cents)
+    const diffCents = candidates.length > 0 ? Math.max(0, wantedCents - candidates[0].cents) : 0
+    const computed = diffCents > 0 ? centsToPtBr(diffCents) : ''
+    setRelatorioRecursoRecebidoMenorDifferenceValor((prev) => (prev.trim() ? prev : computed))
+    const template = buildRecursoRecebidoMenorDefaultJustification(
+      relatorioRecursoRecebidoMenorDebitoValor,
+      relatorioRecursoRecebidoMenorDifferenceValor || computed,
+      relatorioRecursoRecebidoMenorNoDebitInAccount,
+    )
+    setRelatorioOcorrenciaJustification((prev) =>
+      relatorioRecursoRecebidoMenorAutoJustification || !prev.trim() ? template : prev,
+    )
+  }, [
+    buildRecursoRecebidoMenorDefaultJustification,
+    centsToPtBr,
+    conciliacaoData,
+    ocorrenciaModal,
+    ptBrMoneyToCents,
+    relatorioOcorrenciaAction,
+    relatorioRecursoRecebidoMenorAutoJustification,
+    relatorioRecursoRecebidoMenorDebitoValor,
+    relatorioRecursoRecebidoMenorDifferenceValor,
+    relatorioRecursoRecebidoMenorNoDebitInAccount,
+  ])
+
+  useEffect(() => {
+    if (relatorioOcorrenciaAction !== 'recurso_recebido_a_maior_relatorio_sisbr') return
+    const template = buildRecursoRecebidoMaiorDefaultJustification(
+      relatorioRecursoRecebidoMaiorDevolucaoValor,
+    )
+    setRelatorioOcorrenciaJustification((prev) =>
+      relatorioRecursoRecebidoMaiorAutoJustification || !prev.trim() ? template : prev,
+    )
+  }, [
+    buildRecursoRecebidoMaiorDefaultJustification,
+    relatorioOcorrenciaAction,
+    relatorioRecursoRecebidoMaiorAutoJustification,
+    relatorioRecursoRecebidoMaiorDevolucaoValor,
+  ])
+
+  useEffect(() => {
+    if (relatorioOcorrenciaAction !== 'devolucao_parcial_averbacao_relatorio_sisbr') return
+    const template = buildDevolucaoParcialAverbacaoDefaultJustification(
+      relatorioDevolucaoParcialDevolucaoValor,
+    )
+    setRelatorioOcorrenciaJustification((prev) => (!prev.trim() ? template : prev))
+  }, [
+    buildDevolucaoParcialAverbacaoDefaultJustification,
+    relatorioDevolucaoParcialDevolucaoValor,
+    relatorioOcorrenciaAction,
+  ])
+
+  useEffect(() => {
+    if (relatorioOcorrenciaAction !== 'liquidacao_recurso_judicial_relatorio_sisbr') return
+    const template = buildLiquidacaoRecursoJudicalDefaultJustification(
+      relatorioLiquidacaoRecursoJudicalValor,
+    )
+    setRelatorioOcorrenciaJustification((prev) =>
+      relatorioLiquidacaoRecursoJudicalAutoJustification || !prev.trim() ? template : prev,
+    )
+  }, [
+    buildLiquidacaoRecursoJudicalDefaultJustification,
+    relatorioLiquidacaoRecursoJudicalAutoJustification,
+    relatorioLiquidacaoRecursoJudicalValor,
+    relatorioOcorrenciaAction,
+  ])
+
+  useEffect(() => {
+    if (relatorioOcorrenciaAction !== 'estorno_valores_relatorio_sisbr') return
+    if (!ocorrenciaModal) return
+    const estornoLiquidacaoDate = relatorioEstornoLiquidacaoDate.trim()
+    const estornoDate = relatorioEstornoDate.trim()
+    const estornoValue = relatorioEstornoValor.trim()
+    const novaLiquidacaoDate = getRelatorioNovaLiquidacaoDate(ocorrenciaModal).trim()
+    const correctValue = withCurrency(ocorrenciaModal.value)
+    const template = [
+      'Estorno de valores.',
+      `Estorno da liquidação do dia ${estornoLiquidacaoDate || '-'} foi em ${estornoDate || '-'} no valor de ${estornoValue ? withCurrency(estornoValue) : '-'}.`,
+      `Realizada uma nova liquidação no dia ${novaLiquidacaoDate || '-'} no valor de ${correctValue}.`,
+    ].join('\n')
+    setRelatorioOcorrenciaJustification((prev) =>
+      relatorioEstornoAutoJustification || !prev.trim() ? template : prev,
+    )
+  }, [
+    ocorrenciaModal,
+    getRelatorioNovaLiquidacaoDate,
+    relatorioEstornoAutoJustification,
+    relatorioEstornoLiquidacaoDate,
+    relatorioEstornoDate,
+    relatorioEstornoValor,
+    relatorioOcorrenciaAction,
+    withCurrency,
   ])
 
   const normalizeLinkKey = (cpf: string, nome: string) => {
@@ -1941,6 +4773,8 @@ export default function CreditoPage() {
   const persistAccess = (
     nextEmails: string[],
     nextRoles: Record<string, 'admin' | 'usuario'>,
+    nextMenus: Record<string, AccessMenuPermission[]>,
+    nextFlowStages: Record<string, AccessFlowStagePermission[]>,
   ) => {
     const fixed = accessFixedEmail.trim().toLowerCase()
     const normalizedEmails = nextEmails
@@ -1952,11 +4786,27 @@ export default function CreditoPage() {
       ? normalizedEmails.map((e) => (e === fixed ? fixed : e))
       : [fixed, ...normalizedEmails]
 
-    const entries: Array<{ email: string; role: 'admin' | 'usuario' }> =
+    const entries: Array<{
+      email: string
+      role: 'admin' | 'usuario'
+      menus: AccessMenuPermission[]
+      flowStages: AccessFlowStagePermission[]
+    }> =
       withFixed.map(
-        (email): { email: string; role: 'admin' | 'usuario' } => ({
+        (email): {
+          email: string
+          role: 'admin' | 'usuario'
+          menus: AccessMenuPermission[]
+          flowStages: AccessFlowStagePermission[]
+        } => ({
           email,
           role: email === fixed ? 'admin' : (nextRoles[email] ?? 'usuario'),
+          menus:
+            email === fixed
+              ? [...ALL_ACCESS_MENU_PERMISSIONS]
+              : normalizeAccessMenuPermissions(nextMenus[email]),
+          flowStages:
+            normalizeAccessFlowStagePermissions(nextFlowStages[email], false),
         }),
       )
 
@@ -1973,7 +4823,12 @@ export default function CreditoPage() {
       .then(async (res) => {
         const data = (await res.json().catch(() => null)) as
           | {
-              entries?: Array<{ email?: string; role?: 'admin' | 'usuario' }>
+              entries?: Array<{
+                email?: string
+                role?: 'admin' | 'usuario'
+                menus?: AccessMenuPermission[]
+                flowStages?: AccessFlowStagePermission[]
+              }>
               fixedEmail?: string
               message?: string
             }
@@ -1985,12 +4840,24 @@ export default function CreditoPage() {
         }
         const fixedRes = (data?.fixedEmail || fixed).trim().toLowerCase()
         const entriesRaw = Array.isArray(data?.entries) ? data?.entries : entries
-        const finalEntries: Array<{ email: string; role: 'admin' | 'usuario' }> =
+        const finalEntries: Array<{
+          email: string
+          role: 'admin' | 'usuario'
+          menus: AccessMenuPermission[]
+          flowStages: AccessFlowStagePermission[]
+        }> =
           entriesRaw
             .map(
-              (e): { email: string; role: 'admin' | 'usuario' } => ({
+              (e): {
+                email: string
+                role: 'admin' | 'usuario'
+                menus: AccessMenuPermission[]
+                flowStages: AccessFlowStagePermission[]
+              } => ({
                 email: String(e.email ?? '').trim().toLowerCase(),
                 role: e.role === 'admin' ? 'admin' : 'usuario',
+                menus: normalizeAccessMenuPermissions(e.menus),
+                flowStages: normalizeAccessFlowStagePermissions(e.flowStages, false),
               }),
             )
             .filter((e) => Boolean(e.email))
@@ -1998,7 +4865,17 @@ export default function CreditoPage() {
               (e, i, arr) => arr.findIndex((x) => x.email === e.email) === i,
             )
             .map((e) =>
-              e.email === fixedRes ? { email: fixedRes, role: 'admin' } : e,
+              e.email === fixedRes
+                ? {
+                    email: fixedRes,
+                    role: 'admin',
+                    menus: [...ALL_ACCESS_MENU_PERMISSIONS],
+                flowStages: normalizeAccessFlowStagePermissions(
+                  accessFlowStagesByEmail[accessFixedEmail],
+                  false,
+                ),
+                  }
+                : e,
             )
 
         const roleMap = finalEntries.reduce(
@@ -2008,10 +4885,26 @@ export default function CreditoPage() {
           },
           {} as Record<string, 'admin' | 'usuario'>,
         )
+        const menuMap = finalEntries.reduce(
+          (acc, e) => {
+            acc[e.email] = e.menus
+            return acc
+          },
+          {} as Record<string, AccessMenuPermission[]>,
+        )
+        const flowStageMap = finalEntries.reduce(
+          (acc, e) => {
+            acc[e.email] = e.flowStages
+            return acc
+          },
+          {} as Record<string, AccessFlowStagePermission[]>,
+        )
 
         setAccessFixedEmail(fixedRes)
         setAccessEmails(finalEntries.map((e) => e.email))
         setAccessRoleByEmail(roleMap)
+        setAccessMenusByEmail(menuMap)
+        setAccessFlowStagesByEmail(flowStageMap)
       })
       .catch((e) => {
         setAccessEmailsError(
@@ -2026,9 +4919,12 @@ export default function CreditoPage() {
   useEffect(() => {
     if (
       view !== 'conciliacao-extratos' &&
+      view !== 'fluxo-pendencias' &&
       view !== 'home' &&
       view !== 'dashboard' &&
       view !== 'relatorios-valores' &&
+      view !== 'relatorios-conciliacao-data' &&
+      view !== 'relatorios-ocorrencias' &&
       view !== 'relatorios-auditoria'
     )
       return
@@ -2074,20 +4970,12 @@ export default function CreditoPage() {
   useEffect(() => {
     if (
       view !== 'conciliacao-extratos' &&
-      view !== 'home' &&
       view !== 'dashboard' &&
-      view !== 'relatorios-valores'
+      view !== 'relatorios-valores' &&
+      view !== 'relatorios-ocorrencias'
     )
       return
     if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
-    if (!conciliacaoOrgao.trim()) {
-      setConciliacaoData(null)
-      setConciliacaoExpandedKeys([])
-      setConciliacaoSelectedPairId(null)
-      setConciliacaoSelectedPersonKey(null)
-      setConciliacaoLoadedAtIso(null)
-      return
-    }
 
     const requestId = conciliacaoFetchRef.current + 1
     conciliacaoFetchRef.current = requestId
@@ -2097,66 +4985,122 @@ export default function CreditoPage() {
       setConciliacaoError(null)
     })
 
-    const orgaoQuery = `&orgao=${encodeURIComponent(conciliacaoOrgao.trim())}`
     ;(async () => {
-      const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(conciliacaoMonth)}${orgaoQuery}`
       const retryStatuses = new Set([502, 503, 504])
       const retryDelaysMs = [600, 1600, 3200]
       let lastError: unknown = null
+      const orgaoSelected = conciliacaoOrgao.trim()
+      const orgaosToFetch = orgaoSelected
+        ? [orgaoSelected]
+        : conciliacaoOrgaoOptions.map((o) => String(o || '').trim()).filter(Boolean)
+      if (orgaosToFetch.length === 0) {
+        setConciliacaoData(null)
+        setConciliacaoExpandedKeys([])
+        setConciliacaoSelectedPairId(null)
+        setConciliacaoSelectedPersonKey(null)
+        setConciliacaoLoadedAtIso(null)
+        return
+      }
 
-      for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
-        try {
-          const res = await fetch(url)
-          const data = (await res.json().catch(() => null)) as ConciliacaoResponse | null
-          if (!res.ok) {
-            if (retryStatuses.has(res.status) && attempt < retryDelaysMs.length) {
-              lastError = new Error(`Falha ao conciliar (HTTP ${res.status}).`)
+      const mergedRecurso: any[] = []
+      const mergedRelatorio: any[] = []
+      let bestUpdatedAt: string | null = null
+      let baseData: any | null = null
+
+      for (const orgao of orgaosToFetch) {
+        if (conciliacaoFetchRef.current !== requestId) return
+        const orgaoQuery = `&orgao=${encodeURIComponent(orgao)}`
+        const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(conciliacaoMonth)}${orgaoQuery}`
+
+        let ok = false
+        for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+          try {
+            const res = await fetch(url)
+            const data = (await res.json().catch(() => null)) as ConciliacaoResponse | null
+            if (!res.ok) {
+              if (retryStatuses.has(res.status) && attempt < retryDelaysMs.length) {
+                lastError = new Error(`Falha ao conciliar (HTTP ${res.status}).`)
+                await new Promise((r) => setTimeout(r, retryDelaysMs[attempt]))
+                continue
+              }
+              throw new Error(
+                data && 'message' in data ? data.message : `Falha ao conciliar (HTTP ${res.status}).`,
+              )
+            }
+            baseData = baseData ?? (data as any)
+            const recurso = Array.isArray((data as any)?.recurso) ? (data as any).recurso : []
+            const relatorio = Array.isArray((data as any)?.relatorio) ? (data as any).relatorio : []
+            for (const x of recurso) {
+              if (x && typeof x === 'object' && !Array.isArray(x)) {
+                mergedRecurso.push({ ...(x as any), orgao: (x as any).orgao ?? orgao })
+              } else {
+                mergedRecurso.push(x)
+              }
+            }
+            for (const x of relatorio) {
+              if (x && typeof x === 'object' && !Array.isArray(x)) {
+                mergedRelatorio.push({ ...(x as any), orgao: (x as any).orgao ?? orgao })
+              } else {
+                mergedRelatorio.push(x)
+              }
+            }
+            const updatedAt = String((data as any)?.lastUpdatedAt ?? '').trim()
+            if (updatedAt && (!bestUpdatedAt || updatedAt.localeCompare(bestUpdatedAt) > 0)) {
+              bestUpdatedAt = updatedAt
+            }
+            ok = true
+            break
+          } catch (e) {
+            lastError = e
+            const isNetwork = e instanceof TypeError
+            if (isNetwork && attempt < retryDelaysMs.length) {
               await new Promise((r) => setTimeout(r, retryDelaysMs[attempt]))
               continue
             }
-            throw new Error(
-              data && 'message' in data ? data.message : `Falha ao conciliar (HTTP ${res.status}).`,
-            )
+            break
           }
-          if (conciliacaoFetchRef.current !== requestId) return
-          setConciliacaoData(data as NonNullable<typeof conciliacaoData>)
-          setConciliacaoLoadedAtIso((data as any)?.lastUpdatedAt ?? null)
-          setConciliacaoExpandedKeys([])
-          setConciliacaoSelectedPairId(null)
-          setConciliacaoSelectedPersonKey(null)
-          return
-        } catch (e) {
-          lastError = e
-          const isNetwork = e instanceof TypeError
-          if (isNetwork && attempt < retryDelaysMs.length) {
-            await new Promise((r) => setTimeout(r, retryDelaysMs[attempt]))
-            continue
-          }
-          break
         }
+        if (!ok) break
       }
 
       if (conciliacaoFetchRef.current !== requestId) return
-      const message =
-        lastError instanceof Error
-          ? lastError.message
-          : 'Falha ao conciliar.'
-      setConciliacaoError(message)
-      setConciliacaoData(null)
+      if (!baseData) {
+        const message =
+          lastError instanceof Error
+            ? lastError.message
+            : 'Falha ao conciliar.'
+        setConciliacaoError(message)
+        setConciliacaoData(null)
+        setConciliacaoSelectedPairId(null)
+        setConciliacaoSelectedPersonKey(null)
+        setConciliacaoLoadedAtIso(null)
+        return
+      }
+
+      const finalData =
+        orgaosToFetch.length === 1
+          ? ({ ...baseData, recurso: mergedRecurso, relatorio: mergedRelatorio } as any)
+          : ({
+              ...baseData,
+              recurso: mergedRecurso,
+              relatorio: mergedRelatorio,
+              closed: { isClosed: false, closedVencimentos: [] },
+            } as any)
+      setConciliacaoData(finalData as NonNullable<typeof conciliacaoData>)
+      setConciliacaoLoadedAtIso(bestUpdatedAt ?? (finalData as any)?.lastUpdatedAt ?? null)
+      setConciliacaoExpandedKeys([])
       setConciliacaoSelectedPairId(null)
       setConciliacaoSelectedPersonKey(null)
-      setConciliacaoLoadedAtIso(null)
     })()
       .finally(() => {
         if (conciliacaoFetchRef.current !== requestId) return
         setConciliacaoLoading(false)
       })
-  }, [conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, view])
+  }, [conciliacaoMonth, conciliacaoMonthOptions, conciliacaoOrgao, conciliacaoOrgaoOptions, view])
 
   const reloadConciliacaoKeepExpanded = async () => {
     if (view !== 'conciliacao-extratos') return
     if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
-    if (!conciliacaoOrgao.trim()) return
 
     const requestId = conciliacaoFetchRef.current + 1
     conciliacaoFetchRef.current = requestId
@@ -2164,48 +5108,96 @@ export default function CreditoPage() {
     setConciliacaoLoading(true)
     setConciliacaoError(null)
 
-    const orgaoQuery = `&orgao=${encodeURIComponent(conciliacaoOrgao.trim())}`
     try {
-      const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(conciliacaoMonth)}${orgaoQuery}`
       const retryStatuses = new Set([502, 503, 504])
       const retryDelaysMs = [600, 1600, 3200]
       let lastError: unknown = null
-      let data: ConciliacaoResponse | null = null
-      let okRes: Response | null = null
+      const orgaoSelected = conciliacaoOrgao.trim()
+      const orgaosToFetch = orgaoSelected
+        ? [orgaoSelected]
+        : conciliacaoOrgaoOptions.map((o) => String(o || '').trim()).filter(Boolean)
+      if (orgaosToFetch.length === 0) {
+        setConciliacaoData(null)
+        setConciliacaoSelectedPairId(null)
+        setConciliacaoSelectedPersonKey(null)
+        setConciliacaoLoadedAtIso(null)
+        return
+      }
 
-      for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
-        try {
-          const res = await fetch(url)
-          okRes = res
-          data = (await res.json().catch(() => null)) as ConciliacaoResponse | null
-          if (!res.ok) {
-            if (retryStatuses.has(res.status) && attempt < retryDelaysMs.length) {
-              lastError = new Error(`Falha ao conciliar (HTTP ${res.status}).`)
+      const mergedRecurso: any[] = []
+      const mergedRelatorio: any[] = []
+      let bestUpdatedAt: string | null = null
+      let baseData: any | null = null
+
+      for (const orgao of orgaosToFetch) {
+        if (conciliacaoFetchRef.current !== requestId) return
+        const orgaoQuery = `&orgao=${encodeURIComponent(orgao)}`
+        const url = `/api/consignado/conciliacao/recurso-vs-relatorio?month=${encodeURIComponent(conciliacaoMonth)}${orgaoQuery}`
+        let ok = false
+
+        for (let attempt = 0; attempt <= retryDelaysMs.length; attempt++) {
+          try {
+            const res = await fetch(url)
+            const data = (await res.json().catch(() => null)) as ConciliacaoResponse | null
+            if (!res.ok) {
+              if (retryStatuses.has(res.status) && attempt < retryDelaysMs.length) {
+                lastError = new Error(`Falha ao conciliar (HTTP ${res.status}).`)
+                await new Promise((r) => setTimeout(r, retryDelaysMs[attempt]))
+                continue
+              }
+              throw new Error(
+                data && 'message' in data ? data.message : `Falha ao conciliar (HTTP ${res.status}).`,
+              )
+            }
+            baseData = baseData ?? (data as any)
+            const recurso = Array.isArray((data as any)?.recurso) ? (data as any).recurso : []
+            const relatorio = Array.isArray((data as any)?.relatorio) ? (data as any).relatorio : []
+            for (const x of recurso) {
+              if (x && typeof x === 'object' && !Array.isArray(x)) {
+                mergedRecurso.push({ ...(x as any), orgao: (x as any).orgao ?? orgao })
+              } else {
+                mergedRecurso.push(x)
+              }
+            }
+            for (const x of relatorio) {
+              if (x && typeof x === 'object' && !Array.isArray(x)) {
+                mergedRelatorio.push({ ...(x as any), orgao: (x as any).orgao ?? orgao })
+              } else {
+                mergedRelatorio.push(x)
+              }
+            }
+            const updatedAt = String((data as any)?.lastUpdatedAt ?? '').trim()
+            if (updatedAt && (!bestUpdatedAt || updatedAt.localeCompare(bestUpdatedAt) > 0)) {
+              bestUpdatedAt = updatedAt
+            }
+            ok = true
+            break
+          } catch (e) {
+            lastError = e
+            const isNetwork = e instanceof TypeError
+            if (isNetwork && attempt < retryDelaysMs.length) {
               await new Promise((r) => setTimeout(r, retryDelaysMs[attempt]))
               continue
             }
-            throw new Error(
-              data && 'message' in data ? data.message : `Falha ao conciliar (HTTP ${res.status}).`,
-            )
+            break
           }
-          break
-        } catch (e) {
-          lastError = e
-          const isNetwork = e instanceof TypeError
-          if (isNetwork && attempt < retryDelaysMs.length) {
-            await new Promise((r) => setTimeout(r, retryDelaysMs[attempt]))
-            continue
-          }
-          break
+        }
+        if (!ok) {
+          throw (lastError instanceof Error ? lastError : new Error('Falha ao conciliar.'))
         }
       }
-
-      if (!okRes || !okRes.ok) {
-        throw (lastError instanceof Error ? lastError : new Error('Falha ao conciliar.'))
-      }
       if (conciliacaoFetchRef.current !== requestId) return
-      setConciliacaoData(data as NonNullable<typeof conciliacaoData>)
-      setConciliacaoLoadedAtIso((data as any)?.lastUpdatedAt ?? null)
+      const finalData =
+        orgaosToFetch.length === 1
+          ? ({ ...baseData, recurso: mergedRecurso, relatorio: mergedRelatorio } as any)
+          : ({
+              ...baseData,
+              recurso: mergedRecurso,
+              relatorio: mergedRelatorio,
+              closed: { isClosed: false, closedVencimentos: [] },
+            } as any)
+      setConciliacaoData(finalData as NonNullable<typeof conciliacaoData>)
+      setConciliacaoLoadedAtIso(bestUpdatedAt ?? (finalData as any)?.lastUpdatedAt ?? null)
       setConciliacaoSelectedPairId(null)
       setConciliacaoSelectedPersonKey(null)
     } finally {
@@ -2241,6 +5233,10 @@ export default function CreditoPage() {
       ;(root.style as any).zoom = '0.60'
       const main = root.closest('.main') as HTMLElement | null
       if (main) set(main, { overflow: 'visible' })
+
+      for (const node of Array.from(root.querySelectorAll<HTMLElement>('[data-evidence-skip="1"]'))) {
+        set(node, { display: 'none' })
+      }
 
       for (const node of Array.from(
         root.querySelectorAll<HTMLElement>(
@@ -2290,7 +5286,7 @@ export default function CreditoPage() {
     }
   }
 
-  const exportConciliacaoXlsx = async () => {
+  const exportConciliacaoXlsx = async (opts?: { vencimento?: string | null }) => {
     if (!canExportConciliacaoXlsx) {
       setConciliacaoError('Nenhuma conciliação carregada para exportar.')
       return
@@ -2313,6 +5309,8 @@ export default function CreditoPage() {
         orgao: conciliacaoOrgao.trim(),
         onlyDiff: conciliacaoOnlyDiff ? '1' : '0',
       })
+      const vencimento = String(opts?.vencimento ?? '').trim()
+      if (vencimento) query.set('vencimento', vencimento)
       const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/export.xlsx?${query}`)
       if (!res.ok) {
         const json = (await res.json().catch(() => null)) as null | { message?: string }
@@ -2347,7 +5345,106 @@ export default function CreditoPage() {
     }
   }
 
-  const exportConciliacaoPdf = async () => {
+  const exportRelatoriosValoresListaXlsx = () => {
+    if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) {
+      setConciliacaoError('Selecione uma competência válida para exportar.')
+      return
+    }
+    if (relatoriosValoresListaRows.length === 0) {
+      setConciliacaoError('Nenhuma linha encontrada na lista da conciliação para exportar.')
+      return
+    }
+
+    setConciliacaoExportingXlsx(true)
+    setConciliacaoError(null)
+    const toastId = toast.loading('Preparando XLSX da lista da conciliação...')
+    try {
+      const query = new URLSearchParams({
+        month: conciliacaoMonth,
+        onlyDiff: conciliacaoOnlyDiff ? '1' : '0',
+      })
+      const orgao = conciliacaoOrgao.trim()
+      if (orgao) query.set('orgao', orgao)
+      const vencimento = relatorioVencimentoFilter.trim()
+      if (vencimento) query.set('vencimento', vencimento)
+      const url = `/api/consignado/conciliacao/recurso-vs-relatorio/lista/export.xlsx?${query.toString()}`
+      const a = document.createElement('a')
+      a.href = url
+      a.rel = 'noopener'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      toast.success('Download do XLSX da lista iniciado.', { id: toastId })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao exportar XLSX da lista da conciliação.'
+      setConciliacaoError(msg)
+      toast.error(msg, { id: toastId })
+    } finally {
+      window.setTimeout(() => {
+        setConciliacaoExportingXlsx(false)
+      }, 1200)
+    }
+  }
+
+  const exportRelatoriosOcorrenciasXlsx = async () => {
+    if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) {
+      setConciliacaoError('Selecione uma competência válida para exportar.')
+      return
+    }
+    if (relatoriosOcorrenciasRowsFiltered.length === 0) {
+      setConciliacaoError('Nenhuma ocorrência encontrada para exportar.')
+      return
+    }
+
+    setRelatoriosOcorrenciasExportingXlsx(true)
+    setConciliacaoError(null)
+    const toastId = toast.loading('Exportando XLSX de ocorrências...')
+    try {
+      const query = new URLSearchParams({
+        month: conciliacaoMonth,
+      })
+      if (conciliacaoOrgao.trim()) query.set('orgao', conciliacaoOrgao.trim())
+      const vencimento = String(relatorioVencimentoFilter ?? '').trim()
+      if (vencimento) query.set('vencimento', vencimento)
+      const action = String(relatoriosOcorrenciasActionFilter ?? '').trim()
+      if (action) query.set('action', action)
+      const res = await fetch(
+        `/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencias/export.xlsx?${query}`,
+      )
+      if (!res.ok) {
+        const json = (await res.json().catch(() => null)) as null | { message?: string }
+        throw new Error(json?.message || `Falha ao exportar XLSX (HTTP ${res.status}).`)
+      }
+      const blob = await res.blob()
+      const dispo = String(res.headers.get('content-disposition') ?? '')
+      const fileName =
+        dispo.match(/filename="([^"]+)"/i)?.[1] ||
+        `Ocorrencias_${conciliacaoMonth}_${conciliacaoOrgao.trim() || 'Todos'}.xlsx`
+      const navAny = navigator as any
+      if (typeof navAny?.msSaveOrOpenBlob === 'function') {
+        navAny.msSaveOrOpenBlob(blob, fileName)
+        toast.success('XLSX de ocorrências pronto para download.', { id: toastId })
+        return
+      }
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success('XLSX de ocorrências pronto para download.', { id: toastId })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao exportar XLSX de ocorrências.'
+      setConciliacaoError(msg)
+      toast.error(msg, { id: toastId })
+    } finally {
+      setRelatoriosOcorrenciasExportingXlsx(false)
+    }
+  }
+
+  const exportConciliacaoPdf = async (opts?: { vencimento?: string | null }) => {
     if (!canExportConciliacaoXlsx) {
       setConciliacaoError('Nenhuma conciliação carregada para exportar.')
       return
@@ -2369,7 +5466,12 @@ export default function CreditoPage() {
         month: conciliacaoMonth,
         orgao: conciliacaoOrgao.trim(),
       })
-      const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/export.pdf?${query}`)
+      const vencimento = String(opts?.vencimento ?? '').trim()
+      if (vencimento) query.set('vencimento', vencimento)
+      query.set('_ts', String(Date.now()))
+      const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/export.pdf?${query}`, {
+        cache: 'no-store',
+      })
       if (!res.ok) {
         const json = (await res.json().catch(() => null)) as null | { message?: string }
         throw new Error(json?.message || `Falha ao exportar PDF (HTTP ${res.status}).`)
@@ -2378,7 +5480,7 @@ export default function CreditoPage() {
       const dispo = String(res.headers.get('content-disposition') ?? '')
       const fileName =
         dispo.match(/filename="([^"]+)"/i)?.[1] ||
-        `CONSIGNADOS_CONFERENCIA_${conciliacaoOrgao.trim()}_${conciliacaoMonth}.pdf`
+        `CONSIGNADOS_CONFERENCIA_${conciliacaoOrgao.trim()}_${conciliacaoMonth}_${Date.now()}.pdf`
       const navAny = navigator as any
       if (typeof navAny?.msSaveOrOpenBlob === 'function') {
         navAny.msSaveOrOpenBlob(blob, fileName)
@@ -2403,6 +5505,284 @@ export default function CreditoPage() {
     }
   }
 
+  const exportConciliacaoPorDataXlsx = async () => {
+    if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) {
+      setConciliacaoError('Selecione uma competência válida para exportar.')
+      return
+    }
+
+    setConciliacaoPorDataExportingXlsx(true)
+    setConciliacaoError(null)
+    const toastId = toast.loading('Exportando XLSX por data...')
+    try {
+      const query = new URLSearchParams({
+        month: conciliacaoMonth,
+        dateType: conciliacaoPorDataType,
+      })
+      if (conciliacaoPorDataLiquidationDate) {
+        query.set('liquidationDate', conciliacaoPorDataLiquidationDate)
+      }
+      const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/data/export.xlsx?${query}`)
+      if (!res.ok) {
+        const json = (await res.json().catch(() => null)) as null | { message?: string }
+        throw new Error(json?.message || `Falha ao exportar XLSX por data (HTTP ${res.status}).`)
+      }
+      const blob = await res.blob()
+      const dispo = String(res.headers.get('content-disposition') ?? '')
+      const fileName =
+        dispo.match(/filename="([^"]+)"/i)?.[1] ||
+        `Conciliacao_por_Data_${conciliacaoMonth}_Todos_os_orgaos_${conciliacaoPorDataLiquidationDate || conciliacaoPorDataType}.xlsx`
+      const navAny = navigator as any
+      if (typeof navAny?.msSaveOrOpenBlob === 'function') {
+        navAny.msSaveOrOpenBlob(blob, fileName)
+        toast.success('XLSX por data pronto para download.', { id: toastId })
+        return
+      }
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success('XLSX por data pronto para download.', { id: toastId })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao exportar XLSX por data.'
+      setConciliacaoError(msg)
+      toast.error(msg, { id: toastId })
+    } finally {
+      setConciliacaoPorDataExportingXlsx(false)
+    }
+  }
+
+  const exportConciliacaoPorDataPdf = async () => {
+    if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) {
+      setConciliacaoError('Selecione uma competência válida para exportar.')
+      return
+    }
+
+    setConciliacaoPorDataExportingPdf(true)
+    setConciliacaoError(null)
+    const toastId = toast.loading('Exportando PDF por data...')
+    try {
+      const query = new URLSearchParams({
+        month: conciliacaoMonth,
+        dateType: conciliacaoPorDataType,
+      })
+      if (conciliacaoPorDataLiquidationDate) {
+        query.set('liquidationDate', conciliacaoPorDataLiquidationDate)
+      }
+      const res = await fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/data/export.pdf?${query}`)
+      if (!res.ok) {
+        const json = (await res.json().catch(() => null)) as null | { message?: string }
+        throw new Error(json?.message || `Falha ao exportar PDF por data (HTTP ${res.status}).`)
+      }
+      const blob = await res.blob()
+      const dispo = String(res.headers.get('content-disposition') ?? '')
+      const fileName =
+        dispo.match(/filename="([^"]+)"/i)?.[1] ||
+        `Conciliacao_por_Data_${conciliacaoMonth}_Todos_os_orgaos_${conciliacaoPorDataLiquidationDate || conciliacaoPorDataType}.pdf`
+      const navAny = navigator as any
+      if (typeof navAny?.msSaveOrOpenBlob === 'function') {
+        navAny.msSaveOrOpenBlob(blob, fileName)
+        toast.success('PDF por data pronto para download.', { id: toastId })
+        return
+      }
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success('PDF por data pronto para download.', { id: toastId })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Falha ao exportar PDF por data.'
+      setConciliacaoError(msg)
+      toast.error(msg, { id: toastId })
+    } finally {
+      setConciliacaoPorDataExportingPdf(false)
+    }
+  }
+
+  const openConciliacaoExportModal = (format: 'pdf' | 'xlsx') => {
+    setConciliacaoExportModalFormat(format)
+    const selected = relatorioVencimentoFilter.trim()
+    if (selected) {
+      setConciliacaoExportModalMode('vencimento')
+      setConciliacaoExportModalVencimento(selected)
+    } else {
+      setConciliacaoExportModalMode('total')
+      setConciliacaoExportModalVencimento(relatorioVencimentoOptions[0] ?? '')
+    }
+    setConciliacaoExportModalOpen(true)
+  }
+
+  useEffect(() => {
+    if (view !== 'relatorios-conciliacao-data') return
+    if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) {
+      setConciliacaoPorDataData(null)
+      setConciliacaoPorDataError(null)
+      setConciliacaoPorDataLoading(false)
+      return
+    }
+
+    const query = new URLSearchParams({
+      month: conciliacaoMonth,
+      dateType: conciliacaoPorDataType,
+    })
+    if (conciliacaoPorDataLiquidationDate) {
+      query.set('liquidationDate', conciliacaoPorDataLiquidationDate)
+    }
+
+    let cancelled = false
+    setConciliacaoPorDataLoading(true)
+    setConciliacaoPorDataError(null)
+    fetch(`/api/consignado/conciliacao/recurso-vs-relatorio/data?${query}`)
+      .then(async (res) => {
+        const json = (await res.json().catch(() => null)) as
+          | null
+          | {
+              message?: string
+              monthKey?: string
+              orgaoRaw?: string
+              mode?: 'todos' | 'vencimento' | 'data_liquidacao' | 'liquidacao' | 'devolucao'
+              modeLabel?: string
+              availableLiquidationDates?: string[]
+              selectedLiquidationDate?: string
+              rows?: Array<{
+                date?: string
+                liquidationDate?: string
+                orgaoReceivedDate?: string
+                orgao?: string
+                orgaoReceivedCents?: number
+                event?: string
+                debitCents?: number
+                creditCents?: number
+                saldoCents?: number
+                validation?: unknown
+              }>
+              tarifasByOrgao?: Array<{
+                orgao?: string
+                linhaCents?: number
+                tedCents?: number
+                totalCents?: number
+                oldestLiquidationDate?: string
+              }>
+              totals?: {
+                debitCents?: number
+                creditCents?: number
+                saldoFinalCents?: number
+                tarifaCents?: number
+              }
+            }
+        if (!res.ok) {
+          throw new Error(json?.message || `Falha ao carregar dados por data (HTTP ${res.status}).`)
+        }
+        if (cancelled) return
+        setConciliacaoPorDataData({
+          monthKey: String(json?.monthKey ?? conciliacaoMonth).trim(),
+          orgaoRaw: String(json?.orgaoRaw ?? 'Todos os órgãos').trim(),
+          mode:
+            json?.mode === 'todos'
+              ? 'todos'
+              : json?.mode === 'devolucao'
+              ? 'devolucao'
+              : json?.mode === 'data_liquidacao'
+                ? 'data_liquidacao'
+              : json?.mode === 'liquidacao'
+                ? 'liquidacao'
+                : 'vencimento',
+          modeLabel:
+            String(json?.modeLabel ?? '').trim() ||
+            (conciliacaoPorDataType === 'todos'
+              ? 'Todos'
+              : conciliacaoPorDataType === 'devolucao'
+              ? 'Quitação (data de devolução)'
+              : conciliacaoPorDataType === 'data_liquidacao'
+                ? 'Data de liquidação'
+              : conciliacaoPorDataType === 'liquidacao'
+                ? 'Liquidação fora da data'
+                : 'Vencimento'),
+          availableLiquidationDates: Array.isArray(json?.availableLiquidationDates)
+            ? json.availableLiquidationDates.map((value) => String(value ?? '').trim()).filter(Boolean)
+            : [],
+          selectedLiquidationDate: String(json?.selectedLiquidationDate ?? conciliacaoPorDataLiquidationDate).trim(),
+          rows: Array.isArray(json?.rows)
+            ? json.rows.map((row) => ({
+                date: String(row?.date ?? '').trim(),
+                liquidationDate: String(row?.liquidationDate ?? '').trim(),
+                orgaoReceivedDate: String(row?.orgaoReceivedDate ?? '').trim(),
+                orgao: String(row?.orgao ?? '').trim(),
+                orgaoReceivedCents: Number(row?.orgaoReceivedCents ?? 0) || 0,
+                event: String(row?.event ?? '').trim(),
+                debitCents: Number(row?.debitCents ?? 0) || 0,
+                creditCents: Number(row?.creditCents ?? 0) || 0,
+                saldoCents: Number(row?.saldoCents ?? 0) || 0,
+                validation: normalizeConciliacaoPorDataValidationProcess(row?.validation ?? null),
+              }))
+            : [],
+          tarifasByOrgao: Array.isArray(json?.tarifasByOrgao)
+            ? json.tarifasByOrgao
+                .map((item) => ({
+                  orgao: String(item?.orgao ?? '').trim(),
+                  linhaCents: Number(item?.linhaCents ?? 0) || 0,
+                  tedCents: Number(item?.tedCents ?? 0) || 0,
+                  totalCents: Number(item?.totalCents ?? 0) || 0,
+                  oldestLiquidationDate: String(item?.oldestLiquidationDate ?? '').trim(),
+                }))
+                .filter((item) => item.orgao)
+            : [],
+          totals: {
+            debitCents: Number(json?.totals?.debitCents ?? 0) || 0,
+            creditCents: Number(json?.totals?.creditCents ?? 0) || 0,
+            saldoFinalCents: Number(json?.totals?.saldoFinalCents ?? 0) || 0,
+            tarifaCents: Number(json?.totals?.tarifaCents ?? 0) || 0,
+          },
+        })
+      })
+      .catch((e) => {
+        if (cancelled) return
+        const msg = e instanceof Error ? e.message : 'Falha ao carregar dados por data.'
+        setConciliacaoPorDataData(null)
+        setConciliacaoPorDataError(msg)
+      })
+      .finally(() => {
+        if (!cancelled) setConciliacaoPorDataLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    conciliacaoMonth,
+    conciliacaoMonthOptions,
+    conciliacaoPorDataLiquidationDate,
+    conciliacaoPorDataType,
+    view,
+  ])
+
+  useEffect(() => {
+    if (!conciliacaoPorDataLiquidationDate) return
+    const options = conciliacaoPorDataData?.availableLiquidationDates ?? []
+    if (options.includes(conciliacaoPorDataLiquidationDate)) return
+    setConciliacaoPorDataLiquidationDate('')
+  }, [conciliacaoPorDataData, conciliacaoPorDataLiquidationDate])
+
+  const confirmConciliacaoExport = async () => {
+    const format = conciliacaoExportModalFormat
+    const vencimento =
+      conciliacaoExportModalMode === 'vencimento' ? conciliacaoExportModalVencimento.trim() : ''
+    setConciliacaoExportModalOpen(false)
+    if (format === 'pdf') {
+      await exportConciliacaoPdf({ vencimento: vencimento || null })
+      return
+    }
+    await exportConciliacaoXlsx({ vencimento: vencimento || null })
+  }
+
   const commandActions = useMemo(() => {
     const items: Array<{
       id: string
@@ -2412,25 +5792,51 @@ export default function CreditoPage() {
       enabled?: boolean
       run: () => void | Promise<void>
     }> = [
-      {
-        id: 'go-home',
-        label: 'Home',
-        shortcut: 'H',
-        run: () => setHash('home'),
-      },
-      {
-        id: 'go-dashboard',
-        label: 'Dashboard',
-        shortcut: 'D',
-        run: () => setHash('dashboard'),
-      },
-      {
-        id: 'open-conciliacao',
-        label: 'Abrir conciliação',
-        hint: 'Conciliação • Extratos',
-        shortcut: 'Enter',
-        run: () => setHash('conciliacao-extratos'),
-      },
+      ...(canAccessMenu('home')
+        ? [
+            {
+              id: 'go-home',
+              label: 'Home',
+              shortcut: 'H',
+              run: () => setHash('home'),
+            },
+          ]
+        : []),
+      ...(canAccessMenu('dashboard')
+        ? [
+            {
+              id: 'go-dashboard',
+              label: 'Dashboard',
+              shortcut: 'D',
+              run: () => setHash('dashboard'),
+            },
+          ]
+        : []),
+      ...(canAccessMenu('conciliacao-extratos')
+        ? [
+            {
+              id: 'open-conciliacao',
+              label: 'Abrir conciliação',
+              hint: 'Conciliação • Extratos',
+              shortcut: 'Enter',
+              run: () => setHash('conciliacao-extratos'),
+            },
+          ]
+        : []),
+      ...(canAccessMenu('relatorios-conciliacao-data')
+        ? [
+            {
+              id: 'report-by-date',
+              label: 'Relatórios • Conciliação por data',
+              hint: 'PDF ou XLSX por vencimento e devolução',
+              run: () => {
+                setReportsOpen(true)
+                setSettingsOpen(false)
+                setHash('relatorios-conciliacao-data')
+              },
+            },
+          ]
+        : []),
       {
         id: 'export-xlsx',
         label: 'Exportar XLSX',
@@ -2440,32 +5846,41 @@ export default function CreditoPage() {
           Boolean(canExportConciliacaoXlsx) &&
           Boolean(conciliacaoOrgao.trim()) &&
           conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth),
-        run: () => void exportConciliacaoXlsx(),
+        run: () => openConciliacaoExportModal('xlsx'),
       },
-      {
-        id: 'settings-automacao',
-        label: 'Configurações • Automação',
-        shortcut: 'A',
-        run: () => {
-          setSettingsOpen(true)
-          setReportsOpen(false)
-          setHash('configuracoes-automacao')
-        },
-      },
-      {
-        id: 'settings-acessos',
-        label: 'Configurações • Acessos',
-        shortcut: 'I',
-        enabled: userRole === 'admin',
-        run: () => {
-          setSettingsOpen(true)
-          setReportsOpen(false)
-          setHash('configuracoes-acessos')
-        },
-      },
+      ...(canAccessMenu('configuracoes-automacao')
+        ? [
+            {
+              id: 'settings-automacao',
+              label: 'Configurações • Automação',
+              shortcut: 'A',
+              run: () => {
+                setSettingsOpen(true)
+                setReportsOpen(false)
+                setHash('configuracoes-automacao')
+              },
+            },
+          ]
+        : []),
+      ...(canAccessMenu('configuracoes-acessos')
+        ? [
+            {
+              id: 'settings-acessos',
+              label: 'Configurações • Acessos',
+              shortcut: 'I',
+              enabled: userRole === 'admin',
+              run: () => {
+                setSettingsOpen(true)
+                setReportsOpen(false)
+                setHash('configuracoes-acessos')
+              },
+            },
+          ]
+        : []),
     ]
     return items
   }, [
+    canAccessMenu,
     canExportConciliacaoXlsx,
     conciliacaoMonth,
     conciliacaoMonthOptions,
@@ -2495,12 +5910,21 @@ export default function CreditoPage() {
   useEffect(() => {
     if (!cloneSisbrModal) {
       setCloneSisbrDevolucaoDate('')
+      setCloneSisbrVencimentoDate('')
+      setCloneSisbrTransferModal(null)
+      setCloneSisbrTransferError(null)
+      setCloneSisbrTransferLoading(false)
       return
     }
     if (cloneSisbrAction !== 'quitado_recurso') {
       setCloneSisbrDevolucaoDate('')
     }
-  }, [cloneSisbrAction, cloneSisbrModal])
+    if (cloneSisbrAction !== 'clonar_para_relatorio_sisbr') {
+      setCloneSisbrVencimentoDate('')
+    } else if (!cloneSisbrVencimentoDate.trim()) {
+      setCloneSisbrVencimentoDate(String(cloneSisbrModal.vencimento ?? '').trim())
+    }
+  }, [cloneSisbrAction, cloneSisbrModal, cloneSisbrVencimentoDate])
 
   useEffect(() => {
     if (!cloneSisbrModal) {
@@ -2660,24 +6084,32 @@ export default function CreditoPage() {
       const hasRecursoGroup = isUsableRow(recursoGroupRow)
       const hasRelatorioGroup = isUsableRow(relatorioGroupRow)
 
-      if (hasRecursoPid && hasRelatorioPid) {
+      if (hasRecursoGroup || hasRelatorioGroup) {
+        if (hasRecursoGroup && hasRelatorioGroup) {
+          starts = [recursoGroupRow!]
+          ends = [relatorioGroupRow!]
+        } else if (hasRecursoGroup && relatorioRowsByPerson.length > 0) {
+          starts = [recursoGroupRow!]
+          ends = take(relatorioRowsByPerson)
+        } else if (hasRelatorioGroup && recursoRowsByPerson.length > 0) {
+          starts = take(recursoRowsByPerson)
+          ends = [relatorioGroupRow!]
+        } else if (hasRecursoGroup && hasRelatorioPid) {
+          starts = [recursoGroupRow!]
+          ends = [relatorioRowByPid!]
+        } else if (hasRelatorioGroup && hasRecursoPid) {
+          starts = [recursoRowByPid!]
+          ends = [relatorioGroupRow!]
+        } else if (hasRecursoPid && hasRelatorioPid) {
+          starts = [recursoRowByPid!]
+          ends = [relatorioRowByPid!]
+        } else {
+          setConciliacaoLinkOverlay((prev) => (prev === null ? prev : null))
+          return false
+        }
+      } else if (hasRecursoPid && hasRelatorioPid) {
         starts = [recursoRowByPid!]
         ends = [relatorioRowByPid!]
-      } else if (hasRecursoGroup && relatorioRowsByPerson.length > 0) {
-        starts = [recursoGroupRow!]
-        ends = take(relatorioRowsByPerson)
-      } else if (hasRelatorioGroup && recursoRowsByPerson.length > 0) {
-        starts = take(recursoRowsByPerson)
-        ends = [relatorioGroupRow!]
-      } else if (hasRecursoPid && hasRelatorioGroup) {
-        starts = [recursoRowByPid!]
-        ends = [relatorioGroupRow!]
-      } else if (hasRecursoGroup && hasRelatorioPid) {
-        starts = [recursoGroupRow!]
-        ends = [relatorioRowByPid!]
-      } else if (hasRecursoGroup && hasRelatorioGroup) {
-        starts = [recursoGroupRow!]
-        ends = [relatorioGroupRow!]
       } else {
         setConciliacaoLinkOverlay((prev) => (prev === null ? prev : null))
         return false
@@ -2804,9 +6236,19 @@ export default function CreditoPage() {
   ])
 
   useEffect(() => {
-    if (view !== 'conciliacao-extratos') return
+    if (
+      view !== 'conciliacao-extratos' &&
+      view !== 'relatorios-valores' &&
+      view !== 'relatorios-ocorrencias'
+    )
+      return
     setRelatorioVencimentoFilter('')
   }, [view, conciliacaoMonth, conciliacaoOrgao])
+
+  useEffect(() => {
+    if (view !== 'relatorios-ocorrencias') return
+    setRelatoriosOcorrenciasActionFilter('')
+  }, [view, conciliacaoMonth, conciliacaoOrgao, relatorioVencimentoFilter])
 
   return (
     <div className="credito-root">
@@ -2883,7 +6325,995 @@ export default function CreditoPage() {
           ) : null}
         </AnimatePresence>
       </Dialog.Root>
+      <Dialog.Root
+        open={importModalOpen}
+        onOpenChange={(next) => {
+          if (!next) closeImportProgressModal()
+        }}
+        modal={true}
+      >
+        <AnimatePresence mode="wait">
+          {importModalOpen ? (
+            <Dialog.Portal forceMount>
+              <Dialog.Overlay asChild forceMount>
+                <motion.div
+                  className="import-modal-overlay"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.14 }}
+                />
+              </Dialog.Overlay>
+              <Dialog.Content asChild forceMount onOpenAutoFocus={(e) => e.preventDefault()} onInteractOutside={(e) => e.preventDefault()}>
+                <motion.div
+                  className="import-modal-card-outer"
+                  style={{
+                    position: 'fixed',
+                    top: '50%',
+                    left: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    margin: 0,
+                    padding: 0,
+                    width: 'min(1080px, 94vw)',
+                    maxWidth: '100vw',
+                    zIndex: 2147483001,
+                    pointerEvents: 'auto',
+                    boxSizing: 'border-box',
+                  }}
+                  initial={{ opacity: 0, y: 24, x: '-50%', scale: 0.985 }}
+                  animate={{ opacity: 1, y: 0, x: '-50%', scale: 1 }}
+                  exit={{ opacity: 0, y: 14, x: '-50%', scale: 0.985 }}
+                  transition={{ duration: 0.18, ease: [0.2, 0.8, 0.2, 1] }}
+                >
+                  <div
+                    className="import-modal-card"
+                    role="dialog"
+                    aria-modal="true"
+                  >
+                  <div className="import-modal-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div className="import-modal-icon-wrap">
+                        <Zap size={18} />
+                      </div>
+                      <div>
+                        <Dialog.Title asChild>
+                          <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
+                            {importProgressModal?.phase === 'running'
+                              ? 'Importação em andamento'
+                              : 'Resultado da importação'}
+                          </h3>
+                        </Dialog.Title>
+                        <Dialog.Description asChild>
+                          <p style={{ margin: 0, marginTop: 2, fontSize: 12.5, color: 'rgba(255,255,255,0.6)' }}>
+                            Tipo:{' '}
+                            <span style={{ fontWeight: 600, color: 'rgba(255,255,255,0.85)' }}>
+                              {(() => {
+                                const t = importProgressModal?.target
+                                switch (t) {
+                                  case 'extratos': return 'Extratos Recurso'
+                                  case 'relatorio': return 'Relatório SISBR'
+                                  case 'recurso_alego': return 'Recurso ALEGO'
+                                  case 'recurso_neoconsig_demais': return 'Recurso NEOCONSIG (Demais)'
+                                  case 'recurso_adfego': return 'Recurso ADFEGO'
+                                  case 'recurso_tce': return 'Recurso TCE'
+                                  case 'recurso_tcm': return 'Recurso TCM'
+                                  case 'recurso_tre': return 'Recurso TRE'
+                                  case 'recurso_trt': return 'Recurso TRT'
+                                  case 'recurso_eletra': return 'Recurso Eletra'
+                                  case 'recurso_mpgo': return 'Recurso MPGO'
+                                  case 'recurso_tjgo': return 'Recurso TJGO'
+                                  default: return String(t ?? '-')
+                                }
+                              })()}
+                            </span>
+                            {importProgressModal?.phase === 'running' && importProgressModal.jobId ? (
+                              <span>
+                                {'  •  Job: '}
+                                <code style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.72)' }}>
+                                  {importProgressModal.jobId}
+                                </code>
+                              </span>
+                            ) : null}
+                          </p>
+                        </Dialog.Description>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={closeImportProgressModal}
+                      title="Fechar"
+                      style={{ minWidth: 0, padding: '8px 10px', borderRadius: 999 }}
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+
+                  <div className="import-modal-body">
+                    {importProgressModal?.phase === 'running' ? (
+                      (() => {
+                        const lp = importProgressModal.lastPoll
+                        const status = lp?.status ?? 'queued'
+                        const statusText =
+                          status === 'queued' ? 'Aguardando na fila…' :
+                          status === 'running' ? 'Processando arquivos…' :
+                          status === 'succeeded' ? 'Finalizado com sucesso' :
+                          status === 'failed' ? 'Falha ao processar' :
+                          status === 'cancelled' ? 'Cancelado' : status
+                        const statusClass =
+                          status === 'succeeded' ? 'badge-succeeded' :
+                          status === 'failed' ? 'badge-failed' :
+                          status === 'cancelled' ? 'badge-cancelled' :
+                          'badge-running'
+                        const filesScanned = Number(lp?.totalFilesScanned ?? 0)
+                        const filesMatched = Number(lp?.totalFilesMatched ?? 0)
+                        const rowsInserted = Number(lp?.totalRowsInserted ?? 0)
+                        const rowsSkipped = Number(lp?.totalRowsSkipped ?? 0)
+                        const baseForProgress = Math.max(100, filesMatched * 100 + rowsInserted + rowsSkipped)
+                        const progressRaw =
+                          status === 'queued'
+                            ? 6
+                            : status === 'succeeded'
+                              ? 100
+                              : status === 'failed' || status === 'cancelled'
+                                ? 98
+                                : Math.min(
+                                    95,
+                                    12 + Math.round((((filesScanned + 1) * 18 + (rowsInserted + rowsSkipped)) * 80) / baseForProgress),
+                                  )
+                        const progressPct = Math.max(4, Math.min(100, progressRaw))
+                        const progressFiles = Array.isArray(lp?.progressFiles) ? lp!.progressFiles! : []
+                        return (
+                          <>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+                              <div className="import-spinner" />
+                              <div style={{ flex: 1 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <span className={`badge-status ${statusClass}`}>
+                                      {statusText}
+                                    </span>
+                                  </div>
+                                  <span style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.72)', fontWeight: 600 }}>
+                                    {progressPct}%
+                                  </span>
+                                </div>
+                                <div className="progress-track">
+                                  <div
+                                    className={`progress-fill ${statusClass}`}
+                                    style={{ width: `${progressPct}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="import-grid-cards">
+                              <div className="import-card-stat">
+                                <div className="import-card-stat-label">Arquivos varridos</div>
+                                <div className="import-card-stat-value">{filesScanned}</div>
+                              </div>
+                              <div className="import-card-stat">
+                                <div className="import-card-stat-label">Arquivos compatíveis</div>
+                                <div className="import-card-stat-value">{filesMatched}</div>
+                              </div>
+                              <div className="import-card-stat">
+                                <div className="import-card-stat-label">Linhas inseridas</div>
+                                <div className="import-card-stat-value accent">{rowsInserted}</div>
+                              </div>
+                              <div className="import-card-stat">
+                                <div className="import-card-stat-label">Linhas puladas</div>
+                                <div className="import-card-stat-value muted">{rowsSkipped}</div>
+                              </div>
+                            </div>
+
+                            <div className="import-info-line">
+                              <span>Pasta origem:</span>
+                              <code className="import-mono" title={importProgressModal.folderUrl}>
+                                {importProgressModal.folderUrl}
+                              </code>
+                            </div>
+
+                            {progressFiles.length > 0 ? (
+                              <div style={{ marginTop: 12 }}>
+                                <div style={{ marginBottom: 8, fontWeight: 600, fontSize: 13 }}>
+                                  Arquivos em processamento
+                                </div>
+                                <div className="import-table-wrap">
+                                  <table className="import-result-table">
+                                    <thead>
+                                      <tr>
+                                        <th>#</th>
+                                        <th>Arquivo</th>
+                                        <th>Status</th>
+                                        <th style={{ textAlign: 'right' }}>Inseridas</th>
+                                        <th style={{ textAlign: 'right' }}>Puladas</th>
+                                        <th>Detalhe</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {progressFiles.slice(0, 40).map((pf, idx) => {
+                                        const st = String(pf.status ?? 'queued')
+                                        const statusBadge =
+                                          st === 'done' ? 'badge-succeeded' :
+                                          st === 'error' ? 'badge-failed' :
+                                          st === 'running' ? 'badge-running' : 'badge-queued'
+                                        const stText =
+                                          st === 'done' ? 'Processado' :
+                                          st === 'error' ? 'Erro' :
+                                          st === 'running' ? 'Processando' : 'Fila'
+                                        return (
+                                          <tr key={`pf-${idx}`}>
+                                            <td style={{ width: 46, color: 'rgba(255,255,255,0.48)' }}>{(pf.idx ?? idx + 1)}</td>
+                                            <td style={{ maxWidth: 380, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={pf.fileName}>
+                                              {pf.fileName ?? '-'}
+                                            </td>
+                                            <td><span className={`badge-status ${statusBadge}`}>{stText}</span></td>
+                                            <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{Number(pf.insertedRows ?? 0)}</td>
+                                            <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{Number(pf.skippedRows ?? 0)}</td>
+                                            <td style={{ color: 'rgba(255,255,255,0.72)', fontSize: 12.5, maxWidth: 260 }}>
+                                              {String(pf.errorMessage ?? '').trim() || '-'}
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ) : null}
+                          </>
+                        )
+                      })()
+                    ) : importProgressModal?.phase === 'done' ? (
+                      (() => {
+                        const asyncJob = importProgressModal.finalJob ?? null
+                        const syncResult = importProgressModal.syncResult ?? null
+                        const syncErr = importProgressModal.syncError ?? null
+                        const mode = importProgressModal.mode ?? 'sync'
+                        const jobStatus =
+                          asyncJob?.status ??
+                          (syncErr ? 'failed' : 'succeeded') as 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+                        const isOk = jobStatus === 'succeeded'
+                        const isCancel = jobStatus === 'cancelled'
+                        const statusText =
+                          jobStatus === 'succeeded' ? 'Sucesso' :
+                          jobStatus === 'failed' ? 'Falha' :
+                          jobStatus === 'cancelled' ? 'Cancelado' : jobStatus
+                        const statusClass =
+                          jobStatus === 'succeeded' ? 'badge-succeeded' :
+                          jobStatus === 'failed' ? 'badge-failed' :
+                          jobStatus === 'cancelled' ? 'badge-cancelled' : 'badge-running'
+
+                        const startedIso = asyncJob?.startedAtIso ?? asyncJob?.createdAtIso
+                        const finishedIso = asyncJob?.finishedAtIso
+                        const startedDate = startedIso ? new Date(startedIso) : null
+                        const finishedDate = finishedIso ? new Date(finishedIso) : null
+                        let durationText = '-'
+                        if (startedDate && finishedDate && !Number.isNaN(startedDate.getTime()) && !Number.isNaN(finishedDate.getTime())) {
+                          const ms = Math.max(0, finishedDate.getTime() - startedDate.getTime())
+                          const s = Math.floor(ms / 1000)
+                          const h = Math.floor(s / 3600)
+                          const m = Math.floor((s % 3600) / 60)
+                          const sec = s % 60
+                          durationText = h > 0
+                            ? `${h}h ${String(m).padStart(2, '0')}m ${String(sec).padStart(2, '0')}s`
+                            : m > 0
+                              ? `${m}m ${String(sec).padStart(2, '0')}s`
+                              : `${sec}s`
+                        }
+
+                        const totalFilesScanned = Number(
+                          asyncJob?.totalFilesScanned ?? (syncResult && typeof (syncResult as any).selectedFilesCount === 'number' ? (syncResult as any).selectedFilesCount : 0),
+                        )
+                        const totalFilesMatched = Number(
+                          asyncJob?.totalFilesMatched ?? 0,
+                        )
+                        const totalInserted = Number(
+                          asyncJob?.totalRowsInserted ??
+                            (syncResult
+                              ? (
+                                  Number((syncResult as any).insertedExtratosRows ?? 0) +
+                                  Number((syncResult as any).insertedRelatoriosRows ?? 0) +
+                                  Number((syncResult as any).rows ?? 0)
+                                )
+                              : 0),
+                        )
+                        const totalSkipped = Number(
+                          asyncJob?.totalRowsSkipped ??
+                            (syncResult
+                              ? (
+                                  Number((syncResult as any).skippedExtratosRows ?? 0) +
+                                  Number((syncResult as any).skippedRelatoriosRows ?? 0)
+                                )
+                              : 0),
+                        )
+                        const skippedDup =
+                          syncResult && (typeof (syncResult as any).skippedDuplicates === 'number')
+                            ? Number((syncResult as any).skippedDuplicates)
+                            : 0
+                        const skippedNoCpf =
+                          syncResult && (typeof (syncResult as any).skippedNoCpf === 'number')
+                            ? Number((syncResult as any).skippedNoCpf)
+                            : 0
+                        const dbFile =
+                          (syncResult && typeof (syncResult as any).dbFilePath === 'string'
+                            ? String((syncResult as any).dbFilePath)
+                            : (asyncJob && typeof (asyncJob as any).dbFilePath === 'string'
+                              ? String((asyncJob as any).dbFilePath)
+                              : (asyncJob?.preImportSnapshotPath ? String(asyncJob.preImportSnapshotPath) : '-')))
+                        const errorMsg =
+                          syncErr ?? asyncJob?.errorMessage ?? null
+
+                        const resultsPerKind =
+                          (asyncJob?.resultsPerKind && typeof asyncJob.resultsPerKind === 'object')
+                            ? asyncJob.resultsPerKind
+                            : null
+
+                        type TableFileRow = {
+                          name: string
+                          kind?: string
+                          tableName?: string
+                          batchId?: string
+                          insertedRows: number
+                          skippedRows: number
+                          skippedDup?: number
+                          skippedNoCpf?: number
+                          status: 'importado' | 'ignorado' | 'erro'
+                          detail?: string
+                        }
+                        const fileRows: TableFileRow[] = []
+                        const addRow = (r: TableFileRow) => fileRows.push(r)
+
+                        if (asyncJob?.progressFiles && Array.isArray(asyncJob.progressFiles)) {
+                          for (const pf of asyncJob.progressFiles) {
+                            const statusRaw = String(pf.status ?? 'done')
+                            const ins = Number(pf.insertedRows ?? 0)
+                            const skp = Number(pf.skippedRows ?? 0)
+                            const err = String(pf.errorMessage ?? '').trim()
+                            let s: TableFileRow['status'] = 'importado'
+                            if (statusRaw === 'error') s = 'erro'
+                            else if (err || (ins === 0 && skp === 0)) s = 'ignorado'
+                            addRow({
+                              name: String(pf.fileName ?? '-'),
+                              insertedRows: ins,
+                              skippedRows: skp,
+                              status: s,
+                              detail: err || (ins === 0 && skp === 0 ? 'Sem linhas processadas' : ''),
+                            })
+                          }
+                        }
+
+                        if (resultsPerKind) {
+                          for (const [kindKey, info] of Object.entries(resultsPerKind)) {
+                            const rows = Number(info.totalRowsInserted ?? 0)
+                            const skip = Number(info.totalRowsSkipped ?? 0)
+                            const dup = Number(info.skippedDuplicates ?? 0)
+                            const noCpf = Number(info.skippedNoCpf ?? 0)
+                            const err = String(info.error ?? '').trim()
+                            if (info.importedFiles && Array.isArray(info.importedFiles)) {
+                              for (const f of info.importedFiles) {
+                                addRow({
+                                  name: String(f.name ?? '-'),
+                                  kind: kindKey,
+                                  tableName: String(info.tableName ?? ''),
+                                  insertedRows: Number(f.insertedRows ?? 0),
+                                  skippedRows: Number(f.skippedRows ?? 0),
+                                  skippedDup: dup,
+                                  skippedNoCpf: noCpf,
+                                  status: err ? 'erro' : ((Number(f.insertedRows ?? 0) + Number(f.skippedRows ?? 0) === 0) ? 'ignorado' : 'importado'),
+                                  detail: err || '',
+                                })
+                              }
+                            } else {
+                              addRow({
+                                name: `(perfil ${kindKey})`,
+                                kind: kindKey,
+                                tableName: String(info.tableName ?? ''),
+                                insertedRows: rows,
+                                skippedRows: skip,
+                                skippedDup: dup,
+                                skippedNoCpf: noCpf,
+                                status: err ? 'erro' : ((rows + skip === 0) ? 'ignorado' : 'importado'),
+                                detail: err || '',
+                              })
+                            }
+                          }
+                        }
+
+                        if (syncResult && typeof syncResult === 'object') {
+                          const sr = syncResult as Record<string, any>
+                          if (Array.isArray(sr.extratosFiles)) {
+                            for (const f of sr.extratosFiles) {
+                              const ins = Number(f.insertedRows ?? 0)
+                              const skp = Number(f.skippedRows ?? 0)
+                              const err = String(f.error ?? '').trim()
+                              addRow({
+                                name: String(f.name ?? '-'),
+                                kind: 'extratos',
+                                tableName: 'Extratos',
+                                batchId: String(f.batchId ?? ''),
+                                insertedRows: ins,
+                                skippedRows: skp,
+                                status: err ? 'erro' : ((ins + skp === 0) ? 'ignorado' : 'importado'),
+                                detail: err || '',
+                              })
+                            }
+                          }
+                          if (Array.isArray(sr.relatoriosFiles)) {
+                            for (const f of sr.relatoriosFiles) {
+                              const ins = Number(f.insertedRows ?? 0)
+                              const skp = Number(f.skippedRows ?? 0)
+                              const err = String(f.error ?? '').trim()
+                              const ign = String(f.ignoredReason ?? '').trim()
+                              addRow({
+                                name: String(f.name ?? '-'),
+                                kind: 'relatorio',
+                                tableName: 'Relatório SISBR',
+                                batchId: String(f.batchId ?? ''),
+                                insertedRows: ins,
+                                skippedRows: skp,
+                                status: err ? 'erro' : (ign ? 'ignorado' : ((ins + skp === 0) ? 'ignorado' : 'importado')),
+                                detail: err || ign || '',
+                              })
+                            }
+                          }
+                          if (Array.isArray(sr.filesImported)) {
+                            for (const f of sr.filesImported) {
+                              addRow({
+                                name: String(f.name ?? '-'),
+                                kind: 'recurso (sync)',
+                                insertedRows: Number(f.insertedRows ?? 0),
+                                skippedRows: Number(f.skippedRows ?? 0),
+                                skippedDup: Number(f.skippedDuplicates ?? 0),
+                                skippedNoCpf: Number(f.skippedNoCpf ?? 0),
+                                status: 'importado',
+                              })
+                            }
+                          }
+                        }
+
+                        const generalRows: Array<[string, ReactNode]> = [
+                          ['Status final', (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                              <span className={`badge-status ${statusClass}`}>{statusText}</span>
+                            </span>
+                          )],
+                          ['Modo', <span className="badge-status badge-running" style={{ fontWeight: 600 }}>{mode === 'async' ? 'Assíncrono (Jobs)' : 'Síncrono'}</span>],
+                          ['Tipo importação', (
+                            (() => {
+                              const t = importProgressModal.target
+                              switch (t) {
+                                case 'extratos': return 'Extratos Recurso'
+                                case 'relatorio': return 'Relatório SISBR'
+                                case 'recurso_alego': return 'Recurso ALEGO'
+                                case 'recurso_neoconsig_demais': return 'Recurso NEOCONSIG (Demais)'
+                                case 'recurso_adfego': return 'Recurso ADFEGO'
+                                case 'recurso_tce': return 'Recurso TCE'
+                                case 'recurso_tcm': return 'Recurso TCM'
+                                case 'recurso_tre': return 'Recurso TRE'
+                                case 'recurso_trt': return 'Recurso TRT'
+                                case 'recurso_eletra': return 'Recurso Eletra'
+                                case 'recurso_mpgo': return 'Recurso MPGO'
+                                case 'recurso_tjgo': return 'Recurso TJGO'
+                                default: return String(t ?? '-')
+                              }
+                            })()
+                          )],
+                          ['Pasta / Arquivo origem', <code className="import-mono" title={importProgressModal.folderUrl}>{importProgressModal.folderUrl}</code>],
+                          ['Job ID', <code className="import-mono">{importProgressModal.jobId ?? '-'}</code>],
+                          ['Iniciado em', startedDate && !Number.isNaN(startedDate.getTime()) ? startedDate.toLocaleString('pt-BR') : '-'],
+                          ['Finalizado em', finishedDate && !Number.isNaN(finishedDate.getTime()) ? finishedDate.toLocaleString('pt-BR') : '-'],
+                          ['Duração total', durationText],
+                          ['Arquivos varridos', totalFilesScanned],
+                          ['Arquivos compatíveis', Math.max(totalFilesMatched, fileRows.filter(r => r.status !== 'ignorado').length)],
+                          ['Linhas inseridas (total)', <span style={{ color: '#5EEAD4', fontWeight: 700 }}>{totalInserted}</span>],
+                          ['Linhas puladas (total)', totalSkipped],
+                          ...(skippedDup > 0 ? ([['Puladas por duplicidade', skippedDup]] as [string, number][]) : []),
+                          ...(skippedNoCpf > 0 ? ([['Puladas por CPF ausente', skippedNoCpf]] as [string, number][]) : []),
+                          ['Arquivo SQLite / Snapshot', <code className="import-mono" title={dbFile}>{dbFile}</code>],
+                          ...(errorMsg ? ([['Erro', <span style={{ color: '#FDA4AF', fontWeight: 600, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{errorMsg}</span>]] as [string, ReactNode][]) : []),
+                        ]
+
+                        return (
+                          <>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+                              <span className={`badge-status ${statusClass}`} style={{ fontSize: 14, padding: '8px 14px' }}>
+                                {isOk ? 'Importação concluída com sucesso' : isCancel ? 'Importação cancelada' : 'Falha na importação'}
+                              </span>
+                              <span style={{ color: 'rgba(255,255,255,0.62)', fontSize: 12.5 }}>
+                                Confira os detalhes nas tabelas abaixo. Clique em Fechar para sair.
+                              </span>
+                            </div>
+
+                            <div style={{ marginBottom: 16 }}>
+                              <h4 className="import-section-title">Resumo geral</h4>
+                              <div className="import-table-wrap">
+                                <table className="import-result-table">
+                                  <tbody>
+                                    {generalRows.map(([k, v], i) => (
+                                      <tr key={`gr-${i}`}>
+                                        <th style={{ width: 220, textAlign: 'left', fontWeight: 600, color: 'rgba(255,255,255,0.78)' }}>{k}</th>
+                                        <td>{v as any}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {resultsPerKind ? (
+                              <div style={{ marginBottom: 16 }}>
+                                <h4 className="import-section-title">Por perfil / target</h4>
+                                <div className="import-table-wrap">
+                                  <table className="import-result-table">
+                                    <thead>
+                                      <tr>
+                                        <th>Perfil</th>
+                                        <th style={{ textAlign: 'right' }}>Varridos</th>
+                                        <th style={{ textAlign: 'right' }}>Compatíveis</th>
+                                        <th style={{ textAlign: 'right' }}>Inseridas</th>
+                                        <th style={{ textAlign: 'right' }}>Puladas</th>
+                                        <th style={{ textAlign: 'right' }}>Dup.</th>
+                                        <th style={{ textAlign: 'right' }}>Sem CPF</th>
+                                        <th>Tabela</th>
+                                        <th>Status</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {Object.entries(resultsPerKind).map(([kind, info]) => {
+                                        const err = String(info.error ?? '').trim()
+                                        return (
+                                          <tr key={`rpk-${kind}`}>
+                                            <td style={{ fontWeight: 600 }}>{kind}</td>
+                                            <td style={{ textAlign: 'right' }}>{Number(info.totalFilesScanned ?? 0)}</td>
+                                            <td style={{ textAlign: 'right' }}>{Number(info.totalFilesMatched ?? 0)}</td>
+                                            <td style={{ textAlign: 'right', color: '#5EEAD4' }}>{Number(info.totalRowsInserted ?? 0)}</td>
+                                            <td style={{ textAlign: 'right' }}>{Number(info.totalRowsSkipped ?? 0)}</td>
+                                            <td style={{ textAlign: 'right' }}>{Number(info.skippedDuplicates ?? 0)}</td>
+                                            <td style={{ textAlign: 'right' }}>{Number(info.skippedNoCpf ?? 0)}</td>
+                                            <td><code className="import-mono">{info.tableName ?? '-'}</code></td>
+                                            <td>
+                                              <span className={`badge-status ${err ? 'badge-failed' : 'badge-succeeded'}`}>
+                                                {err ? 'Erro' : 'OK'}
+                                              </span>
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ) : null}
+
+                            {fileRows.length > 0 ? (
+                              <div>
+                                <h4 className="import-section-title">Arquivos processados ({fileRows.length})</h4>
+                                <div className="import-table-wrap">
+                                  <table className="import-result-table">
+                                    <thead>
+                                      <tr>
+                                        <th>Arquivo</th>
+                                        <th>Perfil / Origem</th>
+                                        <th>Tabela / Batch</th>
+                                        <th style={{ textAlign: 'right' }}>Inseridas</th>
+                                        <th style={{ textAlign: 'right' }}>Puladas</th>
+                                        {fileRows.some(r => typeof r.skippedDup === 'number' || typeof r.skippedNoCpf === 'number') ? (
+                                          <>
+                                            <th style={{ textAlign: 'right' }}>Dup.</th>
+                                            <th style={{ textAlign: 'right' }}>Sem CPF</th>
+                                          </>
+                                        ) : null}
+                                        <th>Status</th>
+                                        <th>Detalhe</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {fileRows.map((r, i) => {
+                                        const statusBadge =
+                                          r.status === 'importado' ? 'badge-succeeded' :
+                                          r.status === 'erro' ? 'badge-failed' :
+                                          'badge-cancelled'
+                                        const statusText =
+                                          r.status === 'importado' ? 'Importado' :
+                                          r.status === 'erro' ? 'Erro' :
+                                          'Ignorado'
+                                        const showDupNoCpf = fileRows.some(x => typeof x.skippedDup === 'number' || typeof x.skippedNoCpf === 'number')
+                                        return (
+                                          <tr key={`fr-${i}`}>
+                                            <td style={{ maxWidth: 360, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.name}>
+                                              {r.name}
+                                            </td>
+                                            <td style={{ color: 'rgba(255,255,255,0.75)' }}>{r.kind ?? '-'}</td>
+                                            <td>
+                                              {r.tableName || r.batchId ? (
+                                                <code className="import-mono">
+                                                  {r.tableName ?? ''}
+                                                  {r.tableName && r.batchId ? ' / ' : ''}
+                                                  {r.batchId ?? ''}
+                                                </code>
+                                              ) : '-'}
+                                            </td>
+                                            <td style={{ textAlign: 'right', color: '#5EEAD4', fontVariantNumeric: 'tabular-nums' }}>
+                                              {r.insertedRows}
+                                            </td>
+                                            <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                                              {r.skippedRows}
+                                            </td>
+                                            {showDupNoCpf ? (
+                                              <>
+                                                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.skippedDup ?? 0}</td>
+                                                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.skippedNoCpf ?? 0}</td>
+                                              </>
+                                            ) : null}
+                                            <td><span className={`badge-status ${statusBadge}`}>{statusText}</span></td>
+                                            <td style={{ color: 'rgba(255,255,255,0.75)', fontSize: 12.5, maxWidth: 320 }}>
+                                              {r.detail || '-'}
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ) : null}
+                          </>
+                        )
+                      })()
+                    ) : null}
+                  </div>
+
+                  <div className="import-modal-footer">
+                    {importProgressModal?.phase === 'done' ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => {
+                            try {
+                              const snapshot = {
+                                modal: importProgressModal,
+                                exportedAt: new Date().toISOString(),
+                              }
+                              const text = JSON.stringify(snapshot, null, 2)
+                              if (navigator?.clipboard?.writeText) {
+                                navigator.clipboard.writeText(text).then(() => {
+                                  toast.success('Resumo copiado para a área de transferência')
+                                }).catch(() => {
+                                  toast.message('Copiar não disponível neste contexto')
+                                })
+                              } else {
+                                toast.message('Copiar não disponível neste contexto')
+                              }
+                            } catch {
+                              toast.message('Não foi possível copiar o resumo')
+                            }
+                          }}
+                        >
+                          Copiar resumo
+                        </button>
+                        <div style={{ flex: 1 }} />
+                        <Dialog.Close asChild>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={(e) => {
+                              e.preventDefault()
+                              closeImportProgressModal()
+                            }}
+                          >
+                            Fechar
+                          </button>
+                        </Dialog.Close>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12.5 }}>
+                          A importação continua em segundo plano mesmo que você feche este modal.
+                        </div>
+                        <div style={{ flex: 1 }} />
+                        <Dialog.Close asChild>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            onClick={(e) => {
+                              e.preventDefault()
+                              closeImportProgressModal()
+                            }}
+                          >
+                            Fechar
+                          </button>
+                        </Dialog.Close>
+                      </>
+                    )}
+                  </div>
+                  </div>
+                </motion.div>
+              </Dialog.Content>
+            </Dialog.Portal>
+          ) : null}
+        </AnimatePresence>
+      </Dialog.Root>
       <style>{`
+        .import-modal-overlay {
+          position: fixed !important;
+          inset: 0 !important;
+          width: 100vw !important;
+          height: 100vh !important;
+          background: rgba(0, 0, 0, 0.5) !important;
+          backdrop-filter: blur(3px) !important;
+          -webkit-backdrop-filter: blur(3px) !important;
+          z-index: 2147483000 !important;
+          display: block !important;
+          visibility: visible !important;
+          opacity: 1 !important;
+          padding: 24px 14px !important;
+          box-sizing: border-box !important;
+        }
+        .import-modal-card-outer {
+          position: fixed !important;
+          top: 50% !important;
+          left: 50% !important;
+          right: auto !important;
+          bottom: auto !important;
+          transform: translate(-50%, -50%) !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          z-index: 2147483001 !important;
+          width: min(1080px, 94vw) !important;
+          max-width: 100vw !important;
+          display: block !important;
+          visibility: visible !important;
+          opacity: 1 !important;
+          pointer-events: auto !important;
+          box-sizing: border-box !important;
+        }
+        @media (max-width: 820px) {
+          .import-modal-card-outer {
+            width: 94vw !important;
+          }
+        }
+        .import-modal-card {
+          position: relative !important;
+          top: auto !important;
+          left: auto !important;
+          right: auto !important;
+          bottom: auto !important;
+          transform: none !important;
+          margin: 0 auto !important;
+          width: 100% !important;
+          max-height: min(86vh, 900px) !important;
+          display: flex !important;
+          flex-direction: column !important;
+          gap: 14px !important;
+          padding: 18px 20px 16px !important;
+          background: linear-gradient(180deg, #0e1826 0%, #0b1220 100%);
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 18px;
+          box-shadow: 0 30px 90px rgba(0,0,0,0.6), 0 0 0 1px rgba(0,174,157,0.08);
+          color: rgba(255,255,255,0.92);
+          outline: none;
+          overflow: hidden;
+          box-sizing: border-box !important;
+        }
+        .import-modal-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          padding-bottom: 10px;
+          border-bottom: 1px solid rgba(255,255,255,0.08);
+        }
+        .import-modal-icon-wrap {
+          width: 34px;
+          height: 34px;
+          border-radius: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: linear-gradient(135deg, rgba(0,174,157,0.32) 0%, rgba(0,54,65,0.45) 100%);
+          border: 1px solid rgba(0,174,157,0.25);
+          color: #5EEAD4;
+        }
+        .import-modal-body {
+          flex: 1;
+          min-height: 0;
+          overflow-x: hidden;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+          padding: 4px 6px 6px 2px;
+          scrollbar-width: thin;
+          scrollbar-color: rgba(94,234,212,0.35) rgba(255,255,255,0.04);
+        }
+        .import-modal-body::-webkit-scrollbar { width: 10px; }
+        .import-modal-body::-webkit-scrollbar-track { background: rgba(255,255,255,0.03); border-radius: 8px; }
+        .import-modal-body::-webkit-scrollbar-thumb { background: rgba(94,234,212,0.28); border-radius: 8px; border: 2px solid rgba(0,0,0,0); background-clip: padding-box; }
+        .import-modal-body::-webkit-scrollbar-thumb:hover { background: rgba(94,234,212,0.42); background-clip: padding-box; border: 2px solid rgba(0,0,0,0); }
+        .import-modal-footer {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding-top: 12px;
+          border-top: 1px solid rgba(255,255,255,0.08);
+        }
+        .import-section-title {
+          margin: 0 0 8px;
+          font-size: 13.5px;
+          font-weight: 700;
+          color: rgba(255,255,255,0.82);
+          letter-spacing: 0.01em;
+        }
+        .import-info-line {
+          display: grid;
+          grid-template-columns: max-content 1fr;
+          gap: 10px;
+          align-items: center;
+          margin-top: 14px;
+          font-size: 12.5px;
+          color: rgba(255,255,255,0.68);
+        }
+        .import-mono {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          font-size: 11.8px;
+          color: rgba(255,255,255,0.86);
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.08);
+          padding: 6px 8px;
+          border-radius: 8px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 100%;
+          display: inline-block;
+        }
+        .badge-status {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          padding: 4px 10px;
+          border-radius: 999px;
+          font-size: 11.8px;
+          font-weight: 600;
+          letter-spacing: 0.01em;
+          border: 1px solid transparent;
+        }
+        .badge-running {
+          background: rgba(59,130,246,0.16);
+          border-color: rgba(96,165,250,0.35);
+          color: #BFDBFE;
+        }
+        .badge-queued {
+          background: rgba(245,197,66,0.14);
+          border-color: rgba(250,204,21,0.34);
+          color: #FDE68A;
+        }
+        .badge-succeeded {
+          background: rgba(16,185,129,0.15);
+          border-color: rgba(52,211,153,0.36);
+          color: #6EE7B7;
+        }
+        .badge-failed {
+          background: rgba(239,68,68,0.14);
+          border-color: rgba(248,113,113,0.36);
+          color: #FCA5A5;
+        }
+        .badge-cancelled {
+          background: rgba(148,163,184,0.14);
+          border-color: rgba(203,213,225,0.32);
+          color: #CBD5E1;
+        }
+        @keyframes importSpin {
+          to { transform: rotate(360deg); }
+        }
+        .import-spinner {
+          width: 34px;
+          height: 34px;
+          border-radius: 50%;
+          border: 3px solid rgba(94,234,212,0.22);
+          border-top-color: #2DD4BF;
+          border-right-color: #2DD4BF;
+          animation: importSpin 0.9s linear infinite;
+          flex-shrink: 0;
+          filter: drop-shadow(0 0 10px rgba(45,212,191,0.3));
+        }
+        .progress-track {
+          width: 100%;
+          height: 10px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.08);
+          border: 1px solid rgba(255,255,255,0.07);
+          overflow: hidden;
+        }
+        .progress-fill {
+          height: 100%;
+          border-radius: 999px;
+          background: linear-gradient(90deg, #2DD4BF 0%, #0EA5E9 100%);
+          transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1);
+          box-shadow: 0 0 18px rgba(45,212,191,0.32);
+        }
+        .progress-fill.badge-running { background: linear-gradient(90deg, #38BDF8 0%, #818CF8 100%); box-shadow: 0 0 18px rgba(59,130,246,0.28); }
+        .progress-fill.badge-queued { background: linear-gradient(90deg, #FACC15 0%, #F97316 100%); box-shadow: 0 0 18px rgba(250,204,21,0.25); }
+        .progress-fill.badge-succeeded { background: linear-gradient(90deg, #34D399 0%, #06B6D4 100%); }
+        .progress-fill.badge-failed { background: linear-gradient(90deg, #F87171 0%, #F97316 100%); box-shadow: 0 0 18px rgba(239,68,68,0.26); }
+        .progress-fill.badge-cancelled { background: linear-gradient(90deg, #94A3B8 0%, #64748B 100%); }
+        .import-grid-cards {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 10px;
+          margin-top: 6px;
+        }
+        @media (max-width: 820px) {
+          .import-grid-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+        .import-card-stat {
+          padding: 12px 14px;
+          border-radius: 12px;
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.08);
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+        .import-card-stat-label {
+          font-size: 11.8px;
+          color: rgba(255,255,255,0.62);
+          font-weight: 600;
+          letter-spacing: 0.02em;
+          text-transform: uppercase;
+        }
+        .import-card-stat-value {
+          font-size: 22px;
+          font-weight: 800;
+          color: rgba(255,255,255,0.95);
+          font-variant-numeric: tabular-nums;
+        }
+        .import-card-stat-value.accent { color: #5EEAD4; }
+        .import-card-stat-value.muted { color: rgba(255,255,255,0.68); }
+        .import-table-wrap {
+          width: 100%;
+          max-height: 360px;
+          overflow: auto;
+          border-radius: 12px;
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.03);
+        }
+        .import-result-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 12.8px;
+        }
+        .import-result-table thead th {
+          position: sticky;
+          top: 0;
+          background: rgba(8, 16, 28, 0.95);
+          backdrop-filter: blur(10px);
+          z-index: 1;
+          padding: 10px 12px;
+          color: rgba(255,255,255,0.72);
+          font-weight: 600;
+          text-align: left;
+          border-bottom: 1px solid rgba(255,255,255,0.08);
+          white-space: nowrap;
+        }
+        .import-result-table tbody td,
+        .import-result-table tbody th {
+          padding: 9px 12px;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+          color: rgba(255,255,255,0.9);
+          white-space: nowrap;
+          vertical-align: middle;
+        }
+        .import-result-table tbody tr:last-child td,
+        .import-result-table tbody tr:last-child th {
+          border-bottom: none;
+        }
+        .import-result-table tbody tr:hover td,
+        .import-result-table tbody tr:hover th {
+          background: rgba(94,234,212,0.05);
+        }
         .credito-root {
           --primary: #00AE9D;
           --secondary: #003641;
@@ -3066,6 +7496,7 @@ export default function CreditoPage() {
         .nav-sub button {
           display: flex;
           align-items: center;
+          justify-content: flex-start;
           gap: 10px;
           padding: 10px 12px;
           border-radius: 12px;
@@ -3073,6 +7504,7 @@ export default function CreditoPage() {
           background: rgba(255,255,255,0.04);
           color: rgba(255,255,255,0.78);
           cursor: pointer;
+          text-align: left;
           transition: background 200ms ease, border-color 200ms ease, transform 200ms ease, color 200ms ease;
         }
 
@@ -3094,6 +7526,8 @@ export default function CreditoPage() {
         .nav-sub button strong {
           font-size: 0.9rem;
           font-weight: 650;
+          flex: 1 1 auto;
+          text-align: left;
         }
 
         .nav-sub button span {
@@ -3290,7 +7724,7 @@ export default function CreditoPage() {
         }
 
         @media (min-width: 900px) {
-          .toolbar-home { grid-template-columns: 0.65fr 1.35fr; }
+          .toolbar-home { grid-template-columns: 1fr; }
         }
 
         .home-context-grid {
@@ -3301,7 +7735,7 @@ export default function CreditoPage() {
         }
 
         @media (min-width: 900px) {
-          .home-context-grid { grid-template-columns: 150px 1fr 240px; }
+          .home-context-grid { grid-template-columns: 150px 1fr; }
         }
 
         .field label.home-toggle {
@@ -3352,7 +7786,11 @@ export default function CreditoPage() {
           .form-grid-4 { grid-template-columns: 160px 1fr 240px 260px; }
         }
 
-        .field label {
+        .field {
+          min-width: 0;
+        }
+
+        .field > label {
           display: block;
           margin-bottom: 8px;
           font-size: 0.78rem;
@@ -3527,9 +7965,14 @@ export default function CreditoPage() {
         }
 
         .home-search-card {
-          min-height: 92px;
+          min-height: auto;
           align-items: center;
-          padding: 16px 16px;
+          padding: 0;
+          background: transparent;
+          border: 0;
+          backdrop-filter: none;
+          box-shadow: none;
+          border-radius: 0;
         }
 
         .home-context-card {
@@ -3995,179 +8438,248 @@ export default function CreditoPage() {
               )}
             </div>
 
-            <button
-              type="button"
-              className={['nav-link', view === 'home' ? 'active' : '']
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => setHash('home')}
-              title={collapsed ? 'Home' : undefined}
-            >
-              <span className="nav-icon">
-                <Home size={18} />
-              </span>
-              <span className="nav-text">Home</span>
-              <span className="nav-chevron" />
-            </button>
+            {canAccessMenu('home') ? (
+              <button
+                type="button"
+                className={['nav-link', view === 'home' ? 'active' : '']
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => setHash('home')}
+                title={collapsed ? 'Home' : undefined}
+              >
+                <span className="nav-icon">
+                  <Home size={18} />
+                </span>
+                <span className="nav-text">Home</span>
+                <span className="nav-chevron" />
+              </button>
+            ) : null}
 
-            <button
-              type="button"
-              className={[
-                'nav-link',
-                view.startsWith('conciliacao-') ? 'active' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => {
-                setReportsOpen(false)
-                setSettingsOpen(false)
-                setHash('conciliacao-extratos')
-              }}
-              title={collapsed ? 'Conciliação' : undefined}
-            >
-              <span className="nav-icon">
-                <BadgeDollarSign size={18} />
-              </span>
-              <span className="nav-text">Conciliação</span>
-              <span className="nav-chevron" />
-            </button>
-
-            <button
-              type="button"
-              className={['nav-link', view === 'dashboard' ? 'active' : '']
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => setHash('dashboard')}
-              title={collapsed ? 'Dashboard' : undefined}
-            >
-              <span className="nav-icon">
-                <LayoutDashboard size={18} />
-              </span>
-              <span className="nav-text">Dashboard</span>
-              <span className="nav-chevron" />
-            </button>
-
-            <button
-              type="button"
-              className={[
-                'nav-link',
-                view.startsWith('relatorios-') ? 'active' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => {
-                if (collapsed) {
-                  setCollapsed(false)
-                  setReportsOpen(true)
-                  setSettingsOpen(false)
-                  return
-                }
-                setReportsOpen((v) => !v)
-                setSettingsOpen(false)
-              }}
-              title={collapsed ? 'Relatórios' : undefined}
-            >
-              <span className="nav-icon">
-                <FileText size={18} />
-              </span>
-              <span className="nav-text">Relatórios</span>
-              <span className="nav-chevron" style={{ transform: reportsOpen ? 'rotate(180deg)' : undefined }}>
-                <ChevronDown size={16} />
-              </span>
-            </button>
-            {reportsOpen && (
-              <div className="nav-sub">
-                <button
-                  type="button"
-                  className={view === 'relatorios-valores' ? 'active' : undefined}
-                  onClick={() => {
-                    setReportsOpen(true)
-                    setSettingsOpen(false)
-                    setHash('relatorios-valores')
-                  }}
-                >
-                  <Sparkles size={18} />
-                  <strong>Conciliação</strong>
-                  <span>novo</span>
-                </button>
-                <button
-                  type="button"
-                  className={view === 'relatorios-auditoria' ? 'active' : undefined}
-                  onClick={() => {
-                    setReportsOpen(true)
-                    setSettingsOpen(false)
-                    setHash('relatorios-auditoria')
-                  }}
-                >
-                  <ShieldCheck size={18} />
-                  <strong>Auditoria</strong>
-                  <span>beta</span>
-                </button>
-              </div>
-            )}
-
-            <button
-              type="button"
-              className={[
-                'nav-link',
-                view.startsWith('configuracoes-') ? 'active' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => {
-                if (collapsed) {
-                  setCollapsed(false)
-                  setSettingsOpen(true)
+            {canAccessMenu('conciliacao-extratos') ? (
+              <button
+                type="button"
+                className={[
+                  'nav-link',
+                  view.startsWith('conciliacao-') ? 'active' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => {
                   setReportsOpen(false)
-                  return
-                }
-                setSettingsOpen((v) => !v)
-                setReportsOpen(false)
-              }}
-              title={collapsed ? 'Configurações' : undefined}
-            >
-              <span className="nav-icon">
-                <ShieldCheck size={18} />
-              </span>
-              <span className="nav-text">Configurações</span>
-              <span className="nav-chevron" style={{ transform: settingsOpen ? 'rotate(180deg)' : undefined }}>
-                <ChevronDown size={16} />
-              </span>
-            </button>
-            {settingsOpen && (
+                  setSettingsOpen(false)
+                  setHash('conciliacao-extratos')
+                }}
+                title={collapsed ? 'Conciliação' : undefined}
+              >
+                <span className="nav-icon">
+                  <BadgeDollarSign size={18} />
+                </span>
+                <span className="nav-text">Conciliação</span>
+                <span className="nav-chevron" />
+              </button>
+            ) : null}
+
+            {canAccessMenu('fluxo-pendencias') ? (
+              <button
+                type="button"
+                className={['nav-link', view === 'fluxo-pendencias' ? 'active' : '']
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => {
+                  setReportsOpen(false)
+                  setSettingsOpen(false)
+                  setHash('fluxo-pendencias')
+                }}
+                title={collapsed ? 'Fluxo de pendências' : undefined}
+              >
+                <span className="nav-icon">
+                  <GitBranch size={18} />
+                </span>
+                <span className="nav-text">Fluxo de pendências</span>
+                <span className="nav-chevron" />
+              </button>
+            ) : null}
+
+            {canAccessMenu('dashboard') ? (
+              <button
+                type="button"
+                className={['nav-link', view === 'dashboard' ? 'active' : '']
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => setHash('dashboard')}
+                title={collapsed ? 'Dashboard' : undefined}
+              >
+                <span className="nav-icon">
+                  <LayoutDashboard size={18} />
+                </span>
+                <span className="nav-text">Dashboard</span>
+                <span className="nav-chevron" />
+              </button>
+            ) : null}
+
+            {hasAnyReportsMenu ? (
+              <button
+                type="button"
+                className={[
+                  'nav-link',
+                  view.startsWith('relatorios-') ? 'active' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => {
+                  if (collapsed) {
+                    setCollapsed(false)
+                    setReportsOpen(true)
+                    setSettingsOpen(false)
+                    return
+                  }
+                  setReportsOpen((v) => !v)
+                  setSettingsOpen(false)
+                }}
+                title={collapsed ? 'Relatórios' : undefined}
+              >
+                <span className="nav-icon">
+                  <FileText size={18} />
+                </span>
+                <span className="nav-text">Relatórios</span>
+                <span className="nav-chevron" style={{ transform: reportsOpen ? 'rotate(180deg)' : undefined }}>
+                  <ChevronDown size={16} />
+                </span>
+              </button>
+            ) : null}
+            {hasAnyReportsMenu && reportsOpen ? (
               <div className="nav-sub">
-                <button
-                  type="button"
-                  className={
-                    view === 'configuracoes-automacao' ? 'active' : undefined
-                  }
-                  onClick={() => {
-                    setSettingsOpen(true)
-                    setReportsOpen(false)
-                    setHash('configuracoes-automacao')
-                  }}
-                >
-                  <Zap size={18} />
-                  <strong>Automação</strong>
-                  <span>soon</span>
-                </button>
-                <button
-                  type="button"
-                  className={
-                    view === 'configuracoes-acessos' ? 'active' : undefined
-                  }
-                  onClick={() => {
-                    setSettingsOpen(true)
-                    setReportsOpen(false)
-                    setHash('configuracoes-acessos')
-                  }}
-                >
-                  <ShieldCheck size={18} />
-                  <strong>Acessos</strong>
-                  <span>iam</span>
-                </button>
+                {canAccessMenu('relatorios-valores') ? (
+                  <button
+                    type="button"
+                    className={view === 'relatorios-valores' ? 'active' : undefined}
+                    onClick={() => {
+                      setReportsOpen(true)
+                      setSettingsOpen(false)
+                      setHash('relatorios-valores')
+                    }}
+                  >
+                    <Sparkles size={18} />
+                    <strong>Conciliação</strong>
+                    <span>novo</span>
+                  </button>
+                ) : null}
+                {canAccessMenu('relatorios-conciliacao-data') ? (
+                  <button
+                    type="button"
+                    className={view === 'relatorios-conciliacao-data' ? 'active' : undefined}
+                    onClick={() => {
+                      setReportsOpen(true)
+                      setSettingsOpen(false)
+                      setHash('relatorios-conciliacao-data')
+                    }}
+                  >
+                    <Clock size={18} />
+                    <strong>Conciliação por data</strong>
+                    <span>novo</span>
+                  </button>
+                ) : null}
+                {canAccessMenu('relatorios-ocorrencias') ? (
+                  <button
+                    type="button"
+                    className={view === 'relatorios-ocorrencias' ? 'active' : undefined}
+                    onClick={() => {
+                      setReportsOpen(true)
+                      setSettingsOpen(false)
+                      setHash('relatorios-ocorrencias')
+                    }}
+                  >
+                    <Info size={18} />
+                    <strong>Ocorrências</strong>
+                    <span>novo</span>
+                  </button>
+                ) : null}
+                {canAccessMenu('relatorios-auditoria') ? (
+                  <button
+                    type="button"
+                    className={view === 'relatorios-auditoria' ? 'active' : undefined}
+                    onClick={() => {
+                      setReportsOpen(true)
+                      setSettingsOpen(false)
+                      setHash('relatorios-auditoria')
+                    }}
+                  >
+                    <ShieldCheck size={18} />
+                    <strong>Auditoria</strong>
+                    <span>beta</span>
+                  </button>
+                ) : null}
               </div>
-            )}
+            ) : null}
+
+            {hasAnySettingsMenu ? (
+              <button
+                type="button"
+                className={[
+                  'nav-link',
+                  view.startsWith('configuracoes-') ? 'active' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+                onClick={() => {
+                  if (collapsed) {
+                    setCollapsed(false)
+                    setSettingsOpen(true)
+                    setReportsOpen(false)
+                    return
+                  }
+                  setSettingsOpen((v) => !v)
+                  setReportsOpen(false)
+                }}
+                title={collapsed ? 'Configurações' : undefined}
+              >
+                <span className="nav-icon">
+                  <ShieldCheck size={18} />
+                </span>
+                <span className="nav-text">Configurações</span>
+                <span className="nav-chevron" style={{ transform: settingsOpen ? 'rotate(180deg)' : undefined }}>
+                  <ChevronDown size={16} />
+                </span>
+              </button>
+            ) : null}
+            {hasAnySettingsMenu && settingsOpen ? (
+              <div className="nav-sub">
+                {canAccessMenu('configuracoes-automacao') ? (
+                  <button
+                    type="button"
+                    className={
+                      view === 'configuracoes-automacao' ? 'active' : undefined
+                    }
+                    onClick={() => {
+                      setSettingsOpen(true)
+                      setReportsOpen(false)
+                      setHash('configuracoes-automacao')
+                    }}
+                  >
+                    <Zap size={18} />
+                    <strong>Automação</strong>
+                    <span>soon</span>
+                  </button>
+                ) : null}
+                {canAccessMenu('configuracoes-acessos') ? (
+                  <button
+                    type="button"
+                    className={
+                      view === 'configuracoes-acessos' ? 'active' : undefined
+                    }
+                    onClick={() => {
+                      setSettingsOpen(true)
+                      setReportsOpen(false)
+                      setHash('configuracoes-acessos')
+                    }}
+                  >
+                    <ShieldCheck size={18} />
+                    <strong>Acessos</strong>
+                    <span>iam</span>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
           </nav>
         </aside>
 
@@ -4289,15 +8801,6 @@ export default function CreditoPage() {
             {isMain ? (
               <>
                 <section className={view === 'home' ? 'toolbar toolbar-home' : 'toolbar'}>
-                  <div className={view === 'home' ? 'search home-search-card' : 'search'}>
-                    <Search size={18} />
-                    <input
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                      placeholder="Buscar por contrato, CPF, cooperado, produto..."
-                    />
-                  </div>
-
                   {view === 'home' ? (
                     <div className="search home-context-card">
                       <div style={{ width: '100%', display: 'grid', gap: 12 }}>
@@ -4318,294 +8821,308 @@ export default function CreditoPage() {
                               ))}
                             </select>
                           </div>
-                          <div className="field">
-                            <label>Órgão</label>
-                            <select
-                              className="control month-select"
-                              value={conciliacaoOrgao}
-                              onChange={(e) => setConciliacaoOrgao(e.target.value)}
-                              disabled={orgaoDeParaLoading}
-                              style={{ height: 44 }}
-                            >
-                              <option value="">Selecione...</option>
-                              {conciliacaoOrgaoOptions.map((o) => (
-                                <option key={o} value={o}>
-                                  {o}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="field">
-                            <label>Exibir</label>
-                            <label className="home-toggle">
-                              <input
-                                type="checkbox"
-                                checked={conciliacaoOnlyDiff}
-                                onChange={(e) => setConciliacaoOnlyDiff(e.target.checked)}
-                              />
-                              <span>Somente divergências</span>
-                            </label>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: 10,
+                              alignItems: 'end',
+                              minHeight: 44,
+                            }}
+                          >
+                            {homeConciliacaoStatusesLoading ? (
+                              <span className="chip">
+                                <Clock size={16} />
+                                Carregando status...
+                              </span>
+                            ) : (
+                              <>
+                                <span className="chip">
+                                  <FileText size={16} />
+                                  Total: {homeConciliacaoStatuses.length}
+                                </span>
+                                <span className="chip">
+                                  <Lock size={16} />
+                                  Fechadas:{' '}
+                                  {homeConciliacaoStatuses.filter((item) => item.status === 'fechada').length}
+                                </span>
+                                <span className="chip">
+                                  <Unlock size={16} />
+                                  Abertas:{' '}
+                                  {homeConciliacaoStatuses.filter((item) => item.status === 'aberta').length}
+                                </span>
+                              </>
+                            )}
                           </div>
                         </div>
 
-                        {conciliacaoError ? (
+                        {homeConciliacaoStatusesError ? (
                           <div className="help" style={{ marginTop: -2, color: 'rgba(255, 99, 132, 0.95)' }}>
-                            {conciliacaoError}
+                            {homeConciliacaoStatusesError}
                           </div>
                         ) : null}
-
-                        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            onClick={() => setHash('conciliacao-extratos')}
-                            style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
-                          >
-                            <BadgeDollarSign size={18} />
-                            Abrir conciliação
-                          </button>
-                          <button
-                            type="button"
-                            className="btn"
-                            disabled={
-                              !canExportConciliacaoXlsx ||
-                              conciliacaoExportingXlsx ||
-                              !conciliacaoOrgao.trim() ||
-                              !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
-                            }
-                            onClick={() => void exportConciliacaoXlsx()}
-                            style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
-                          >
-                            <FileSpreadsheet size={18} />
-                            {conciliacaoExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
-                          </button>
-                          {conciliacaoData ? (
-                            <span
-                              className="chip"
-                              style={{ alignSelf: 'center', marginLeft: 'auto' }}
-                              title={
-                                conciliacaoLoadedAtIso ? `Última atualização: ${formatIsoToPtBrDateTime(conciliacaoLoadedAtIso)}` : ''
-                              }
-                            >
-                              <Clock size={16} />
-                              Última atualização:{' '}
-                              {conciliacaoLoadedAtIso ? formatIsoToPtBrDateTime(conciliacaoLoadedAtIso).slice(0, 10) : '—'}
-                            </span>
-                          ) : null}
-                        </div>
                       </div>
                     </div>
-                  ) : null}
+                  ) : (
+                    <div className="search">
+                      <Search size={18} />
+                      <input
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Buscar por contrato, CPF, cooperado, produto..."
+                      />
+                    </div>
+                  )}
                 </section>
 
                 {view === 'home' ? (
                   <section className="grid">
                     <div className="panel" style={{ gridColumn: '1 / -1' }}>
                       <div className="panel-head">
-                        <h2>Indicadores</h2>
+                        <h2>Conciliações da Competência</h2>
                         <span className="chip">
-                          <Sparkles size={16} />
-                          Conciliação
+                          <FileText size={16} />
+                          Órgão • Colunas por Vencimento
                         </span>
                       </div>
                       <div className="panel-body">
-                        {conciliacaoLoading && !conciliacaoData ? (
-                          <div className="stats-home" style={{ marginTop: 2 }}>
-                            {Array.from({ length: 8 }).map((_, i) => (
-                              <div className="stat stat-skeleton" key={i}>
-                                <div className="kpi">
-                                  <div className="skeleton" style={{ height: 10, width: '56%' }} />
-                                  <div className="skeleton" style={{ width: 28, height: 28, borderRadius: 12 }} />
-                                </div>
-                                <div className="skeleton" style={{ height: 18, width: '80%', marginTop: 10 }} />
-                                <div className="skeleton" style={{ height: 6, width: '100%', marginTop: 12, borderRadius: 999 }} />
+                        {homeConciliacaoStatusesLoading ? (
+                          <div className="help">
+                            Carregando conciliações da competência...
+                          </div>
+                        ) : (() => {
+                          const filteredRows = homeConciliacaoStatuses
+
+                          if (filteredRows.length === 0) {
+                            return (
+                              <div className="help">
+                                Nenhuma conciliação encontrada para a competência selecionada.
                               </div>
-                            ))}
-                          </div>
-                        ) : conciliacaoData ? (
-                          <div className="stats-home" style={{ marginTop: 2 }}>
-                            {(() => {
-                              const totals = conciliacaoData.totals
-                              const recursoCents = Number(totals?.recurso?.cents ?? 0) || 0
-                              const extratosCents = Number(totals?.extratos?.cents ?? 0) || 0
-                              const tarifasCents =
-                                (Number(totals?.tarifaLinha?.cents ?? 0) || 0) +
-                                (Number(totals?.tarifaTed?.cents ?? 0) || 0)
-                              const diffCents = extratosCents - recursoCents
+                            )
+                          }
 
-                              const recursoPend = Array.isArray(conciliacaoData?.recurso)
-                                ? conciliacaoData.recurso.filter((x: any) => x?.status === 'pendencia').length
-                                : 0
-                              const relatorioPend = Array.isArray(conciliacaoData?.relatorio)
-                                ? conciliacaoData.relatorio.filter((x: any) => x?.status === 'pendencia').length
-                                : 0
-                              const pendTotal = recursoPend + relatorioPend
-                              const recursoOk = Array.isArray(conciliacaoData?.recurso)
-                                ? conciliacaoData.recurso.filter((x: any) => x?.status === 'conciliado').length
-                                : 0
-                              const relatorioOk = Array.isArray(conciliacaoData?.relatorio)
-                                ? conciliacaoData.relatorio.filter((x: any) => x?.status === 'conciliado').length
-                                : 0
-                              const okTotal = recursoOk + relatorioOk
-                              const totalRegs = okTotal + pendTotal
-                              const pctOk = totalRegs > 0 ? Math.round((okTotal / totalRegs) * 100) : 0
+                          const vencimentos = Array.from(
+                            new Set(filteredRows.map((item) => normalizeVencimentoLabel(item.vencimento))),
+                          ).sort((a, b) =>
+                            (vencimentoSortKey(a) || a).localeCompare(vencimentoSortKey(b) || b, 'pt-BR'),
+                          )
 
-                              const fmt = (cents: number) => `R$ ${centsToPtBr(Math.abs(cents))}`
-                              const fmtSigned = (cents: number) => (cents < 0 ? `- ${fmt(cents)}` : fmt(cents))
+                          const byOrgao = new Map<
+                            string,
+                            {
+                              statusByVencimento: Record<string, 'aberta' | 'fechada'>
+                              validatedByVencimento: Record<string, boolean>
+                              recursoRecebidoCents: number
+                              liquidadoCents: number
+                              saldoCents: number
+                            }
+                          >()
+                          for (const item of filteredRows) {
+                            const orgao = String(item.orgao ?? '').trim()
+                            const vencimento = normalizeVencimentoLabel(item.vencimento)
+                            if (!orgao) continue
+                            const current = byOrgao.get(orgao) ?? {
+                              statusByVencimento: {},
+                              validatedByVencimento: {},
+                              recursoRecebidoCents: Number(item.recursoRecebidoCents ?? 0) || 0,
+                              liquidadoCents: Number(item.liquidadoCents ?? 0) || 0,
+                              saldoCents: Number(item.saldoCents ?? 0) || 0,
+                            }
+                            current.statusByVencimento[vencimento] =
+                              item.status === 'fechada' ? 'fechada' : 'aberta'
+                            current.validatedByVencimento[vencimento] = Boolean(item.contabilidadeValidated)
+                            current.recursoRecebidoCents = Number(item.recursoRecebidoCents ?? 0) || 0
+                            current.liquidadoCents = Number(item.liquidadoCents ?? 0) || 0
+                            current.saldoCents = Number(item.saldoCents ?? 0) || 0
+                            byOrgao.set(orgao, current)
+                          }
+                          const orgaos = Array.from(byOrgao.keys()).sort((a, b) => a.localeCompare(b, 'pt-BR'))
 
-                              const statusLabel = conciliacaoData.closed?.isClosed ? 'Fechada' : 'Aberta'
-                              const statusTone = conciliacaoData.closed?.isClosed ? 'warn' : 'good'
-                              const pctTone = pctOk >= 90 ? 'good' : pctOk >= 60 ? 'warn' : 'bad'
-                              const diffTone = diffCents === 0 ? 'good' : diffCents < 0 ? 'bad' : 'warn'
-                              const pendTone = pendTotal === 0 ? 'good' : 'warn'
-
-                              const items = [
-                                {
-                                  label: 'Status',
-                                  value: statusLabel,
-                                  icon: conciliacaoData.closed?.isClosed ? <Lock size={18} /> : <Unlock size={18} />,
-                                  tone: statusTone,
-                                  meterPct: 100,
-                                },
-                                { label: 'Conciliação pronta', value: `${pctOk}%`, icon: <Sparkles size={18} />, tone: pctTone, meterPct: pctOk },
-                                { label: 'Conciliados', value: String(okTotal), icon: <ShieldCheck size={18} />, tone: pctTone, meterPct: pctOk },
-                                { label: 'Recurso (débito)', value: fmt(recursoCents), icon: <BadgeDollarSign size={18} />, tone: 'good', meterPct: 100 },
-                                { label: 'Extrato (crédito)', value: fmt(extratosCents), icon: <FileText size={18} />, tone: 'good', meterPct: 100 },
-                                { label: 'Diferença', value: fmtSigned(diffCents), icon: diffCents < 0 ? <TrendingDown size={18} /> : <TrendingUp size={18} />, tone: diffTone, meterPct: 100 },
-                                { label: 'Tarifas', value: fmt(tarifasCents), icon: <Zap size={18} />, tone: 'warn', meterPct: 100 },
-                                { label: 'Pendências', value: String(pendTotal), icon: <ShieldCheck size={18} />, tone: pendTone, meterPct: 100 },
-                              ]
-
-                              return items.map((it, idx) => (
-                                <motion.div
-                                  initial={{ opacity: 0, y: 8 }}
-                                  animate={{ opacity: 1, y: 0 }}
-                                  transition={{ duration: 0.18, ease: 'easeOut', delay: idx * 0.02 }}
-                                  whileHover={{ y: -2, scale: 1.01 }}
-                                  className={['stat', (it as any).tone ? `stat-${(it as any).tone}` : '']
-                                    .filter(Boolean)
-                                    .join(' ')}
-                                  key={it.label}
-                                >
-                                  <div className="kpi">
-                                    <div className="label">{it.label}</div>
-                                    <div className="stat-icon">{(it as any).icon}</div>
-                                  </div>
-                                  <div className="value">{it.value}</div>
-                                  <div className="stat-meter" style={{ marginTop: 10 }}>
-                                    <div
-                                      className="stat-meter-fill"
+                          return (
+                            <div style={{ overflowX: 'auto' }}>
+                              <table
+                                style={{
+                                  width: '100%',
+                                  borderCollapse: 'collapse',
+                                  minWidth: Math.max(900, 240 + vencimentos.length * 150 + 3 * 150),
+                                }}
+                              >
+                                <thead>
+                                  <tr>
+                                    <th
                                       style={{
-                                        width: `${Math.max(0, Math.min(100, Number((it as any).meterPct ?? 100)))}%`,
+                                        textAlign: 'left',
+                                        fontSize: 12,
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.08em',
+                                        color: 'rgba(255,255,255,0.62)',
+                                        padding: '0 12px 12px 0',
+                                        borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                        whiteSpace: 'nowrap',
                                       }}
-                                    />
-                                  </div>
-                                </motion.div>
-                              ))
-                            })()}
-                          </div>
-                        ) : (
-                          <div className="help">
-                            Selecione uma competência e um órgão para ver os indicadores.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="panel" style={{ gridColumn: '1 / -1' }}>
-                      <div className="panel-head">
-                        <h2>Pendências prioritárias</h2>
-                        <span className="chip">
-                          <Zap size={16} />
-                          Foco
-                        </span>
-                      </div>
-                      <div className="panel-body">
-                        {conciliacaoData ? (
-                          <div className="list">
-                            {(() => {
-                              const recurso = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
-                              const relatorio = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
-                              const searchText = normalizeSearchText(search)
-                              const searchDigits = normalizeSearchDigits(search)
-                              const pend = [
-                                ...recurso
-                                  .filter((x: any) => x?.status === 'pendencia')
-                                  .map((x: any) => ({ ...x, __src: 'Recurso' as const })),
-                                ...relatorio
-                                  .filter((x: any) => x?.status === 'pendencia')
-                                  .map((x: any) => ({ ...x, __src: 'Relatório Sisbr' as const })),
-                              ]
-                              const filtered = searchText || searchDigits
-                                ? pend.filter((p: any) => {
-                                    const cpfDigits = normalizeSearchDigits(p?.cpf)
-                                    const nome = normalizeSearchText(p?.nome)
-                                    if (searchDigits && cpfDigits.includes(searchDigits)) return true
-                                    if (searchText && nome.includes(searchText)) return true
-                                    return false
-                                  })
-                                : pend
-                              const ordered = filtered.slice().sort((a: any, b: any) => {
-                                const av = Math.abs(ptBrMoneyToCents(String(a?.value ?? '0')))
-                                const bv = Math.abs(ptBrMoneyToCents(String(b?.value ?? '0')))
-                                return bv - av
-                              })
-                              const top = ordered.slice(0, 8)
-                              if (top.length === 0) {
-                                return (
-                                  <div className="row" style={{ gridTemplateColumns: '72px 1fr', padding: 18 }}>
-                                    <div className="bubble" style={{ width: 72, height: 72, borderRadius: 20, position: 'relative', overflow: 'hidden' }}>
-                                      <motion.div
-                                        aria-hidden="true"
+                                    >
+                                      Órgão
+                                    </th>
+                                    {vencimentos.map((label) => (
+                                      <th
+                                        key={label}
                                         style={{
-                                          position: 'absolute',
-                                          inset: -18,
-                                          background:
-                                            'radial-gradient(circle at 50% 50%, rgba(0,174,157,0.30) 0%, rgba(0,174,157,0.00) 60%)',
+                                          textAlign: 'left',
+                                          fontSize: 12,
+                                          textTransform: 'uppercase',
+                                          letterSpacing: '0.08em',
+                                          color: 'rgba(255,255,255,0.62)',
+                                          padding: '0 12px 12px 0',
+                                          borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                          whiteSpace: 'nowrap',
                                         }}
-                                        initial={{ opacity: 0.35, scale: 0.92 }}
-                                        animate={{ opacity: [0.25, 0.5, 0.25], scale: [0.92, 1.06, 0.92] }}
-                                        transition={{ duration: 1.6, ease: 'easeInOut', repeat: Infinity }}
-                                      />
-                                      <div style={{ position: 'relative' }}>
-                                        <Megaphone size={28} />
-                                      </div>
-                                    </div>
-                                    <div style={{ display: 'grid', gap: 6, alignContent: 'center' }}>
-                                      <strong style={{ fontSize: '1.05rem' }}>Tudo em ordem por aqui!</strong>
-                                      <small style={{ fontSize: '0.9rem' }}>Nenhuma pendência para o filtro atual.</small>
-                                    </div>
-                                  </div>
-                                )
-                              }
-                              return top.map((p: any, idx: number) => (
-                                <div
-                                  key={`${p.__src}-${p.cpf}-${p.value}-${idx}`}
-                                  className="row"
-                                  onClick={() => setHash('conciliacao-extratos')}
-                                  style={{ cursor: 'pointer' }}
-                                >
-                                  <div className="bubble">
-                                    <ShieldCheck size={18} />
-                                  </div>
-                                  <div style={{ minWidth: 0 }}>
-                                    <strong style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                      {String(p.nome ?? '').trim() || '-'}
-                                    </strong>
-                                    <small>
-                                      {p.__src} • CPF {String(p.cpf ?? '').trim() || '-'}
-                                    </small>
-                                  </div>
-                                  <div className="right">{withCurrency(String(p.value ?? '0,00'))}</div>
-                                </div>
-                              ))
-                            })()}
-                          </div>
-                        ) : (
-                          <div className="help">
-                            Carregue uma conciliação para visualizar pendências.
-                          </div>
-                        )}
+                                      >
+                                        {label}
+                                      </th>
+                                    ))}
+                                    {['Recurso Recebido', 'Liquidado + Tarifas', 'Saldo'].map((label) => (
+                                      <th
+                                        key={label}
+                                        style={{
+                                          textAlign: 'left',
+                                          fontSize: 12,
+                                          textTransform: 'uppercase',
+                                          letterSpacing: '0.08em',
+                                          color: 'rgba(255,255,255,0.62)',
+                                          padding: '0 12px 12px 0',
+                                          borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                          whiteSpace: 'nowrap',
+                                        }}
+                                      >
+                                        {label}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {orgaos.map((orgao) => {
+                                    const orgaoData = byOrgao.get(orgao) ?? {
+                                      statusByVencimento: {},
+                                      validatedByVencimento: {},
+                                      recursoRecebidoCents: 0,
+                                      liquidadoCents: 0,
+                                      saldoCents: 0,
+                                    }
+                                    const statusByVencimento = orgaoData.statusByVencimento
+                                    const validatedByVencimento = orgaoData.validatedByVencimento
+                                    return (
+                                      <tr key={orgao}>
+                                        <td
+                                          style={{
+                                            padding: '12px 12px 12px 0',
+                                            borderBottom: '1px solid rgba(255,255,255,0.08)',
+                                            color: 'rgba(255,255,255,0.92)',
+                                            whiteSpace: 'nowrap',
+                                          }}
+                                        >
+                                          {formatConciliacaoOrgaoLabel(orgao)}
+                                        </td>
+                                        {vencimentos.map((vencimento) => {
+                                          const status = statusByVencimento[vencimento]
+                                          const isClosed = status === 'fechada'
+                                          const contabilidadeValidated = Boolean(validatedByVencimento[vencimento])
+                                          return (
+                                            <td
+                                              key={`${orgao}__${vencimento}`}
+                                              style={{
+                                                padding: '12px 12px 12px 0',
+                                                borderBottom: '1px solid rgba(255,255,255,0.08)',
+                                              }}
+                                            >
+                                              {status ? (
+                                                <span
+                                                  className="chip"
+                                                  style={{
+                                                    position: 'relative',
+                                                    borderColor: isClosed
+                                                      ? 'rgba(255,140,0,0.45)'
+                                                      : 'rgba(0,174,157,0.38)',
+                                                    background: isClosed
+                                                      ? 'rgba(255,140,0,0.14)'
+                                                      : 'rgba(0,174,157,0.14)',
+                                                    whiteSpace: 'nowrap',
+                                                  }}
+                                                >
+                                                  {isClosed && contabilidadeValidated ? (
+                                                    <span
+                                                      style={{
+                                                        position: 'absolute',
+                                                        top: -6,
+                                                        right: -6,
+                                                        width: 18,
+                                                        height: 18,
+                                                        borderRadius: 999,
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                        border: '1px solid rgba(34,197,94,0.58)',
+                                                        background: 'rgba(34,197,94,0.18)',
+                                                        color: 'rgba(187,247,208,0.96)',
+                                                        boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+                                                      }}
+                                                      title="Validado pela contabilidade"
+                                                    >
+                                                      <ShieldCheck size={12} />
+                                                    </span>
+                                                  ) : null}
+                                                  {isClosed ? <Lock size={16} /> : <Unlock size={16} />}
+                                                  {isClosed ? 'Fechada' : 'Aberta'}
+                                                </span>
+                                              ) : (
+                                                <span style={{ color: 'rgba(255,255,255,0.28)' }}>-</span>
+                                              )}
+                                            </td>
+                                          )
+                                        })}
+                                        <td
+                                          style={{
+                                            padding: '12px 12px 12px 0',
+                                            borderBottom: '1px solid rgba(255,255,255,0.08)',
+                                            color: 'rgba(255,255,255,0.92)',
+                                            whiteSpace: 'nowrap',
+                                          }}
+                                        >
+                                          {withCurrency(centsToPtBr(orgaoData.recursoRecebidoCents))}
+                                        </td>
+                                        <td
+                                          style={{
+                                            padding: '12px 12px 12px 0',
+                                            borderBottom: '1px solid rgba(255,255,255,0.08)',
+                                            color: 'rgba(255,255,255,0.92)',
+                                            whiteSpace: 'nowrap',
+                                          }}
+                                        >
+                                          {withCurrency(centsToPtBr(orgaoData.liquidadoCents))}
+                                        </td>
+                                        <td
+                                          style={{
+                                            padding: '12px 12px 12px 0',
+                                            borderBottom: '1px solid rgba(255,255,255,0.08)',
+                                            color:
+                                              orgaoData.saldoCents === 0
+                                                ? 'rgba(255,255,255,0.92)'
+                                                : orgaoData.saldoCents < 0
+                                                  ? 'rgba(255,99,132,0.98)'
+                                                  : 'rgba(245,197,66,0.98)',
+                                            whiteSpace: 'nowrap',
+                                            fontWeight: 800,
+                                          }}
+                                        >
+                                          {withCurrency(centsToPtBr(orgaoData.saldoCents))}
+                                        </td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          )
+                        })()}
                       </div>
                     </div>
                   </section>
@@ -4624,117 +9141,299 @@ export default function CreditoPage() {
                         className="btn btn-primary"
                         onClick={async () => {
                           if (settingsLocked) return
-                          const target = manualImportTarget
+                          const target = manualImportTarget as ManualImportTarget
                           const folderUrl = (() => {
+                            if (target === 'relatorio')
+                              return relatorioSisbrUrl.trim() || sharePointFolderPath.trim()
                             if (target === 'recurso_alego') return recursoAlegoUrl.trim()
+                            if (target === 'recurso_neoconsig_demais')
+                              return recursoNeoconsigDemaisUrl.trim()
+                            if (target === 'recurso_adfego') return recursoAdfegoUrl.trim()
+                            if (target === 'recurso_tce') return recursoTceUrl.trim()
+                            if (target === 'recurso_tcm') return recursoTcmUrl.trim()
+                            if (target === 'recurso_tre') return recursoTreUrl.trim()
+                            if (target === 'recurso_trt') return recursoTrtUrl.trim()
+                            if (target === 'recurso_eletra') return recursoEletraUrl.trim()
                             if (target === 'recurso_mpgo') return recursoMpgoUrl.trim()
+                            if (target === 'recurso_tjgo') return recursoTjgoUrl.trim()
                             return sharePointFolderPath.trim()
                           })()
-                          if (!folderUrl) {
-                            setImportNowMessage({
-                              kind: 'error',
-                              text:
+                          const folderUrlError = ((): string | null => {
+                            if (!folderUrl) {
+                              if (target === 'recurso_alego')
+                                return 'Informe a pasta/arquivo do SharePoint (ALEGO) antes de importar.'
+                              if (target === 'recurso_neoconsig_demais')
+                                return 'Informe a pasta/arquivo do SharePoint (NEOCONSIG - Demais Órgãos) antes de importar.'
+                              if (target === 'recurso_adfego')
+                                return 'Informe a pasta/arquivo do SharePoint (ADFEGO) antes de importar.'
+                              if (target === 'recurso_tce')
+                                return 'Informe a pasta/arquivo do SharePoint (TCE) antes de importar.'
+                              if (target === 'recurso_tcm')
+                                return 'Informe a pasta/arquivo do SharePoint (TCM) antes de importar.'
+                              if (target === 'recurso_tre')
+                                return 'Informe a pasta/arquivo do SharePoint (TRE) antes de importar.'
+                              if (target === 'recurso_trt')
+                                return 'Informe a pasta/arquivo do SharePoint (TRT) antes de importar.'
+                              if (target === 'recurso_eletra')
+                                return 'Informe a pasta/arquivo do SharePoint (Eletra) antes de importar.'
+                              if (target === 'recurso_mpgo')
+                                return 'Informe a pasta/arquivo do SharePoint (MPGO) antes de importar.'
+                              if (target === 'recurso_tjgo')
+                                return 'Informe a pasta/arquivo do SharePoint (TJGO) antes de importar.'
+                              if (target === 'relatorio')
+                                return 'Informe a pasta/arquivo do SharePoint (Relatório SISBR) antes de importar.'
+                              return 'Informe a pasta ou o arquivo do SharePoint antes de importar.'
+                            }
+                            if (/^https:\/\/teams\.microsoft\.com\/meet\//i.test(folderUrl)) {
+                              return 'Esse link é de reunião do Teams e não é um arquivo. Cole a URL do SharePoint (pasta ou arquivo).'
+                            }
+                            return null
+                          })()
+                          if (folderUrlError) {
+                            setImportNowMessage({ kind: 'error', text: folderUrlError })
+                            setImportProgressModal({
+                              phase: 'done',
+                              target,
+                              folderUrl: folderUrl || '(não informado)',
+                              syncResult: null,
+                              syncError: folderUrlError,
+                              mode: 'sync',
+                            })
+                            return
+                          }
+                          try {
+                            await saveAutomationConfigToServer({
+                              sharePointFolderUrl:
+                                target !== 'relatorio' &&
+                                target !== 'recurso_alego' &&
+                                target !== 'recurso_neoconsig_demais' &&
+                                target !== 'recurso_adfego' &&
+                                target !== 'recurso_tce' &&
+                                target !== 'recurso_tcm' &&
+                                target !== 'recurso_tre' &&
+                                target !== 'recurso_trt' &&
+                                target !== 'recurso_eletra' &&
+                                target !== 'recurso_mpgo' &&
+                                target !== 'recurso_tjgo'
+                                  ? folderUrl
+                                  : sharePointFolderPath.trim() || null,
+                              relatorioSisbrUrl:
+                                target === 'relatorio'
+                                  ? folderUrl
+                                  : relatorioSisbrUrl.trim() || null,
+                              recursoAlegoUrl:
                                 target === 'recurso_alego'
-                                  ? 'Informe a pasta/arquivo do SharePoint (ALEGO) antes de importar.'
-                                  : target === 'recurso_mpgo'
-                                    ? 'Informe a pasta/arquivo do SharePoint (MPGO) antes de importar.'
-                                  : 'Informe o diretório raiz do SharePoint antes de importar.',
+                                  ? folderUrl
+                                  : recursoAlegoUrl.trim() || null,
+                              recursoNeoconsigDemaisUrl:
+                                target === 'recurso_neoconsig_demais'
+                                  ? folderUrl
+                                  : recursoNeoconsigDemaisUrl.trim() || null,
+                              recursoAdfegoUrl:
+                                target === 'recurso_adfego'
+                                  ? folderUrl
+                                  : recursoAdfegoUrl.trim() || null,
+                              recursoTceUrl:
+                                target === 'recurso_tce'
+                                  ? folderUrl
+                                  : recursoTceUrl.trim() || null,
+                              recursoTcmUrl:
+                                target === 'recurso_tcm'
+                                  ? folderUrl
+                                  : recursoTcmUrl.trim() || null,
+                              recursoTreUrl:
+                                target === 'recurso_tre'
+                                  ? folderUrl
+                                  : recursoTreUrl.trim() || null,
+                              recursoTrtUrl:
+                                target === 'recurso_trt'
+                                  ? folderUrl
+                                  : recursoTrtUrl.trim() || null,
+                              recursoEletraUrl:
+                                target === 'recurso_eletra'
+                                  ? folderUrl
+                                  : recursoEletraUrl.trim() || null,
+                              recursoMpgoUrl:
+                                target === 'recurso_mpgo'
+                                  ? folderUrl
+                                  : recursoMpgoUrl.trim() || null,
+                              recursoTjgoUrl:
+                                target === 'recurso_tjgo'
+                                  ? folderUrl
+                                  : recursoTjgoUrl.trim() || null,
+                              notificationEmail: notificationEmail.trim() || null,
+                              notificationEmailContabilidade:
+                                notificationEmailContabilidade.trim() || null,
+                              occurrencesPanoramaDiretoriaEmail:
+                                occurrencesPanoramaDiretoriaEmail.trim() || null,
+                              occurrencesPanoramaGerentesEmail:
+                                occurrencesPanoramaGerentesEmail.trim() || null,
                             })
-                            return
-                          }
-                          if (/^https:\/\/teams\.microsoft\.com\/meet\//i.test(folderUrl)) {
-                            setImportNowMessage({
-                              kind: 'error',
-                              text:
-                                'Esse link é de reunião do Teams e não é um arquivo. Cole a URL do SharePoint (pasta ou arquivo).',
-                            })
-                            return
-                          }
-                          await saveAutomationConfigToServer({
-                            sharePointFolderUrl:
-                              target !== 'recurso_alego' && target !== 'recurso_mpgo'
-                                ? folderUrl
-                                : sharePointFolderPath.trim() || null,
-                            recursoAlegoUrl:
-                              target === 'recurso_alego'
-                                ? folderUrl
-                                : recursoAlegoUrl.trim() || null,
-                            recursoMpgoUrl:
-                              target === 'recurso_mpgo'
-                                ? folderUrl
-                                : recursoMpgoUrl.trim() || null,
-                            notificationEmail: notificationEmail.trim() || null,
-                            notificationEmailContabilidade:
-                              notificationEmailContabilidade.trim() || null,
-                          })
+                          } catch { /* ignore */ }
                           setImportNowMessage(null)
                           setImportingNow(true)
                           try {
+                            const payload =
+                              target === 'recurso_alego' ||
+                              target === 'recurso_neoconsig_demais' ||
+                              target === 'recurso_adfego' ||
+                              target === 'recurso_tce' ||
+                              target === 'recurso_tcm' ||
+                              target === 'recurso_tre' ||
+                              target === 'recurso_trt' ||
+                              target === 'recurso_eletra' ||
+                              target === 'recurso_mpgo' ||
+                              target === 'recurso_tjgo'
+                                ? { learningUrl: folderUrl, target }
+                                : {
+                                    folderUrl,
+                                    notificationTo:
+                                      notificationEmail.trim() || undefined,
+                                    modalidades,
+                                    mode: 'append',
+                                    target,
+                                  }
                             const res = await fetch('/api/consignado/import', {
                               method: 'POST',
                               headers: { 'content-type': 'application/json' },
-                              body: JSON.stringify({
-                                ...(target === 'recurso_alego' || target === 'recurso_mpgo'
-                                  ? { learningUrl: folderUrl, target }
-                                  : {
-                                      folderUrl,
-                                      notificationTo:
-                                        notificationEmail.trim() || undefined,
-                                      modalidades,
-                                      mode: 'append',
-                                      target,
-                                    }),
-                              }),
+                              body: JSON.stringify(payload),
                             })
+                            const data = (await res.json().catch(() => null)) as null | Record<
+                              string,
+                              unknown
+                            >
 
-                            const data = (await res.json().catch(() => null)) as null | {
-                              profileId?: string
-                              tableName?: string
-                              rows?: number
-                              columns?: number
-                              importedExtratosCount?: number
-                              movedExtratosCount?: number
-                              importedRelatoriosCount?: number
-                              movedRelatoriosCount?: number
-                              insertedExtratosRows?: number
-                              skippedExtratosRows?: number
-                              insertedRelatoriosRows?: number
-                              skippedRelatoriosRows?: number
-                              extratosSelected?: Array<{ name?: string }>
-                              relatoriosSelected?: Array<{ name?: string }>
-                              relatoriosFoundOutsideImportados?: Array<{ name?: string }>
-                              relatoriosFoundIncludingImportados?: Array<{ name?: string }>
-                              extratosFiles?: Array<{
-                                name?: string
-                                rowsTotal?: number
-                                insertedRows?: number
-                                skippedRows?: number
-                              }>
-                              relatoriosFiles?: Array<{
-                                name?: string
-                                rowsTotal?: number
-                                insertedRows?: number
-                                skippedRows?: number
-                                ignoredReason?: string
-                                error?: string
-                              }>
-                              totalsInDb?: { extratos?: number; relatorio?: number }
-                              message?: string
-                              dbFilePath?: string
-                              mode?: string
+                            const isAsyncAccepted =
+                              res.ok &&
+                              data &&
+                              Boolean(
+                                typeof (data as { accepted?: unknown }).accepted ===
+                                  'boolean' &&
+                                  (data as { accepted?: boolean }).accepted ===
+                                    true &&
+                                  typeof (data as { async?: unknown }).async ===
+                                    'boolean' &&
+                                  (data as { async?: boolean }).async === true &&
+                                  typeof (data as { jobId?: unknown }).jobId ===
+                                    'string',
+                              )
+
+                            if (isAsyncAccepted) {
+                              const asyncData = data as {
+                                accepted: true
+                                async: true
+                                jobId: string
+                                status?: string
+                                createdAtIso?: string
+                              }
+                              const jobId = asyncData.jobId
+                              clearImportJobPollTimer()
+                              setImportProgressModal({
+                                phase: 'running',
+                                jobId,
+                                target,
+                                folderUrl,
+                                startedAtIso:
+                                  asyncData.createdAtIso ||
+                                  new Date().toISOString(),
+                                lastPoll: null,
+                              })
+                              const pollOnce = async () => {
+                                try {
+                                  const pollRes = await fetch(
+                                    `/api/consignado/jobs/${encodeURIComponent(jobId)}`,
+                                    { method: 'GET' },
+                                  )
+                                  if (!pollRes.ok) return
+                                  const pollData =
+                                    (await pollRes
+                                      .json()
+                                      .catch(() => null)) as ImportJobRecord | null
+                                  if (!pollData || typeof pollData !== 'object') return
+                                  setImportProgressModal((prev) => {
+                                    if (!prev || prev.phase !== 'running') return prev
+                                    return { ...prev, lastPoll: pollData }
+                                  })
+                                  const status = pollData.status
+                                  const isTerminal =
+                                    status === 'succeeded' ||
+                                    status === 'failed' ||
+                                    status === 'cancelled'
+                                  if (isTerminal) {
+                                    clearImportJobPollTimer()
+                                    setImportingNow(false)
+                                    setImportProgressModal((prev) => {
+                                      if (prev && prev.phase === 'running') {
+                                        return {
+                                          phase: 'done',
+                                          jobId: prev.jobId,
+                                          target: prev.target,
+                                          folderUrl: prev.folderUrl,
+                                          finalJob: pollData,
+                                          mode: 'async',
+                                        }
+                                      }
+                                      return {
+                                        phase: 'done',
+                                        jobId,
+                                        target,
+                                        folderUrl,
+                                        finalJob: pollData,
+                                        mode: 'async',
+                                      }
+                                    })
+                                  }
+                                } catch { /* ignore poll errors */ }
+                              }
+                              void pollOnce()
+                              const timerId = window.setInterval(() => {
+                                void pollOnce()
+                              }, 3500)
+                              importJobPollTimerRef.current = timerId
+                              return
                             }
 
                             if (!res.ok) {
                               const fallback = `Falha na importação (HTTP ${res.status}).`
-                              const text = data?.message ? data.message : fallback
+                              const text =
+                                data &&
+                                typeof (data as { message?: unknown }).message ===
+                                  'string'
+                                  ? (data as { message: string }).message
+                                  : fallback
                               throw new Error(text)
                             }
 
-                            if (target === 'recurso_alego' || target === 'recurso_mpgo') {
+                            clearImportJobPollTimer()
+                            setImportingNow(false)
+                            setImportProgressModal({
+                              phase: 'done',
+                              target,
+                              folderUrl,
+                              syncResult: data || {},
+                              syncError: null,
+                              mode: 'sync',
+                            })
+                            if (
+                              target === 'recurso_alego' ||
+                              target === 'recurso_neoconsig_demais' ||
+                              target === 'recurso_adfego' ||
+                              target === 'recurso_tce' ||
+                              target === 'recurso_tcm' ||
+                              target === 'recurso_tre' ||
+                              target === 'recurso_trt' ||
+                              target === 'recurso_eletra' ||
+                              target === 'recurso_mpgo' ||
+                              target === 'recurso_tjgo'
+                            ) {
                               const moved =
                                 typeof (data as any)?.movedToImportados === 'boolean'
                                   ? ((data as any).movedToImportados as boolean)
                                   : false
+                              const movedCount =
+                                typeof (data as any)?.movedToImportadosCount === 'number'
+                                  ? Number((data as any).movedToImportadosCount)
+                                  : null
                               const skippedNoCpf =
                                 typeof (data as any)?.skippedNoCpf === 'number'
                                   ? Number((data as any).skippedNoCpf)
@@ -4747,27 +9446,102 @@ export default function CreditoPage() {
                                 typeof (data as any)?.moveError === 'string'
                                   ? String((data as any).moveError).trim()
                                   : ''
-                              const label = target === 'recurso_alego' ? 'ALEGO' : 'MPGO'
+                              const label =
+                                target === 'recurso_alego'
+                                  ? 'ALEGO'
+                                  : target === 'recurso_neoconsig_demais'
+                                    ? 'NEOCONSIG'
+                                  : target === 'recurso_adfego'
+                                    ? 'ADFEGO'
+                                  : target === 'recurso_tce'
+                                    ? 'TCE'
+                                    : target === 'recurso_tcm'
+                                      ? 'TCM'
+                                      : target === 'recurso_tre'
+                                        ? 'TRE'
+                                        : target === 'recurso_trt'
+                                          ? 'TRT'
+                                          : target === 'recurso_eletra'
+                                            ? 'Eletra'
+                                            : target === 'recurso_mpgo'
+                                              ? 'MPGO'
+                                              : 'TJGO'
+                              const filesImported = Array.isArray((data as any)?.filesImported)
+                                ? ((data as any).filesImported as Array<any>)
+                                : []
+                              const tablesCreated = Array.isArray((data as any)?.tablesCreated)
+                                ? ((data as any).tablesCreated as Array<any>)
+                                : []
+                              const filesImportedLines = filesImported.map((f) => {
+                                const n = String(f?.name ?? '-')
+                                const ins = Number(f?.insertedRows ?? 0)
+                                const dup = Number(f?.skippedDuplicates ?? 0)
+                                const noCpf = Number(f?.skippedNoCpf ?? 0)
+                                return `- ${n}: ${ins} inseridas, ${dup} duplicadas, ${noCpf} sem CPF`
+                              })
+                              const tablesCreatedLines = tablesCreated.map((t) => {
+                                const n = String(t?.tableName ?? '-')
+                                const ins = Number(t?.insertedRows ?? 0)
+                                const dup = Number(t?.skippedDuplicates ?? 0)
+                                const noCpf = Number(t?.skippedNoCpf ?? 0)
+                                return `- ${n}: ${ins} inseridas, ${dup} duplicadas, ${noCpf} sem CPF`
+                              })
+                              const importSummaryLines = [
+                                `Importação ${label} concluída (${String((data as any)?.mode ?? 'append')}).`,
+                                '',
+                                `Tabela: ${String(
+                                  (data as any)?.tableName ??
+                                    (target === 'recurso_alego'
+                                      ? 'Recurso ALEGO'
+                                      : target === 'recurso_neoconsig_demais'
+                                        ? 'Recurso (NEOCONSIG)'
+                                        : target === 'recurso_adfego'
+                                          ? 'Recurso ADFEGO'
+                                          : target === 'recurso_tce'
+                                            ? 'Recurso TCE'
+                                            : target === 'recurso_tcm'
+                                              ? 'Recurso TCM'
+                                              : target === 'recurso_tre'
+                                                ? 'Recurso TRE'
+                                                : target === 'recurso_trt'
+                                                  ? 'Recurso TRT'
+                                                  : target === 'recurso_eletra'
+                                                    ? 'Recurso Eletra'
+                                                    : target === 'recurso_mpgo'
+                                                      ? 'Recurso MPGO'
+                                                      : 'Recurso TJGO'),
+                                )}`,
+                                `Linhas: ${Number((data as any)?.rows ?? 0)}`,
+                                `Colunas: ${Number((data as any)?.columns ?? 0)}`,
+                                `Ignoradas sem CPF: ${skippedNoCpf}`,
+                                `Duplicadas: ${skippedDup}`,
+                                `Movido para Importados: ${moved ? 'sim' : 'não'}${
+                                  moved && movedCount !== null ? ` (${movedCount})` : ''
+                                }`,
+                                ...(moveError ? [`Motivo: ${moveError}`] : []),
+                                ...(filesImportedLines.length > 0
+                                  ? ['', 'Arquivos importados:', ...filesImportedLines]
+                                  : []),
+                                ...(tablesCreatedLines.length > 0
+                                  ? ['', 'Tabelas atualizadas:', ...tablesCreatedLines]
+                                  : []),
+                                ...((data as any)?.batchId
+                                  ? ['', `Lote: ${String((data as any).batchId)}`]
+                                  : []),
+                                '',
+                                `SQLite: ${String((data as any)?.dbFilePath ?? '-')}`,
+                              ]
                               setImportNowMessage({
                                 kind: 'success',
-                                text: `Importação ${label} concluída. Tabela: ${String(
-                                  data?.tableName ??
-                                    (target === 'recurso_alego' ? 'Recurso ALEGO' : 'Recurso MPGO'),
-                                )}. Linhas: ${Number(data?.rows ?? 0)}. Colunas: ${Number(
-                                  data?.columns ?? 0,
-                                )}. Ignoradas sem CPF: ${skippedNoCpf}. Duplicadas: ${skippedDup}. ${
-                                  moved
-                                    ? 'Movido para Importados: sim.'
-                                    : `Movido para Importados: não.${
-                                        moveError ? ` Motivo: ${moveError}` : ''
-                                      }`
-                                } SQLite: ${String(data?.dbFilePath ?? '-')}`,
+                                text: importSummaryLines.join('\n'),
                               })
                               return
                             }
 
-                            const relatoriosFiles = Array.isArray(data?.relatoriosFiles)
-                              ? data!.relatoriosFiles!
+                            const relatoriosFiles = Array.isArray(
+                              (data as any)?.relatoriosFiles,
+                            )
+                              ? ((data as any).relatoriosFiles as Array<any>)
                               : []
                             const relatoriosImportados = relatoriosFiles.filter((f) => {
                               const ins = Number(f.insertedRows ?? 0)
@@ -4787,7 +9561,9 @@ export default function CreditoPage() {
                                 ? relatoriosImportados
                                     .map(
                                       (f) =>
-                                        `${String(f.name ?? '-')} (${Number(f.insertedRows ?? 0)} ins, ${Number(f.skippedRows ?? 0)} dup)`,
+                                        `${String(f.name ?? '-')} (${Number(
+                                          f.insertedRows ?? 0,
+                                        )} ins, ${Number(f.skippedRows ?? 0)} dup)`,
                                     )
                                     .join(' | ')
                                 : '-'
@@ -4798,22 +9574,91 @@ export default function CreditoPage() {
                                       const base = String(f.name ?? '-')
                                       const reason = String(f.ignoredReason ?? '').trim()
                                       const err = String(f.error ?? '').trim()
-                                      const detail = reason || err ? ` (${reason || err})` : ''
+                                      const detail =
+                                        reason || err ? ` (${reason || err})` : ''
                                       return `${base}${detail}`
                                     })
                                     .join(' | ')
                                 : '-'
+                            const selectedExtratosCount = Array.isArray(
+                              (data as any)?.extratosSelected,
+                            )
+                              ? ((data as any).extratosSelected!.length as number)
+                              : 0
+                            const selectedRelatoriosCount = Array.isArray(
+                              (data as any)?.relatoriosSelected,
+                            )
+                              ? ((data as any).relatoriosSelected!.length as number)
+                              : 0
+                            const selectedFilesCount =
+                              selectedExtratosCount + selectedRelatoriosCount
+                            const includeExtratosSummary = target !== 'relatorio'
+                            const includeRelatoriosSummary = target !== 'extratos'
+                            const importSummaryLines = [
+                              selectedFilesCount === 0
+                                ? 'Nenhum arquivo encontrado no SharePoint'
+                                : `Importação concluída (${(data as any)?.mode ?? 'append'})`,
+                              ...(includeExtratosSummary
+                                ? [
+                                    '',
+                                    `Extratos: ${(data as any)?.importedExtratosCount ?? 0} arquivo(s)`,
+                                    `Linhas inseridas: ${(data as any)?.insertedExtratosRows ?? 0}`,
+                                    `Duplicadas: ${(data as any)?.skippedExtratosRows ?? 0}`,
+                                  ]
+                                : []),
+                              ...(includeRelatoriosSummary
+                                ? [
+                                    '',
+                                    `Relatórios: ${(data as any)?.importedRelatoriosCount ?? 0} arquivo(s)`,
+                                    `Linhas inseridas: ${(data as any)?.insertedRelatoriosRows ?? 0}`,
+                                    `Duplicadas: ${(data as any)?.skippedRelatoriosRows ?? 0}`,
+                                    '',
+                                    `Arquivos do Relatório importados: ${relatoriosImportadosText}`,
+                                    `Arquivos do Relatório ignorados: ${relatoriosIgnoradosText}`,
+                                  ]
+                                : []),
+                              '',
+                              `Total no BD`,
+                              `Extratos: ${(data as any)?.totalsInDb?.extratos ?? '-'}`,
+                              `Relatório: ${(data as any)?.totalsInDb?.relatorio ?? '-'}`,
+                              ...((data as any)?.message
+                                ? ['', `Aviso: ${(data as any).message as string}`]
+                                : []),
+                              ...(Array.isArray((data as any)?.extratosBatchIds) &&
+                              ((data as any).extratosBatchIds as unknown[]).length > 0
+                                ? [
+                                    '',
+                                    `Lotes Extratos: ${((data as any).extratosBatchIds as string[]).join(', ')}`,
+                                  ]
+                                : []),
+                              ...(Array.isArray((data as any)?.relatoriosBatchIds) && ((data as any).relatoriosBatchIds).length > 0
+                                ? [
+                                    '',
+                                    `Lotes Relatório: ${((data as any).relatoriosBatchIds as string[]).join(', ')}`,
+                                  ]
+                                : []),
+                              '',
+                              `SQLite: ${(data as any)?.dbFilePath ?? '-'}`,
+                            ]
 
                             setImportNowMessage({
                               kind: 'success',
-                              text: `Importação concluída (${data?.mode ?? 'append'}). Extratos: ${data?.importedExtratosCount ?? 0} arquivo(s), ${data?.insertedExtratosRows ?? 0} linha(s) inserida(s) (${data?.skippedExtratosRows ?? 0} duplicada(s)). Relatórios: ${data?.importedRelatoriosCount ?? 0} arquivo(s), ${data?.insertedRelatoriosRows ?? 0} linha(s) inserida(s) (${data?.skippedRelatoriosRows ?? 0} duplicada(s)). Arquivos do Relatório importados: ${relatoriosImportadosText}. Arquivos do Relatório ignorados: ${relatoriosIgnoradosText}. Total no BD: Extratos=${data?.totalsInDb?.extratos ?? '-'} | Relatório=${data?.totalsInDb?.relatorio ?? '-'}. ${data?.message ? `Aviso: ${data.message} ` : ''}SQLite: ${data?.dbFilePath ?? '-'}`,
+                              text: importSummaryLines.join('\n'),
                             })
                           } catch (e) {
+                            clearImportJobPollTimer()
+                            setImportingNow(false)
                             const message =
                               e instanceof Error ? e.message : 'Erro ao importar.'
                             setImportNowMessage({ kind: 'error', text: message })
-                          } finally {
-                            setImportingNow(false)
+                            setImportProgressModal({
+                              phase: 'done',
+                              target,
+                              folderUrl,
+                              syncResult: null,
+                              syncError: message,
+                              mode: 'sync',
+                            })
                           }
                         }}
                         disabled={settingsLocked || importingNow}
@@ -4838,8 +9683,24 @@ export default function CreditoPage() {
                             setManualImportTarget(
                               e.target.value === 'recurso_alego'
                                 ? 'recurso_alego'
+                                : e.target.value === 'recurso_neoconsig_demais'
+                                  ? 'recurso_neoconsig_demais'
+                                : e.target.value === 'recurso_adfego'
+                                  ? 'recurso_adfego'
+                                : e.target.value === 'recurso_tce'
+                                  ? 'recurso_tce'
+                                : e.target.value === 'recurso_tcm'
+                                  ? 'recurso_tcm'
+                                : e.target.value === 'recurso_tre'
+                                  ? 'recurso_tre'
+                                : e.target.value === 'recurso_trt'
+                                  ? 'recurso_trt'
+                                : e.target.value === 'recurso_eletra'
+                                  ? 'recurso_eletra'
                                 : e.target.value === 'recurso_mpgo'
                                   ? 'recurso_mpgo'
+                                  : e.target.value === 'recurso_tjgo'
+                                    ? 'recurso_tjgo'
                                 : e.target.value === 'relatorio'
                                   ? 'relatorio'
                                   : e.target.value === 'extratos'
@@ -4849,15 +9710,75 @@ export default function CreditoPage() {
                           }
                           disabled={settingsLocked}
                         >
-                          <option value="relatorio">Relatório SISBR</option>
-                          <option value="extratos">Extrato Recurso</option>
-                          <option value="recurso_alego">Recurso ALEGO</option>
-                          <option value="recurso_mpgo">Recurso MPGO</option>
+                          {[
+                            { value: 'relatorio' as const, label: 'Relatório SISBR' },
+                            { value: 'extratos' as const, label: 'Extrato Recurso' },
+                            { value: 'recurso_alego' as const, label: 'Recurso ALEGO' },
+                            { value: 'recurso_adfego' as const, label: 'Recurso ADFEGO' },
+                            {
+                              value: 'recurso_neoconsig_demais' as const,
+                              label: 'Recurso NEOCONSIG (Demais Órgãos)',
+                            },
+                            { value: 'recurso_mpgo' as const, label: 'Recurso MPGO' },
+                            { value: 'recurso_tce' as const, label: 'Recurso TCE' },
+                            { value: 'recurso_tcm' as const, label: 'Recurso TCM' },
+                            { value: 'recurso_tre' as const, label: 'Recurso TRE' },
+                            { value: 'recurso_trt' as const, label: 'Recurso TRT' },
+                            { value: 'recurso_eletra' as const, label: 'Recurso Eletra' },
+                            { value: 'recurso_tjgo' as const, label: 'Recurso TJGO' },
+                          ]
+                            .slice()
+                            .sort((a, b) =>
+                              a.label.localeCompare(b.label, 'pt-BR', { sensitivity: 'base' }),
+                            )
+                            .map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
                         </select>
                       </div>
-                      {manualImportTarget !== 'recurso_alego' && manualImportTarget !== 'recurso_mpgo' ? (
+                      {manualImportTarget === 'relatorio' ? (
                         <div className="field">
-                          <label>Diretório raiz (SharePoint)</label>
+                          <label>Pasta/Arquivo do SharePoint (Relatório SISBR)</label>
+                          <input
+                            className="control"
+                            value={relatorioSisbrUrl}
+                            onChange={(e) => setRelatorioSisbrUrl(e.target.value)}
+                            placeholder="Ex.: https://.../10.CRÉDITO/ ou https://.../10.CRÉDITO/ARQUIVO.pdf"
+                            disabled={settingsLocked}
+                          />
+                          <small className="help">
+                            Use a pasta onde os PDFs das empresas ficam ou a URL exata de um PDF.
+                          </small>
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'extratos' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (Extratos)</label>
+                          <input
+                            className="control"
+                            value={sharePointFolderPath}
+                            onChange={(e) => setSharePointFolderPath(e.target.value)}
+                            placeholder="Ex.: https://.../9.Recuperação%20de%20Crédito"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget !== 'relatorio' &&
+                      manualImportTarget !== 'extratos' &&
+                      manualImportTarget !== 'recurso_alego' &&
+                      manualImportTarget !== 'recurso_neoconsig_demais' &&
+                      manualImportTarget !== 'recurso_adfego' &&
+                      manualImportTarget !== 'recurso_tce' &&
+                      manualImportTarget !== 'recurso_tcm' &&
+                      manualImportTarget !== 'recurso_tre' &&
+                      manualImportTarget !== 'recurso_trt' &&
+                      manualImportTarget !== 'recurso_eletra' &&
+                      manualImportTarget !== 'recurso_mpgo' &&
+                      manualImportTarget !== 'recurso_tjgo' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint</label>
                           <input
                             className="control"
                             value={sharePointFolderPath}
@@ -4879,6 +9800,30 @@ export default function CreditoPage() {
                           />
                         </div>
                       ) : null}
+                      {manualImportTarget === 'recurso_neoconsig_demais' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (NEOCONSIG - Demais Órgãos)</label>
+                          <input
+                            className="control"
+                            value={recursoNeoconsigDemaisUrl}
+                            onChange={(e) => setRecursoNeoconsigDemaisUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Demais%20Orgão/NEOCONSIG%20TODOS%20-%2005.2026.xlsx"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'recurso_adfego' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (ADFEGO)</label>
+                          <input
+                            className="control"
+                            value={recursoAdfegoUrl}
+                            onChange={(e) => setRecursoAdfegoUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Orgão/ADFEGO/ADFEGO.xls"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
                       {manualImportTarget === 'recurso_mpgo' ? (
                         <div className="field">
                           <label>Pasta/Arquivo do SharePoint (MPGO)</label>
@@ -4887,6 +9832,78 @@ export default function CreditoPage() {
                             value={recursoMpgoUrl}
                             onChange={(e) => setRecursoMpgoUrl(e.target.value)}
                             placeholder="Ex.: https://.../Relatório%20Orgao/GOIAS%20MPGO"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'recurso_tce' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (TCE)</label>
+                          <input
+                            className="control"
+                            value={recursoTceUrl}
+                            onChange={(e) => setRecursoTceUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Orgao/TCE"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'recurso_tcm' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (TCM)</label>
+                          <input
+                            className="control"
+                            value={recursoTcmUrl}
+                            onChange={(e) => setRecursoTcmUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Orgao/TCM"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'recurso_tre' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (TRE)</label>
+                          <input
+                            className="control"
+                            value={recursoTreUrl}
+                            onChange={(e) => setRecursoTreUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Orgão/TRE/RELATORIO%20-%20TRE.xlsx"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'recurso_trt' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (TRT)</label>
+                          <input
+                            className="control"
+                            value={recursoTrtUrl}
+                            onChange={(e) => setRecursoTrtUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Orgão/TRT/Consignados%20TRT%20-%20Maio%20-2026.xlsx"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'recurso_eletra' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (Eletra)</label>
+                          <input
+                            className="control"
+                            value={recursoEletraUrl}
+                            onChange={(e) => setRecursoEletraUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Orgão/Eletra/RELATORIO%20-%20ELETRA.xlsx"
+                            disabled={settingsLocked}
+                          />
+                        </div>
+                      ) : null}
+                      {manualImportTarget === 'recurso_tjgo' ? (
+                        <div className="field">
+                          <label>Pasta/Arquivo do SharePoint (TJGO)</label>
+                          <input
+                            className="control"
+                            value={recursoTjgoUrl}
+                            onChange={(e) => setRecursoTjgoUrl(e.target.value)}
+                            placeholder="Ex.: https://.../Relatório%20Orgao/TJGO"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -4900,11 +9917,24 @@ export default function CreditoPage() {
                           if (settingsLocked) return
                           void saveAutomationConfigToServer({
                             sharePointFolderUrl: sharePointFolderPath.trim() || null,
+                            relatorioSisbrUrl: relatorioSisbrUrl.trim() || null,
                             recursoAlegoUrl: recursoAlegoUrl.trim() || null,
+                            recursoNeoconsigDemaisUrl: recursoNeoconsigDemaisUrl.trim() || null,
+                            recursoAdfegoUrl: recursoAdfegoUrl.trim() || null,
+                            recursoTceUrl: recursoTceUrl.trim() || null,
+                            recursoTcmUrl: recursoTcmUrl.trim() || null,
+                            recursoTreUrl: recursoTreUrl.trim() || null,
+                            recursoTrtUrl: recursoTrtUrl.trim() || null,
+                            recursoEletraUrl: recursoEletraUrl.trim() || null,
                             recursoMpgoUrl: recursoMpgoUrl.trim() || null,
+                            recursoTjgoUrl: recursoTjgoUrl.trim() || null,
                             notificationEmail: notificationEmail.trim() || null,
                             notificationEmailContabilidade:
                               notificationEmailContabilidade.trim() || null,
+                            occurrencesPanoramaDiretoriaEmail:
+                              occurrencesPanoramaDiretoriaEmail.trim() || null,
+                            occurrencesPanoramaGerentesEmail:
+                              occurrencesPanoramaGerentesEmail.trim() || null,
                           })
                         }}
                         disabled={settingsLocked || sharePointFolderPathSaving || sharePointFolderPathLoading}
@@ -4937,6 +9967,7 @@ export default function CreditoPage() {
                         className="help"
                         style={{
                           marginTop: 10,
+                          whiteSpace: 'pre-wrap',
                           color:
                             importNowMessage.kind === 'success'
                               ? 'rgba(0,174,157,0.95)'
@@ -5368,7 +10399,7 @@ export default function CreditoPage() {
                         </select>
                       </div>
                       <div className="field">
-                        <label>HISTÓRICO_1 (valor para somar)</label>
+                        <label>HISTÓRICO_1 / HISTÓRICO (valor para somar)</label>
                         <input
                           className="control"
                           list="extratos-historico1-options"
@@ -5561,6 +10592,278 @@ export default function CreditoPage() {
                   </div>
                 </section>
 
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>Consolidação • Relatório do Órgão</h2>
+                    <span className="chip">
+                      <FileText size={16} />
+                      Regras
+                    </span>
+                  </div>
+                  <div className="panel-body">
+                    {relatorioConsolidacaoRecursoLoading ? (
+                      <div className="help">Carregando regras...</div>
+                    ) : null}
+                    {relatorioConsolidacaoRecursoError ? (
+                      <div className="help" style={{ color: 'rgba(255, 99, 132, 0.95)' }}>
+                        {relatorioConsolidacaoRecursoError}
+                      </div>
+                    ) : null}
+
+                    <div className="form-grid">
+                      {(() => {
+                        const deOptions = recursoTableOptions.filter(
+                          (v) =>
+                            !relatorioConsolidacaoRecursoDraft.targetRecursoTable ||
+                            v === relatorioConsolidacaoRecursoDraft.recursoTable ||
+                            v !== relatorioConsolidacaoRecursoDraft.targetRecursoTable,
+                        )
+                        const paraOptions = recursoTableOptions.filter(
+                          (v) =>
+                            !relatorioConsolidacaoRecursoDraft.recursoTable ||
+                            v === relatorioConsolidacaoRecursoDraft.targetRecursoTable ||
+                            v !== relatorioConsolidacaoRecursoDraft.recursoTable,
+                        )
+                        return (
+                          <>
+                      <div className="field">
+                        <label>{'Órgão (De -> Recurso)'}</label>
+                        <select
+                          className="control orgao-select"
+                          value={relatorioConsolidacaoRecursoDraft.recursoTable}
+                          onChange={(e) =>
+                            setRelatorioConsolidacaoRecursoDraft((prev) => ({
+                              ...prev,
+                              recursoTable: e.target.value,
+                            }))
+                          }
+                          disabled={
+                            settingsLocked ||
+                            relatorioConsolidacaoRecursoLoading ||
+                            recursoTableOptionsLoading
+                          }
+                        >
+                          <option value="">(Selecione)</option>
+                          {deOptions.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="field">
+                        <label>{'Órgão (Para -> Recurso)'}</label>
+                        <select
+                          className="control orgao-select"
+                          value={relatorioConsolidacaoRecursoDraft.targetRecursoTable}
+                          onChange={(e) =>
+                            setRelatorioConsolidacaoRecursoDraft((prev) => ({
+                              ...prev,
+                              targetRecursoTable: e.target.value,
+                            }))
+                          }
+                          disabled={
+                            settingsLocked ||
+                            relatorioConsolidacaoRecursoLoading ||
+                            recursoTableOptionsLoading
+                          }
+                        >
+                          <option value="">(Selecione)</option>
+                          {paraOptions.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                          </>
+                        )
+                      })()}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={async () => {
+                          if (settingsLocked) return
+                          const recursoTable = relatorioConsolidacaoRecursoDraft.recursoTable.trim()
+                          const targetRecursoTable =
+                            relatorioConsolidacaoRecursoDraft.targetRecursoTable.trim()
+                          if (!recursoTable || !targetRecursoTable) return
+                          setRelatorioConsolidacaoRecursoSavedMsg(null)
+                          setRelatorioConsolidacaoRecursoError(null)
+                          setRelatorioConsolidacaoRecursoLoading(true)
+                          try {
+                            const res = await fetch('/api/consignado/relatorio-consolidacao-recurso', {
+                              method: 'POST',
+                              headers: { 'content-type': 'application/json' },
+                              body: JSON.stringify({ recursoTable, targetRecursoTable }),
+                            })
+                            const data = (await res.json().catch(() => null)) as null | {
+                              items?: Array<{ recursoTable?: string; targetRecursoTable?: string; createdAt?: string }>
+                              message?: string
+                            }
+                            if (!res.ok) {
+                              throw new Error(
+                                data?.message ||
+                                  `Falha ao salvar regra de consolidação (HTTP ${res.status}).`,
+                              )
+                            }
+                            const items = Array.isArray(data?.items)
+                              ? data!.items!
+                                  .map((i) => ({
+                                    recursoTable: typeof i.recursoTable === 'string' ? i.recursoTable : '',
+                                    targetRecursoTable:
+                                      typeof i.targetRecursoTable === 'string'
+                                        ? i.targetRecursoTable
+                                        : '',
+                                    createdAt: typeof i.createdAt === 'string' ? i.createdAt : '',
+                                  }))
+                                  .filter((i) => Boolean(i.recursoTable) && Boolean(i.targetRecursoTable))
+                              : []
+                            setRelatorioConsolidacaoRecurso(items)
+                            setRelatorioConsolidacaoRecursoDraft({
+                              recursoTable: '',
+                              targetRecursoTable: '',
+                            })
+                            setRelatorioConsolidacaoRecursoSavedMsg('Regra salva.')
+                          } catch (e) {
+                            const msg =
+                              e instanceof Error ? e.message : 'Falha ao salvar regra.'
+                            setRelatorioConsolidacaoRecursoError(msg)
+                          } finally {
+                            setRelatorioConsolidacaoRecursoLoading(false)
+                          }
+                        }}
+                        disabled={settingsLocked || relatorioConsolidacaoRecursoLoading}
+                      >
+                        <Zap size={18} />
+                        {relatorioConsolidacaoRecursoLoading ? 'Salvando...' : 'Salvar regra'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => {
+                          if (settingsLocked) return
+                          setRelatorioConsolidacaoRecursoDraft({
+                            recursoTable: '',
+                            targetRecursoTable: '',
+                          })
+                        }}
+                        disabled={settingsLocked || relatorioConsolidacaoRecursoLoading}
+                      >
+                        Limpar
+                      </button>
+                    </div>
+
+                    {relatorioConsolidacaoRecursoSavedMsg ? (
+                      <div className="help" style={{ marginTop: 10, color: 'rgba(0, 174, 157, 0.95)' }}>
+                        {relatorioConsolidacaoRecursoSavedMsg}
+                      </div>
+                    ) : null}
+
+                    <div style={{ marginTop: 14, overflow: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr>
+                            {['Órgão (De -> Recurso)', 'Órgão (Para -> Recurso)', 'Ações'].map((h) => (
+                              <th
+                                key={h}
+                                style={{
+                                  textAlign: 'left',
+                                  padding: '8px 10px',
+                                  fontSize: '0.72rem',
+                                  letterSpacing: '0.08em',
+                                  textTransform: 'uppercase',
+                                  color: 'rgba(255,255,255,0.62)',
+                                  borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                }}
+                              >
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {relatorioConsolidacaoRecurso.map((m) => (
+                            <tr key={`${m.recursoTable}__${m.targetRecursoTable}`}>
+                              <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                {m.recursoTable}
+                              </td>
+                              <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.85)' }}>
+                                {m.targetRecursoTable}
+                              </td>
+                              <td style={{ padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.08)', width: 110 }}>
+                                <button
+                                  type="button"
+                                  className="btn"
+                                  onClick={async () => {
+                                    if (settingsLocked) return
+                                    setRelatorioConsolidacaoRecursoSavedMsg(null)
+                                    setRelatorioConsolidacaoRecursoError(null)
+                                    setRelatorioConsolidacaoRecursoLoading(true)
+                                    try {
+                                      const res = await fetch('/api/consignado/relatorio-consolidacao-recurso/delete', {
+                                        method: 'POST',
+                                        headers: { 'content-type': 'application/json' },
+                                        body: JSON.stringify({
+                                          recursoTable: m.recursoTable,
+                                          targetRecursoTable: m.targetRecursoTable,
+                                        }),
+                                      })
+                                      const data = (await res.json().catch(() => null)) as null | {
+                                        items?: Array<{ recursoTable?: string; targetRecursoTable?: string; createdAt?: string }>
+                                        message?: string
+                                      }
+                                      if (!res.ok) {
+                                        throw new Error(
+                                          data?.message ||
+                                            `Falha ao remover regra (HTTP ${res.status}).`,
+                                        )
+                                      }
+                                      const items = Array.isArray(data?.items)
+                                        ? data!.items!
+                                            .map((i) => ({
+                                              recursoTable: typeof i.recursoTable === 'string' ? i.recursoTable : '',
+                                              targetRecursoTable:
+                                                typeof i.targetRecursoTable === 'string'
+                                                  ? i.targetRecursoTable
+                                                  : '',
+                                              createdAt: typeof i.createdAt === 'string' ? i.createdAt : '',
+                                            }))
+                                            .filter((i) => Boolean(i.recursoTable) && Boolean(i.targetRecursoTable))
+                                        : []
+                                      setRelatorioConsolidacaoRecurso(items)
+                                      setRelatorioConsolidacaoRecursoSavedMsg('Regra removida.')
+                                    } catch (e) {
+                                      const msg =
+                                        e instanceof Error ? e.message : 'Falha ao remover regra.'
+                                      setRelatorioConsolidacaoRecursoError(msg)
+                                    } finally {
+                                      setRelatorioConsolidacaoRecursoLoading(false)
+                                    }
+                                  }}
+                                  disabled={settingsLocked || relatorioConsolidacaoRecursoLoading}
+                                >
+                                  Remover
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                          {relatorioConsolidacaoRecurso.length === 0 ? (
+                            <tr>
+                              <td colSpan={3} style={{ padding: '10px 10px', color: 'rgba(255,255,255,0.70)' }}>
+                                Nenhuma regra cadastrada.
+                              </td>
+                            </tr>
+                          ) : null}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </section>
+
                 <section className="grid">
                 <div className="panel">
                   <div className="panel-head">
@@ -5675,6 +10978,53 @@ export default function CreditoPage() {
                         placeholder="ex.: contabilidade@sicoobjuriscred.com.br; fiscal@sicoobjuriscred.com.br"
                         disabled={settingsLocked}
                       />
+                    </div>
+                    <div
+                      style={{
+                        marginTop: 14,
+                        paddingTop: 14,
+                        borderTop: '1px solid rgba(255,255,255,0.10)',
+                        display: 'grid',
+                        gap: 12,
+                      }}
+                    >
+                      <div style={{ fontWeight: 750, color: 'rgba(255,255,255,0.92)' }}>
+                        Notificações de Ocorrência em Atraso
+                      </div>
+                      <div className="field">
+                        <label>E-mail diretoria</label>
+                        <input
+                          className="control"
+                          type="text"
+                          value={occurrencesPanoramaDiretoriaEmail}
+                          onChange={(e) =>
+                            setOccurrencesPanoramaDiretoriaEmail(e.target.value)
+                          }
+                          onBlur={() => void saveNotificationsConfigToServer()}
+                          placeholder="ex.: diretoria@sicoobjuriscred.com.br"
+                          disabled={settingsLocked}
+                        />
+                        <div className="help">
+                          Enviado no campo Para do panorama diário de ocorrências em atraso.
+                        </div>
+                      </div>
+                      <div className="field">
+                        <label>E-mail gerentes</label>
+                        <input
+                          className="control"
+                          type="text"
+                          value={occurrencesPanoramaGerentesEmail}
+                          onChange={(e) =>
+                            setOccurrencesPanoramaGerentesEmail(e.target.value)
+                          }
+                          onBlur={() => void saveNotificationsConfigToServer()}
+                          placeholder="ex.: gerente1@sicoobjuriscred.com.br; gerente2@sicoobjuriscred.com.br"
+                          disabled={settingsLocked}
+                        />
+                        <div className="help">
+                          Enviado em cópia para os Gerentes de CC.
+                        </div>
+                      </div>
                     </div>
                     <div
                       style={{
@@ -5820,10 +11170,10 @@ export default function CreditoPage() {
                         >
                           <input
                             className="control"
-                            type="email"
+                            type="text"
                             value={accessEmailDraft}
                             onChange={(e) => setAccessEmailDraft(e.target.value)}
-                            placeholder="ex.: usuario@sicoobjuriscred.com.br"
+                            placeholder="Pesquise por nome ou digite o e-mail..."
                             disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving}
                           />
                           <select
@@ -5862,97 +11212,430 @@ export default function CreditoPage() {
                                 [fixed]: 'admin',
                                 [next]: accessRoleDraft,
                               }
+                              const nextMenus: Record<string, AccessMenuPermission[]> = {
+                                ...accessMenusByEmail,
+                                [fixed]: [...ALL_ACCESS_MENU_PERMISSIONS],
+                                [next]: [...ALL_ACCESS_MENU_PERMISSIONS],
+                              }
+                              const nextFlowStages: Record<string, AccessFlowStagePermission[]> = {
+                                ...accessFlowStagesByEmail,
+                                [fixed]: [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS],
+                                [next]: [...ALL_ACCESS_FLOW_STAGE_PERMISSIONS],
+                              }
 
                               setAccessEmails(nextEmails)
                               setAccessRoleByEmail(nextRoles)
+                              setAccessMenusByEmail(nextMenus)
+                              setAccessFlowStagesByEmail(nextFlowStages)
+                              setAccessExpandedEmail(next)
                               setAccessEmailDraft('')
-                              persistAccess(nextEmails, nextRoles)
+                              setAccessEmailSearchResults([])
+                              setAccessEmailSearchError(null)
+                              persistAccess(
+                                nextEmails,
+                                nextRoles,
+                                nextMenus,
+                                nextFlowStages,
+                              )
                             }}
                           >
                             Adicionar
                           </button>
                         </div>
+                        <div className="help" style={{ margin: '8px 0 0 0', opacity: 0.85 }}>
+                          Selecionado:{' '}
+                          <span
+                            style={{
+                              fontWeight: 900,
+                              color: accessEmailDraft.trim().includes('@')
+                                ? 'rgba(34, 197, 94, 0.98)'
+                                : 'rgba(255,255,255,0.70)',
+                            }}
+                          >
+                            {accessEmailDraft.trim() || '—'}
+                          </span>
+                        </div>
+                        {accessEmailSearchError ? (
+                          <div className="help" style={{ margin: '6px 0 0 0', color: '#FCA5A5' }}>
+                            {accessEmailSearchError}
+                          </div>
+                        ) : null}
+                        {accessEmailSearchLoading ? (
+                          <div className="help" style={{ margin: '6px 0 0 0' }}>
+                            Buscando no Graph...
+                          </div>
+                        ) : null}
+                        {!accessEmailSearchLoading && accessEmailSearchResults.length > 0 ? (
+                          <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+                            {accessEmailSearchResults.map((u) => {
+                              const isSelected =
+                                String(accessEmailDraft || '').trim().toLowerCase() ===
+                                String(u.email || '').trim().toLowerCase()
+                              return (
+                                <button
+                                  key={u.email}
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  style={{
+                                    justifyContent: 'space-between',
+                                    textAlign: 'left',
+                                    border: isSelected
+                                      ? '1px solid rgba(34, 197, 94, 0.72)'
+                                      : '1px solid rgba(255,255,255,0.10)',
+                                    background: isSelected
+                                      ? 'linear-gradient(180deg, rgba(34, 197, 94, 0.18), rgba(16, 185, 129, 0.12))'
+                                      : 'rgba(255,255,255,0.03)',
+                                    boxShadow: isSelected
+                                      ? '0 0 0 1px rgba(34, 197, 94, 0.16) inset'
+                                      : 'none',
+                                  }}
+                                  disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving}
+                                  onClick={() => {
+                                    setAccessEmailDraft(u.email)
+                                    setAccessEmailSearchResults([])
+                                    setAccessEmailSearchError(null)
+                                  }}
+                                >
+                                  <span style={{ display: 'grid', gap: 4 }}>
+                                    <span style={{ fontWeight: 900 }}>{u.displayName}</span>
+                                    <span style={{ opacity: 0.82 }}>{u.email}</span>
+                                  </span>
+                                  <span style={{ opacity: isSelected ? 0.95 : 0.65, fontWeight: 900 }}>
+                                    {isSelected ? 'Selecionado' : 'Selecionar'}
+                                  </span>
+                                </button>
+                              )
+                            })}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
 
                     <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
                       {accessEmails.map((email) => {
                         const fixed = email === accessFixedEmail
+                        const expanded = accessExpandedEmail === email
+                        const selectedMenus = fixed
+                          ? ALL_ACCESS_MENU_PERMISSIONS
+                          : normalizeAccessMenuPermissions(accessMenusByEmail[email])
+                        const selectedFlowStages = fixed
+                          ? ALL_ACCESS_FLOW_STAGE_PERMISSIONS
+                          : normalizeAccessFlowStagePermissions(
+                              accessFlowStagesByEmail[email],
+                              false,
+                            )
                         return (
                           <div
                             key={email}
                             style={{
                               display: 'grid',
-                              gridTemplateColumns: 'minmax(320px, 1fr) 160px 44px',
-                              alignItems: 'center',
-                              gap: 12,
+                              gap: expanded ? 14 : 0,
                               padding: '10px 12px',
                               borderRadius: 16,
                               border: '1px solid rgba(255,255,255,0.10)',
                               background: 'rgba(255,255,255,0.04)',
                             }}
                           >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                              <span
-                                style={{
-                                  fontWeight: 700,
-                                  color: 'rgba(255,255,255,0.92)',
-                                  whiteSpace: 'nowrap',
-                                }}
-                              >
-                                {email}
-                              </span>
-                              {fixed ? (
-                                <span className="chip">
-                                  <ShieldCheck size={16} />
-                                  fixo
-                                </span>
-                              ) : null}
-                            </div>
-                            <select
-                              className="control access-select"
-                              value={accessRoleByEmail[email] ?? (fixed ? 'admin' : 'usuario')}
-                              onChange={(e) => {
-                                if (settingsLocked) return
-                                const role = e.target.value === 'admin' ? 'admin' : 'usuario'
-                                if (fixed) return
-                                const nextRoles: Record<string, 'admin' | 'usuario'> = {
-                                  ...accessRoleByEmail,
-                                  [email]: role,
-                                  [accessFixedEmail]: 'admin',
-                                }
-                                setAccessRoleByEmail(nextRoles)
-                                persistAccess(accessEmails, nextRoles)
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() =>
+                                setAccessExpandedEmail((prev) =>
+                                  prev === email ? null : email,
+                                )
+                              }
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'minmax(320px, 1fr) auto',
+                                alignItems: 'center',
+                                gap: 12,
+                                padding: '4px 2px',
+                                background: 'transparent',
+                                border: 'none',
+                                textAlign: 'left',
                               }}
-                              disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving || fixed}
-                              style={{ height: 44 }}
                             >
-                              <option value="usuario">Usuário</option>
-                              <option value="admin">Admin</option>
-                            </select>
-                            {!fixed ? (
-                              <button
-                                type="button"
-                                className="btn"
-                                disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving}
-                                onClick={() => {
-                                  if (settingsLocked) return
-                                  const nextEmails = accessEmails.filter((e) => e !== email)
-                                  const nextRoles: Record<string, 'admin' | 'usuario'> = {
-                                    ...accessRoleByEmail,
-                                  }
-                                  delete nextRoles[email]
-                                  nextRoles[accessFixedEmail] = 'admin'
-                                  setAccessEmails(nextEmails)
-                                  setAccessRoleByEmail(nextRoles)
-                                  persistAccess(nextEmails, nextRoles)
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                                <span
+                                  style={{
+                                    fontWeight: 700,
+                                    color: 'rgba(255,255,255,0.92)',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {email}
+                                </span>
+                                {fixed ? (
+                                  <span className="chip">
+                                    <ShieldCheck size={16} />
+                                    fixo
+                                  </span>
+                                ) : null}
+                              </div>
+                              <div
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 10,
+                                  justifySelf: 'end',
                                 }}
-                                title="Remover"
-                                aria-label={`Remover ${email}`}
-                                style={{ padding: 11, width: 44, justifyContent: 'center' }}
                               >
-                                <Trash2 size={18} />
-                              </button>
+                                <span className="chip">
+                                  {accessRoleByEmail[email] ?? (fixed ? 'admin' : 'usuario')}
+                                </span>
+                                <span
+                                  style={{
+                                    display: 'inline-flex',
+                                    transform: expanded ? 'rotate(180deg)' : 'none',
+                                    transition: 'transform 0.18s ease',
+                                  }}
+                                >
+                                  <ChevronDown size={18} />
+                                </span>
+                              </div>
+                            </button>
+
+                            {expanded ? (
+                              <div style={{ display: 'grid', gap: 12 }}>
+                                <div
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: '160px 44px',
+                                    justifyContent: 'end',
+                                    alignItems: 'center',
+                                    gap: 12,
+                                  }}
+                                >
+                                  <select
+                                    className="control access-select"
+                                    value={accessRoleByEmail[email] ?? (fixed ? 'admin' : 'usuario')}
+                                    onChange={(e) => {
+                                      if (settingsLocked) return
+                                      const role = e.target.value === 'admin' ? 'admin' : 'usuario'
+                                      if (fixed) return
+                                      const nextRoles: Record<string, 'admin' | 'usuario'> = {
+                                        ...accessRoleByEmail,
+                                        [email]: role,
+                                        [accessFixedEmail]: 'admin',
+                                      }
+                                      setAccessRoleByEmail(nextRoles)
+                                      persistAccess(
+                                        accessEmails,
+                                        nextRoles,
+                                        accessMenusByEmail,
+                                        accessFlowStagesByEmail,
+                                      )
+                                    }}
+                                    disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving || fixed}
+                                    style={{ height: 44 }}
+                                  >
+                                    <option value="usuario">Usuário</option>
+                                    <option value="admin">Admin</option>
+                                  </select>
+                                  {!fixed ? (
+                                    <button
+                                      type="button"
+                                      className="btn"
+                                      disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving}
+                                      onClick={() => {
+                                        if (settingsLocked) return
+                                        const nextEmails = accessEmails.filter((e) => e !== email)
+                                        const nextRoles: Record<string, 'admin' | 'usuario'> = {
+                                          ...accessRoleByEmail,
+                                        }
+                                        const nextMenus: Record<string, AccessMenuPermission[]> = {
+                                          ...accessMenusByEmail,
+                                        }
+                                        const nextFlowStages: Record<string, AccessFlowStagePermission[]> = {
+                                          ...accessFlowStagesByEmail,
+                                        }
+                                        delete nextRoles[email]
+                                        delete nextMenus[email]
+                                        delete nextFlowStages[email]
+                                        nextRoles[accessFixedEmail] = 'admin'
+                                        nextMenus[accessFixedEmail] = [...ALL_ACCESS_MENU_PERMISSIONS]
+                                        nextFlowStages[accessFixedEmail] =
+                                          normalizeAccessFlowStagePermissions(
+                                            accessFlowStagesByEmail[accessFixedEmail],
+                                            false,
+                                          )
+                                        setAccessEmails(nextEmails)
+                                        setAccessRoleByEmail(nextRoles)
+                                        setAccessMenusByEmail(nextMenus)
+                                        setAccessFlowStagesByEmail(nextFlowStages)
+                                        setAccessExpandedEmail((prev) => (prev === email ? null : prev))
+                                        persistAccess(
+                                          nextEmails,
+                                          nextRoles,
+                                          nextMenus,
+                                          nextFlowStages,
+                                        )
+                                      }}
+                                      title="Remover"
+                                      aria-label={`Remover ${email}`}
+                                      style={{ padding: 11, width: 44, justifyContent: 'center' }}
+                                    >
+                                      <Trash2 size={18} />
+                                    </button>
+                                  ) : null}
+                                </div>
+
+                              <div
+                                style={{
+                                  display: 'grid',
+                                  gap: 8,
+                                  padding: '12px 14px',
+                                  borderRadius: 14,
+                                  background: 'rgba(15, 23, 42, 0.22)',
+                                  border: '1px solid rgba(255,255,255,0.08)',
+                                }}
+                              >
+                                <div style={{ fontWeight: 800, color: 'rgba(255,255,255,0.9)' }}>
+                                  Permissão por menu
+                                </div>
+                                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                                  {ACCESS_MENU_OPTIONS.map((menu) => {
+                                    const checked = selectedMenus.includes(menu.id)
+                                    return (
+                                      <label
+                                        key={`${email}-${menu.id}`}
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: 8,
+                                          padding: '8px 10px',
+                                          borderRadius: 999,
+                                          border: checked
+                                            ? '1px solid rgba(34,197,94,0.55)'
+                                            : '1px solid rgba(255,255,255,0.10)',
+                                          background: checked
+                                            ? 'rgba(34,197,94,0.12)'
+                                            : 'rgba(255,255,255,0.03)',
+                                          cursor:
+                                            settingsLocked || accessEmailsLoading || accessEmailsSaving
+                                              ? 'default'
+                                              : 'pointer',
+                                        }}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving}
+                                          onChange={(e) => {
+                                            if (settingsLocked) return
+                                            const current = normalizeAccessMenuPermissions(
+                                              accessMenusByEmail[email],
+                                            )
+                                            const nextValue = e.target.checked
+                                              ? normalizeAccessMenuPermissions([...current, menu.id])
+                                              : normalizeAccessMenuPermissions(
+                                                  current.filter((item) => item !== menu.id),
+                                                )
+                                            const nextMenus: Record<string, AccessMenuPermission[]> = {
+                                              ...accessMenusByEmail,
+                                              [email]:
+                                                nextValue.length > 0
+                                                  ? nextValue
+                                                  : [...ALL_ACCESS_MENU_PERMISSIONS],
+                                            }
+                                            setAccessMenusByEmail(nextMenus)
+                                            persistAccess(
+                                              accessEmails,
+                                              accessRoleByEmail,
+                                              nextMenus,
+                                              accessFlowStagesByEmail,
+                                            )
+                                          }}
+                                        />
+                                        <span>{menu.label}</span>
+                                      </label>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+
+                              <div
+                                style={{
+                                  display: 'grid',
+                                  gap: 8,
+                                  padding: '12px 14px',
+                                  borderRadius: 14,
+                                  background: 'rgba(15, 23, 42, 0.22)',
+                                  border: '1px solid rgba(255,255,255,0.08)',
+                                }}
+                              >
+                                <div style={{ fontWeight: 800, color: 'rgba(255,255,255,0.9)' }}>
+                                  Permissão no Fluxo de Pendências
+                                </div>
+                                <div className="help" style={{ margin: 0 }}>
+                                  Habilita os botões dos cards conforme a coluna responsável.
+                                </div>
+                                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                                  {ACCESS_FLOW_STAGE_OPTIONS.map((stage) => {
+                                    const checked = selectedFlowStages.includes(stage.id)
+                                    return (
+                                      <label
+                                        key={`${email}-${stage.id}`}
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: 8,
+                                          padding: '8px 10px',
+                                          borderRadius: 999,
+                                          border: checked
+                                            ? '1px solid rgba(249,115,22,0.55)'
+                                            : '1px solid rgba(255,255,255,0.10)',
+                                          background: checked
+                                            ? 'rgba(249,115,22,0.12)'
+                                            : 'rgba(255,255,255,0.03)',
+                                          cursor:
+                                            settingsLocked || accessEmailsLoading || accessEmailsSaving
+                                              ? 'default'
+                                              : 'pointer',
+                                        }}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          disabled={settingsLocked || accessEmailsLoading || accessEmailsSaving}
+                                          onChange={(e) => {
+                                            if (settingsLocked) return
+                                            const current = normalizeAccessFlowStagePermissions(
+                                              accessFlowStagesByEmail[email],
+                                              false,
+                                            )
+                                            const nextValue = e.target.checked
+                                              ? normalizeAccessFlowStagePermissions(
+                                                  [...current, stage.id],
+                                                  false,
+                                                )
+                                              : normalizeAccessFlowStagePermissions(
+                                                  current.filter((item) => item !== stage.id),
+                                                  false,
+                                                )
+                                            const nextFlowStages: Record<
+                                              string,
+                                              AccessFlowStagePermission[]
+                                            > = {
+                                              ...accessFlowStagesByEmail,
+                                              [email]: nextValue,
+                                            }
+                                            setAccessFlowStagesByEmail(nextFlowStages)
+                                            persistAccess(
+                                              accessEmails,
+                                              accessRoleByEmail,
+                                              accessMenusByEmail,
+                                              nextFlowStages,
+                                            )
+                                          }}
+                                        />
+                                        <span>{stage.label}</span>
+                                      </label>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                              </div>
                             ) : null}
                           </div>
                         )
@@ -5975,15 +11658,29 @@ export default function CreditoPage() {
                   </div>
                   <div className="panel-body">
                     <div className="home-toolbar" style={{ marginBottom: 10 }}>
-                      <div className="grid" style={{ gridTemplateColumns: '180px 1fr 220px', gap: 12 }}>
-                        <div className="field">
+                      <div
+                        className="form-grid form-grid-4"
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '180px minmax(360px, 1fr) 260px 240px',
+                          gap: 12,
+                          alignItems: 'start',
+                        }}
+                      >
+                        <div
+                          className="field"
+                          style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                        >
                           <label>Competência</label>
                           <select
                             className="control month-select"
                             value={conciliacaoMonth}
-                            onChange={(e) => setConciliacaoMonth(e.target.value)}
+                            onChange={(e) => {
+                              setConciliacaoMonth(e.target.value)
+                              setConciliacaoPorDataLiquidationDate('')
+                            }}
                             disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
-                            style={{ height: 44 }}
+                            style={{ height: 44, boxSizing: 'border-box' }}
                           >
                             {conciliacaoMonthOptions.map((o) => (
                               <option key={o.value} value={o.value}>
@@ -5993,27 +11690,66 @@ export default function CreditoPage() {
                           </select>
                         </div>
 
-                        <div className="field">
+                        <div
+                          className="field"
+                          style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                        >
                           <label>Órgão</label>
                           <select
                             className="control month-select"
                             value={conciliacaoOrgao}
                             onChange={(e) => setConciliacaoOrgao(e.target.value)}
                             disabled={orgaoDeParaLoading}
-                            style={{ height: 44 }}
+                            style={{ height: 44, boxSizing: 'border-box' }}
                           >
                             <option value="">Selecione...</option>
                             {conciliacaoOrgaoOptions.map((o) => (
                               <option key={o} value={o}>
-                                {o}
+                                {formatConciliacaoOrgaoLabel(o)}
                               </option>
                             ))}
                           </select>
                         </div>
 
-                        <div className="field">
+                        <div
+                          className="field"
+                          style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                        >
+                          <label>Vencimento</label>
+                          <select
+                            className="control month-select"
+                            value={relatorioVencimentoFilter}
+                            onChange={(e) => setRelatorioVencimentoFilter(e.target.value)}
+                            disabled={!conciliacaoOrgao.trim() || relatorioVencimentoOptions.length === 0}
+                            style={{ height: 44, boxSizing: 'border-box' }}
+                          >
+                            <option value="">Total</option>
+                            {relatorioVencimentoOptions.map((v) => (
+                              <option key={v} value={v}>
+                                {v}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div
+                          className="field"
+                          style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                        >
                           <label>Exibir</label>
-                          <label className="home-toggle">
+                          <label
+                            className="day"
+                            style={{
+                              width: '100%',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'flex-start',
+                              gap: 10,
+                              height: 44,
+                              boxSizing: 'border-box',
+                              margin: 0,
+                            }}
+                          >
                             <input
                               type="checkbox"
                               checked={conciliacaoOnlyDiff}
@@ -6034,7 +11770,7 @@ export default function CreditoPage() {
                         <button
                           type="button"
                           className="btn btn-primary"
-                          onClick={() => void exportConciliacaoPdf()}
+                          onClick={() => openConciliacaoExportModal('pdf')}
                           disabled={
                             !canExportConciliacaoXlsx ||
                             conciliacaoExportingPdf ||
@@ -6056,20 +11792,167 @@ export default function CreditoPage() {
                             !conciliacaoOrgao.trim() ||
                             !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
                           }
-                          onClick={() => void exportConciliacaoXlsx()}
+                          onClick={() => openConciliacaoExportModal('xlsx')}
                           style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                         >
                           <FileSpreadsheet size={18} />
                           {conciliacaoExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
                         </button>
                       </div>
+
+                      {conciliacaoExportModalOpen && typeof document !== 'undefined'
+                        ? createPortal(
+                            <div
+                              role="dialog"
+                              aria-modal="true"
+                              style={{
+                                position: 'fixed',
+                                inset: 0,
+                                background: 'rgba(0,0,0,0.62)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: 16,
+                                zIndex: 240,
+                              }}
+                              onClick={() => setConciliacaoExportModalOpen(false)}
+                            >
+                              <div
+                                style={{
+                                  width: 'min(560px, 96vw)',
+                                  borderRadius: 18,
+                                  border: '1px solid rgba(255,255,255,0.16)',
+                                  background: 'rgba(12, 22, 40, 0.96)',
+                                  color: 'rgba(255,255,255,0.92)',
+                                  boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                                  overflow: 'hidden',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div
+                                  style={{
+                                    padding: '14px 16px',
+                                    borderBottom: '1px solid rgba(255,255,255,0.10)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900 }}>
+                                    {conciliacaoExportModalFormat === 'pdf' ? 'Exportar PDF' : 'Exportar XLSX'}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={() => setConciliacaoExportModalOpen(false)}
+                                  >
+                                    Fechar
+                                  </button>
+                                </div>
+                                <div style={{ padding: '14px 16px', display: 'grid', gap: 12 }}>
+                                  <div style={{ display: 'grid', gap: 10 }}>
+                                    <label style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                      <input
+                                        type="radio"
+                                        name="conciliacao-export-mode-relatorios"
+                                        checked={conciliacaoExportModalMode === 'total'}
+                                        onChange={() => setConciliacaoExportModalMode('total')}
+                                      />
+                                      <span>Total</span>
+                                    </label>
+                                    <label
+                                      style={{
+                                        display: 'flex',
+                                        gap: 10,
+                                        alignItems: 'center',
+                                        opacity: relatorioVencimentoOptions.length === 0 ? 0.55 : 1,
+                                      }}
+                                    >
+                                      <input
+                                        type="radio"
+                                        name="conciliacao-export-mode-relatorios"
+                                        checked={conciliacaoExportModalMode === 'vencimento'}
+                                        onChange={() => setConciliacaoExportModalMode('vencimento')}
+                                        disabled={relatorioVencimentoOptions.length === 0}
+                                      />
+                                      <span>Selecionar vencimento</span>
+                                    </label>
+                                  </div>
+
+                                  {conciliacaoExportModalMode === 'vencimento' ? (
+                                    <div className="field">
+                                      <label>Vencimento</label>
+                                      <select
+                                        className="control month-select"
+                                        value={conciliacaoExportModalVencimento}
+                                        onChange={(e) => setConciliacaoExportModalVencimento(e.target.value)}
+                                        style={{ height: 44 }}
+                                      >
+                                        <option value="">Selecione...</option>
+                                        {relatorioVencimentoOptions.map((v) => (
+                                          <option key={v} value={v}>
+                                            {v}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ) : null}
+
+                                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      onClick={() => setConciliacaoExportModalOpen(false)}
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      disabled={
+                                        conciliacaoExportingPdf ||
+                                        conciliacaoExportingXlsx ||
+                                        (conciliacaoExportModalMode === 'vencimento' &&
+                                          !conciliacaoExportModalVencimento.trim())
+                                      }
+                                      onClick={() => void confirmConciliacaoExport()}
+                                    >
+                                      Exportar
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>,
+                            document.body,
+                          )
+                        : null}
                     </div>
                   </div>
                 </div>
 
                 <div className="panel" style={{ gridColumn: '1 / -1' }}>
                   <div className="panel-head">
-                    <h2>Lista da conciliação</h2>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                      <h2 style={{ margin: 0 }}>Lista da conciliação</h2>
+                      <button
+                        type="button"
+                        className="btn"
+                        title="Exportar XLSX com os filtros atuais"
+                        aria-label="Exportar XLSX com os filtros atuais"
+                        disabled={
+                          !canExportConciliacaoXlsx ||
+                          conciliacaoExportingXlsx ||
+                          !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                        }
+                        onClick={() =>
+                          void exportRelatoriosValoresListaXlsx()
+                        }
+                        style={{ padding: 10, width: 44, justifyContent: 'center', flex: '0 0 auto' }}
+                      >
+                        <FileSpreadsheet size={18} color="#21A366" />
+                      </button>
+                    </div>
                     <span className="chip">
                       <Sparkles size={16} />
                       Recurso x Relatório Sisbr
@@ -6080,26 +11963,18 @@ export default function CreditoPage() {
                       <div className="help">Carregando conciliação...</div>
                     ) : conciliacaoData ? (
                       (() => {
-                        const recursoAll = Array.isArray(conciliacaoData?.recurso) ? conciliacaoData.recurso : []
-                        const relatorioAll = Array.isArray(conciliacaoData?.relatorio) ? conciliacaoData.relatorio : []
-                        const recursoRows = conciliacaoOnlyDiff ? recursoAll.filter((x: any) => x?.status === 'pendencia') : recursoAll
-                        const relatorioRows = conciliacaoOnlyDiff ? relatorioAll.filter((x: any) => x?.status === 'pendencia') : relatorioAll
-                        const rows = [
-                          ...recursoRows.map((r: any) => ({ ...r, __src: 'Recurso' as const, __occ: null as any })),
-                          ...relatorioRows.map((r: any) => ({ ...r, __src: 'Relatório Sisbr' as const, __occ: r?.ocorrencia ?? null })),
-                        ]
-                        const shown = rows.slice(0, 500)
+                        const shown = relatoriosValoresListaRows.slice(0, 500)
 
                         return (
                           <>
                             <div className="help" style={{ marginBottom: 10 }}>
-                              Mostrando {shown.length} de {rows.length} linha(s).
+                              Mostrando {shown.length} de {relatoriosValoresListaRows.length} linha(s).
                             </div>
                             <div style={{ overflow: 'auto' }}>
                               <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
                                 <thead>
                                   <tr>
-                                    {['Origem', 'CPF', 'Nome', 'Valor', 'Status', 'Ocorrência'].map((h) => (
+                                    {['Origem', 'CPF', 'Nome', 'Valor', 'Vencimento', 'Status', 'Ocorrência'].map((h) => (
                                       <th
                                         key={h}
                                         style={{
@@ -6119,33 +11994,31 @@ export default function CreditoPage() {
                                   </tr>
                                 </thead>
                                 <tbody>
-                                  {shown.map((r: any, idx: number) => {
-                                    const status = r?.status === 'conciliado' ? 'Conciliado' : 'Pendente'
-                                    const occ =
-                                      r.__src === 'Relatório Sisbr' && r.__occ
-                                        ? [r.__occ.action, r.__occ.justification].filter(Boolean).join(' • ')
-                                        : ''
+                                  {shown.map((r, idx: number) => {
                                     return (
-                                      <tr key={`${r.__src}-${r.cpf}-${r.value}-${idx}`}>
+                                      <tr key={`${r.key}-${idx}`}>
                                         <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                                          {r.__src}
+                                          {r.origem}
                                         </td>
                                         <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
-                                          {String(r?.cpf ?? '').trim() || '-'}
+                                          {r.cpf}
                                         </td>
                                         <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 260 }}>
-                                          {String(r?.nome ?? '').trim() || '-'}
+                                          {r.nome}
                                         </td>
                                         <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                                          {withCurrency(String(r?.value ?? '0,00'))}
+                                          {withCurrency(r.valor)}
                                         </td>
                                         <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
-                                          <span className="chip" style={{ borderColor: r?.status === 'conciliado' ? 'rgba(22,163,74,0.35)' : 'rgba(245,158,11,0.35)' }}>
-                                            {status}
+                                          {r.vencimento}
+                                        </td>
+                                        <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                          <span className="chip" style={{ borderColor: r.status === 'Conciliado' ? 'rgba(22,163,74,0.35)' : 'rgba(245,158,11,0.35)' }}>
+                                            {r.status}
                                           </span>
                                         </td>
                                         <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 260 }}>
-                                          {occ || '—'}
+                                          {r.ocorrencia}
                                         </td>
                                       </tr>
                                     )
@@ -6163,6 +12036,1882 @@ export default function CreditoPage() {
                 </div>
               </section>
             ) : null}
+
+            {view === 'relatorios-conciliacao-data' ? (
+              <section className="grid">
+                <div className="panel" style={{ gridColumn: '1 / -1' }}>
+                  <div className="panel-head">
+                    <h2>Conciliação por data</h2>
+                    <span className="chip">
+                      <Clock size={16} />
+                      Relatório
+                    </span>
+                  </div>
+                  <div className="panel-body">
+                    <div className="home-toolbar" style={{ marginBottom: 10 }}>
+                      <div
+                        className="form-grid form-grid-4"
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '180px 220px auto',
+                          gap: 12,
+                          alignItems: 'start',
+                        }}
+                      >
+                        <div
+                          className="field"
+                          style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch' }}
+                        >
+                          <label>Competência</label>
+                          <select
+                            className="control month-select"
+                            value={conciliacaoMonth}
+                            onChange={(e) => setConciliacaoMonth(e.target.value)}
+                            disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
+                            style={{ height: 44, boxSizing: 'border-box' }}
+                          >
+                            {conciliacaoMonthOptions.map((o) => (
+                              <option key={o.value} value={o.value}>
+                                {o.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div
+                          className="field"
+                          style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'stretch' }}
+                        >
+                          <label style={{ whiteSpace: 'nowrap' }}>Data para envio de validação</label>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                            <select
+                              className="control month-select"
+                              value={conciliacaoPorDataLiquidationDate}
+                              onChange={(e) => setConciliacaoPorDataLiquidationDate(e.target.value)}
+                              disabled={
+                                conciliacaoPorDataLoading ||
+                                !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                              }
+                              style={{ height: 44, boxSizing: 'border-box', flex: '1 1 auto', minWidth: 0 }}
+                            >
+                              <option value="">Selecione...</option>
+                              {(conciliacaoPorDataData?.availableLiquidationDates ?? []).map((value) => (
+                                <option key={value} value={value}>
+                                  {value}
+                                </option>
+                              ))}
+                            </select>
+                            {(() => {
+                              const selectedDate = conciliacaoPorDataLiquidationDate.trim()
+                              const process =
+                                selectedDate && conciliacaoPorDataData
+                                  ? conciliacaoPorDataData.rows.find(
+                                      (row) =>
+                                        String(row?.liquidationDate ?? '').trim() === selectedDate && row.validation,
+                                    )?.validation ?? null
+                                  : null
+                              const statusMeta = process
+                                ? getConciliacaoPorDataValidationStatusMeta(process.status)
+                                : null
+                              const isSubmitting =
+                                Boolean(selectedDate) &&
+                                conciliacaoPorDataValidationSubmittingKey === selectedDate
+                              const canOpen = Boolean(process)
+                              const iconColor = statusMeta?.color ?? 'rgba(226,232,240,0.85)'
+                              const iconBackground = statusMeta?.background ?? 'rgba(15,23,42,0.22)'
+                              const iconBorder = statusMeta?.accent ?? 'rgba(148,163,184,0.18)'
+                              const canSend =
+                                Boolean(selectedDate) &&
+                                (conciliacaoPorDataData?.rows.some(
+                                  (row) =>
+                                    String(row?.liquidationDate ?? '').trim() === selectedDate &&
+                                    !isConciliacaoPorDataDevolucaoEvent(row?.event),
+                                ) ??
+                                  false)
+
+                              return (
+                                <>
+                                  {canOpen ? (
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      title={`Abrir processo (${statusMeta?.label ?? 'Pendente'})`}
+                                      aria-label="Abrir processo de validação"
+                                      disabled={isSubmitting}
+                                      style={{
+                                        padding: 10,
+                                        width: 44,
+                                        height: 44,
+                                        justifyContent: 'center',
+                                        borderRadius: 12,
+                                        color: iconColor,
+                                        background: iconBackground,
+                                        border: `1px solid ${iconBorder}`,
+                                        cursor: isSubmitting ? 'wait' : 'pointer',
+                                      }}
+                                      onClick={() => {
+                                        if (!selectedDate) {
+                                          toast.error('Selecione a data para abrir o processo de validação.')
+                                          return
+                                        }
+                                        if (!process) return
+                                        const aggregate = buildConciliacaoPorDataAggregateRowForValidation(selectedDate)
+                                        setConciliacaoPorDataValidationModal({
+                                          orgao: 'Todos os órgãos',
+                                          liquidationDate: selectedDate,
+                                          process,
+                                          resendPayload: aggregate
+                                            ? {
+                                                orgaoReceivedCents: aggregate.orgaoReceivedCents,
+                                                totalDebitCents: aggregate.totalDebitCents,
+                                                saldoCents: aggregate.saldoCents,
+                                                eventColumns: aggregate.eventColumns,
+                                              }
+                                            : null,
+                                        })
+                                      }}
+                                    >
+                                      {process?.status === 'approved' ? (
+                                        <ShieldCheck size={16} />
+                                      ) : process?.status === 'rejected' ? (
+                                        <Info size={16} />
+                                      ) : (
+                                        <Clock size={16} />
+                                      )}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      title={
+                                        !selectedDate
+                                          ? 'Selecione a data para enviar para validação.'
+                                          : !canSend
+                                            ? 'A conciliação da data selecionada não está fechada (parcial ou total).'
+                                            : 'Enviar para validação contábil'
+                                      }
+                                      aria-label="Enviar para validação contábil"
+                                      disabled={!selectedDate || isSubmitting || !canSend}
+                                      style={{
+                                        padding: 10,
+                                        width: 44,
+                                        height: 44,
+                                        justifyContent: 'center',
+                                        borderRadius: 12,
+                                        opacity: !selectedDate || isSubmitting || !canSend ? 0.65 : 1,
+                                      }}
+                                      onClick={() => {
+                                        if (!selectedDate) {
+                                          toast.error('Selecione a data para enviar para validação.')
+                                          return
+                                        }
+                                        if (!canSend) {
+                                          toast.error(
+                                            'A conciliação da data selecionada não está fechada (parcial ou total).',
+                                          )
+                                          return
+                                        }
+                                        const aggregate = buildConciliacaoPorDataAggregateRowForValidation(selectedDate)
+                                        if (!aggregate) {
+                                          toast.error('Não foi possível montar o resumo da data selecionada.')
+                                          return
+                                        }
+                                        requestConciliacaoPorDataValidationNow(aggregate)
+                                      }}
+                                    >
+                                      {isSubmitting ? <Clock size={16} /> : <Play size={16} />}
+                                    </button>
+                                  )}
+                                </>
+                              )
+                            })()}
+                          </div>
+                        </div>
+
+                        <div
+                          style={{
+                            display: 'flex',
+                            gap: 10,
+                            flexWrap: 'wrap',
+                            justifyContent: 'flex-end',
+                            alignSelf: 'end',
+                          }}
+                        >
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() => void exportConciliacaoPorDataPdf()}
+                            disabled={
+                              conciliacaoPorDataExportingPdf ||
+                              !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                            }
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                          >
+                            <FileText size={18} />
+                            {conciliacaoPorDataExportingPdf ? 'Exportando...' : 'Exportar PDF'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            onClick={() => void exportConciliacaoPorDataXlsx()}
+                            disabled={
+                              conciliacaoPorDataExportingXlsx ||
+                              !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
+                            }
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
+                          >
+                            <FileSpreadsheet size={18} />
+                            {conciliacaoPorDataExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {conciliacaoError ? (
+                        <div className="help" style={{ marginTop: 10, color: 'rgba(255, 99, 132, 0.95)' }}>
+                          {conciliacaoError}
+                        </div>
+                      ) : null}
+
+                      <div style={{ marginTop: 18 }}>
+                        <div className="panel-head" style={{ padding: 0, marginBottom: 10 }}>
+                          <h3 style={{ margin: 0 }}>Prévia dos dados</h3>
+                          <span className="chip">
+                            {conciliacaoPorDataLoading
+                              ? 'carregando'
+                              : `${conciliacaoPorDataData?.rows.length ?? 0} linhas`}
+                          </span>
+                        </div>
+
+                        {conciliacaoPorDataError ? (
+                          <div className="help" style={{ marginBottom: 12, color: 'rgba(255, 99, 132, 0.95)' }}>
+                            {conciliacaoPorDataError}
+                          </div>
+                        ) : null}
+
+                        {conciliacaoPorDataLoading ? (
+                          <div className="help">Carregando dados da conciliação por data...</div>
+                        ) : null}
+
+                        {!conciliacaoPorDataLoading &&
+                        !conciliacaoPorDataError &&
+                        conciliacaoPorDataData ? (
+                          <>
+                            {(() => {
+                              const receivedColumnTotalCents = getConciliacaoPorDataReceivedColumnTotal(
+                                conciliacaoPorDataData.rows,
+                              )
+                              const tarifasTotalCents = conciliacaoPorDataData.tarifasByOrgao.reduce(
+                                (sum, item) => {
+                                  if (
+                                    !item.oldestLiquidationDate ||
+                                    !conciliacaoPorDataData.rows.some(
+                                      (row) =>
+                                        normalizeConciliacaoPorDataOrgaoKey(row.orgao) ===
+                                          normalizeConciliacaoPorDataOrgaoKey(item.orgao) &&
+                                        row.liquidationDate === item.oldestLiquidationDate,
+                                    )
+                                  ) {
+                                    return sum
+                                  }
+                                  return sum + (Number(item.totalCents ?? 0) || 0)
+                                },
+                                0,
+                              )
+                              const debitTotalCents =
+                                (Number(conciliacaoPorDataData.totals.debitCents ?? 0) || 0) +
+                                tarifasTotalCents
+                              const creditTotalCents = receivedColumnTotalCents
+                              const finalSaldoCents = creditTotalCents - debitTotalCents
+                              const isFinalSaldoZero = finalSaldoCents === 0
+                              const green = 'rgba(0,174,157,0.98)'
+                              const red = 'rgba(255, 99, 132, 0.95)'
+                              const finalSaldoText = withCurrency(centsToPtBr(finalSaldoCents))
+                              return (
+                            <div
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                                gap: 10,
+                                marginBottom: 12,
+                              }}
+                            >
+                              {[
+                                {
+                                  label: 'Linhas',
+                                  value: String(conciliacaoPorDataData.rows.length),
+                                },
+                                {
+                                  label: 'Débito total',
+                                  value: withCurrency(centsToPtBr(debitTotalCents)),
+                                },
+                                {
+                                  label: 'Crédito total',
+                                  value: withCurrency(centsToPtBr(creditTotalCents)),
+                                },
+                                {
+                                  label: 'Saldo final',
+                                  value: isFinalSaldoZero ? (
+                                    <span
+                                      style={{
+                                        color: green,
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: 8,
+                                      }}
+                                    >
+                                      {finalSaldoText}
+                                      <ShieldCheck size={16} />
+                                    </span>
+                                  ) : (
+                                    <span style={{ color: red }}>{finalSaldoText}</span>
+                                  ),
+                                },
+                              ].map((item) => (
+                                <div
+                                  key={item.label}
+                                  style={{
+                                    border: '1px solid rgba(255,255,255,0.10)',
+                                    borderRadius: 14,
+                                    padding: 12,
+                                    background: 'rgba(255,255,255,0.03)',
+                                  }}
+                                >
+                                  <div
+                                    style={{
+                                      fontSize: '0.72rem',
+                                      letterSpacing: '0.08em',
+                                      textTransform: 'uppercase',
+                                      color: 'rgba(255,255,255,0.62)',
+                                      marginBottom: 6,
+                                    }}
+                                  >
+                                    {item.label}
+                                  </div>
+                                  <div style={{ fontSize: '1rem', fontWeight: 800 }}>{item.value}</div>
+                                </div>
+                              ))}
+                            </div>
+                              )
+                            })()}
+
+                            {conciliacaoPorDataData.rows.length === 0 ? (
+                              <div className="help">
+                                Nenhuma linha encontrada para os filtros selecionados.
+                              </div>
+                            ) : (
+                              (() => {
+                                const sortDatePtBr = (a: string, b: string) => {
+                                  const parseKey = (v: string) => {
+                                    const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(v.trim())
+                                    if (!m) return v
+                                    return `${m[3]}${m[2]}${m[1]}`
+                                  }
+                                  return parseKey(a).localeCompare(parseKey(b))
+                                }
+
+                                const eventColumns = new Map<
+                                  string,
+                                  {
+                                    key: string
+                                    label: string
+                                    side: 'debit' | 'credit'
+                                  }
+                                >()
+                                const groupedRows = new Map<
+                                  string,
+                                  {
+                                    liquidationDate: string
+                                    displayDateLabel: string
+                                    displayDateValue: string
+                                    orgaoReceivedDate: string
+                                    orgao: string
+                                    orgaoReceivedCents: number
+                                    values: Record<string, number>
+                                    totalDebitCents: number
+                                    totalCreditCents: number
+                                    precomputedSaldoCents: number | null
+                                    eventColumns: Array<{
+                                      label: string
+                                      side: 'debit' | 'credit'
+                                      valueCents: number
+                                    }>
+                                    validation: ConciliacaoPorDataValidationProcess | null
+                                  }
+                                >()
+
+                                for (const row of conciliacaoPorDataData.rows) {
+                                  const liquidationDate = row.liquidationDate || '—'
+                                  const orgao = row.orgao || '—'
+                                  const groupKey = buildConciliacaoPorDataRowCompositeKey(liquidationDate, orgao)
+                                  const grouped =
+                                    groupedRows.get(groupKey) ??
+                                    {
+                                      liquidationDate,
+                                      displayDateLabel: 'Data de Liquidação',
+                                      displayDateValue: liquidationDate,
+                                      orgaoReceivedDate: String(row.orgaoReceivedDate ?? '').trim(),
+                                      orgao,
+                                      orgaoReceivedCents: Number(row.orgaoReceivedCents ?? 0) || 0,
+                                      values: {},
+                                      totalDebitCents: 0,
+                                      totalCreditCents: 0,
+                                      precomputedSaldoCents: null,
+                                      eventColumns: [],
+                                      validation: null,
+                                    }
+
+                                  const eventValue = getConciliacaoPorDataEventColumnValue(row)
+                                  const eventSide = getConciliacaoPorDataEventColumnSide(row)
+                                  const eventLabel =
+                                    eventValue !== 0 && eventSide
+                                      ? formatConciliacaoPorDataEventColumnLabel(row.event, eventSide)
+                                      : null
+                                  const excludeFromDebitTotals =
+                                    eventSide === 'debit' &&
+                                    eventLabel !== null &&
+                                    isConciliacaoPorDataExcludedDebitTotalLabel(eventLabel)
+
+                                  grouped.totalDebitCents += excludeFromDebitTotals ? 0 : row.debitCents
+                                  grouped.totalCreditCents += row.creditCents
+                                  grouped.precomputedSaldoCents = Number(row.saldoCents ?? 0) || 0
+                                  if (!grouped.validation && row.validation) {
+                                    grouped.validation = row.validation
+                                  }
+                                  const rowDate = String(row.date ?? '').trim()
+                                  if (
+                                    rowDate &&
+                                    rowDate !== '—' &&
+                                    rowDate !== grouped.liquidationDate &&
+                                    grouped.displayDateLabel === 'Data de Liquidação'
+                                  ) {
+                                    grouped.displayDateLabel = 'Data de Vencimento'
+                                    grouped.displayDateValue = rowDate
+                                  }
+
+                                  if (eventValue !== 0 && eventSide) {
+                                    const label = eventLabel ?? formatConciliacaoPorDataEventColumnLabel(row.event, eventSide)
+                                    const key = makeConciliacaoPorDataEventColumnKey(label)
+                                    eventColumns.set(key, { key, label, side: eventSide })
+                                    grouped.values[key] = (grouped.values[key] ?? 0) + eventValue
+                                    const existingEventColumn = grouped.eventColumns.find((item) => item.label === label)
+                                    if (existingEventColumn) {
+                                      existingEventColumn.valueCents += eventValue
+                                    } else {
+                                      grouped.eventColumns.push({
+                                        label,
+                                        side: eventSide,
+                                        valueCents: eventValue,
+                                      })
+                                    }
+                                  }
+
+                                  groupedRows.set(groupKey, grouped)
+                                }
+
+                                const orderedEventColumns = Array.from(eventColumns.values()).sort((a, b) => {
+                                  if (a.side !== b.side) return a.side === 'debit' ? -1 : 1
+                                  return a.label.localeCompare(b.label, 'pt-BR')
+                                })
+                                const tarifasByOrgao = new Map(
+                                  conciliacaoPorDataData.tarifasByOrgao.map((item) => [
+                                    normalizeConciliacaoPorDataOrgaoKey(item.orgao),
+                                    {
+                                      totalCents: Number(item.totalCents ?? 0) || 0,
+                                      oldestLiquidationDate: String(item.oldestLiquidationDate ?? '').trim(),
+                                    },
+                                  ]),
+                                )
+                                const headerColumns = [
+                                  { label: 'Ação', align: 'center' as const, minWidth: 104 },
+                                  { label: 'Data de Liquidação', align: 'left' as const, minWidth: 112 },
+                                  {
+                                    label: 'Data de Recebimento de Recurso',
+                                    align: 'left' as const,
+                                    minWidth: 168,
+                                  },
+                                  { label: 'Órgão', align: 'left' as const, minWidth: 220 },
+                                  { label: 'Recurso Recebido', align: 'right' as const, minWidth: 132 },
+                                  ...orderedEventColumns.map((column) => ({
+                                    label: column.label,
+                                    align: 'right' as const,
+                                    minWidth: 132,
+                                  })),
+                                  { label: 'Tarifas', align: 'right' as const, minWidth: 132 },
+                                  { label: 'Total Debitado', align: 'right' as const, minWidth: 132 },
+                                  { label: 'Saldo Devedor', align: 'right' as const, minWidth: 132 },
+                                ]
+
+                                const pivotRows = Array.from(groupedRows.values())
+                                  .sort((a, b) => {
+                                    const dateCmp = sortDatePtBr(a.liquidationDate, b.liquidationDate)
+                                    if (dateCmp !== 0) return dateCmp
+                                    return a.orgao.localeCompare(b.orgao, 'pt-BR')
+                                  })
+                                  .map((row) => {
+                                    const baseSaldoCents =
+                                      row.precomputedSaldoCents ??
+                                      row.totalDebitCents - row.orgaoReceivedCents + row.totalCreditCents
+                                    return {
+                                      ...row,
+                                      baseSaldoCents,
+                                    }
+                                  })
+                                const pivotRowsWithTarifas = pivotRows
+                                  .map((row) => {
+                                    const orgaoKey = normalizeConciliacaoPorDataOrgaoKey(row.orgao)
+                                    const tarifaMeta = tarifasByOrgao.get(orgaoKey) ?? {
+                                      totalCents: 0,
+                                      oldestLiquidationDate: '',
+                                    }
+                                    const tarifaCents =
+                                      tarifaMeta.oldestLiquidationDate &&
+                                      row.liquidationDate === tarifaMeta.oldestLiquidationDate
+                                        ? tarifaMeta.totalCents
+                                        : 0
+                                    const eventColumnsWithTarifa =
+                                      tarifaCents !== 0
+                                        ? [
+                                            ...row.eventColumns,
+                                            {
+                                              label: 'DÉBITO - TARIFAS',
+                                              side: 'debit' as const,
+                                              valueCents: tarifaCents,
+                                            },
+                                          ]
+                                        : row.eventColumns
+                                    return {
+                                      ...row,
+                                      tarifaCents,
+                                      totalDebitCents: row.totalDebitCents + tarifaCents,
+                                      saldoCents: row.baseSaldoCents + tarifaCents,
+                                      eventColumns: eventColumnsWithTarifa,
+                                    }
+                                  })
+                                const dateAggregateMap = (() => {
+                                  const map = new Map<string, any>()
+                                  for (const row of pivotRowsWithTarifas) {
+                                    const dateKey = String(row.liquidationDate ?? '').trim() || '—'
+                                    const current =
+                                      map.get(dateKey) ?? {
+                                        liquidationDate: dateKey,
+                                        orgao: 'Todos os órgãos',
+                                        displayDateLabel: row.displayDateLabel,
+                                        displayDateValue: row.displayDateValue,
+                                        orgaoReceivedCents: 0,
+                                        totalDebitCents: 0,
+                                        totalCreditCents: 0,
+                                        eventColumnsMap: {} as Record<
+                                          string,
+                                          { label: string; side: 'debit' | 'credit'; valueCents: number }
+                                        >,
+                                        orgaoRows: [] as Array<{
+                                          orgao: string
+                                          orgaoReceivedCents: number
+                                          totalDebitCents: number
+                                          saldoCents: number
+                                          eventColumns: Array<{ label: string; side: 'debit' | 'credit'; valueCents: number }>
+                                        }>,
+                                      }
+
+                                    current.orgaoReceivedCents += Number(row.orgaoReceivedCents ?? 0) || 0
+                                    current.totalDebitCents += Number(row.totalDebitCents ?? 0) || 0
+
+                                    for (const col of row.eventColumns || []) {
+                                      const label = String(col?.label ?? '').trim()
+                                      if (!label) continue
+                                      const side = col?.side === 'credit' ? ('credit' as const) : ('debit' as const)
+                                      const valueCents = Number(col?.valueCents ?? 0) || 0
+                                      if (valueCents === 0) continue
+                                      const key = `${side}__${label}`
+                                      current.eventColumnsMap[key] = {
+                                        label,
+                                        side,
+                                        valueCents: (current.eventColumnsMap[key]?.valueCents ?? 0) + valueCents,
+                                      }
+                                      if (side === 'credit') current.totalCreditCents += valueCents
+                                    }
+
+                                    current.orgaoRows.push({
+                                      orgao: row.orgao,
+                                      orgaoReceivedCents: row.orgaoReceivedCents,
+                                      totalDebitCents: row.totalDebitCents,
+                                      saldoCents: row.saldoCents,
+                                      eventColumns: row.eventColumns,
+                                    })
+
+                                    map.set(dateKey, current)
+                                  }
+
+                                  for (const entry of map.values()) {
+                                    entry.eventColumns = Object.values(
+                                      entry.eventColumnsMap as Record<
+                                        string,
+                                        { label: string; side: 'debit' | 'credit'; valueCents: number }
+                                      >,
+                                    ).sort(
+                                      (
+                                        a: { label: string; side: 'debit' | 'credit'; valueCents: number },
+                                        b: { label: string; side: 'debit' | 'credit'; valueCents: number },
+                                      ) => {
+                                        if (a.side !== b.side) return a.side === 'debit' ? -1 : 1
+                                        return a.label.localeCompare(b.label, 'pt-BR')
+                                      },
+                                    )
+                                    entry.saldoCents =
+                                      (Number(entry.totalDebitCents ?? 0) || 0) -
+                                      (Number(entry.orgaoReceivedCents ?? 0) || 0) +
+                                      (Number(entry.totalCreditCents ?? 0) || 0)
+                                  }
+
+                                  return map
+                                })()
+                                const eventColumnTotals = Object.fromEntries(
+                                  orderedEventColumns.map((column) => [
+                                    column.key,
+                                    pivotRowsWithTarifas.reduce((sum, row) => sum + (row.values[column.key] ?? 0), 0),
+                                  ]),
+                                ) as Record<string, number>
+                                const totalReceivedCents = pivotRowsWithTarifas.reduce(
+                                  (sum, row) => sum + row.orgaoReceivedCents,
+                                  0,
+                                )
+                                const totalTarifasCents = pivotRowsWithTarifas.reduce(
+                                  (sum, row) => sum + (row.tarifaCents ?? 0),
+                                  0,
+                                )
+                                const totalDebitadoCents = pivotRowsWithTarifas.reduce(
+                                  (sum, row) => sum + row.totalDebitCents,
+                                  0,
+                                )
+                                const totalSaldoDevedorCents = pivotRowsWithTarifas.reduce(
+                                  (sum, row) => sum + row.saldoCents,
+                                  0,
+                                )
+
+                                return (
+                                  <div
+                                    style={{
+                                      overflowX: 'hidden',
+                                      overflowY: 'visible',
+                                      border: '1px solid rgba(255,255,255,0.12)',
+                                      borderRadius: 18,
+                                      background:
+                                        'linear-gradient(180deg, rgba(15,23,42,0.78) 0%, rgba(15,23,42,0.58) 100%)',
+                                      boxShadow:
+                                        '0 18px 44px rgba(2,6,23,0.28), inset 0 1px 0 rgba(255,255,255,0.05)',
+                                      backdropFilter: 'blur(10px)',
+                                    }}
+                                  >
+                                    <table
+                                      style={{
+                                        width: '100%',
+                                        maxWidth: '100%',
+                                        borderCollapse: 'separate',
+                                        borderSpacing: 0,
+                                        tableLayout: 'fixed',
+                                      }}
+                                    >
+                                      <colgroup>
+                                        {headerColumns.map((column, index) => (
+                                          <col
+                                            key={`${column.label}-${index}`}
+                                            style={{ width: `${100 / headerColumns.length}%` }}
+                                          />
+                                        ))}
+                                      </colgroup>
+                                      <thead>
+                                        <tr>
+                                          {headerColumns.map((column) => (
+                                            <th
+                                              key={column.label}
+                                              style={{
+                                                textAlign: column.align,
+                                                padding: '12px 10px',
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                                letterSpacing: '0.08em',
+                                                textTransform: 'uppercase',
+                                                color: 'rgba(226,232,240,0.82)',
+                                                borderBottom: '1px solid rgba(148,163,184,0.18)',
+                                                whiteSpace: 'normal',
+                                                position: 'sticky',
+                                                top: 0,
+                                                zIndex: 1,
+                                                background:
+                                                  'linear-gradient(180deg, rgba(30,41,59,0.96) 0%, rgba(15,23,42,0.92) 100%)',
+                                                boxShadow: 'inset 0 -1px 0 rgba(255,255,255,0.04)',
+                                              }}
+                                            >
+                                              <span
+                                                style={{
+                                                  display: 'inline-flex',
+                                                  flexDirection: 'column',
+                                                  alignItems:
+                                                    column.align === 'right' ? 'flex-end' : 'flex-start',
+                                                  gap: 2,
+                                                  lineHeight: 1.15,
+                                                }}
+                                              >
+                                                {splitConciliacaoPorDataHeaderLabel(column.label).map((line, index) => (
+                                                  <span key={`${column.label}-${index}`}>{line}</span>
+                                                ))}
+                                              </span>
+                                            </th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {pivotRowsWithTarifas.map((row) => (
+                                          <tr key={`${row.liquidationDate}-${row.orgao}`}>
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                whiteSpace: 'normal',
+                                                textAlign: 'center',
+                                                background: 'rgba(15,23,42,0.22)',
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                              }}
+                                            >
+                                              {(() => {
+                                                const dateKey = String(row.liquidationDate ?? '').trim() || '—'
+                                                const isSubmitting =
+                                                  conciliacaoPorDataValidationSubmittingKey === dateKey
+                                                const statusMeta = row.validation
+                                                  ? getConciliacaoPorDataValidationStatusMeta(
+                                                      row.validation.status,
+                                                    )
+                                                  : null
+                                                void dateAggregateMap.get(dateKey)
+                                                return (
+                                                  <div
+                                                    style={{
+                                                      display: 'grid',
+                                                      justifyItems: 'center',
+                                                      gap: 6,
+                                                      minWidth: 84,
+                                                    }}
+                                                  >
+                                                    <div
+                                                      title={statusMeta?.label ?? 'Não enviado'}
+                                                      aria-label="Status da validação"
+                                                      style={{
+                                                      padding: 6,
+                                                      width: 30,
+                                                      height: 30,
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        justifyContent: 'center',
+                                                      borderRadius: 10,
+                                                        color: statusMeta?.color ?? '#e2e8f0',
+                                                        background: statusMeta?.background ?? 'rgba(15,118,110,0.16)',
+                                                        border: `1px solid ${statusMeta?.accent ?? 'rgba(45,212,191,0.45)'}`,
+                                                        cursor: 'default',
+                                                        opacity:
+                                                          row.validation?.status === 'approved' ||
+                                                          row.validation?.status === 'rejected'
+                                                            ? 0.78
+                                                            : 1,
+                                                        pointerEvents: 'none',
+                                                      }}
+                                                    >
+                                                      {isSubmitting ? (
+                                                      <Clock size={13} />
+                                                      ) : row.validation?.status === 'approved' ? (
+                                                      <ShieldCheck size={13} />
+                                                      ) : row.validation?.status === 'rejected' ? (
+                                                      <Info size={13} />
+                                                      ) : row.validation?.status === 'pending' ? (
+                                                      <Clock size={13} />
+                                                      ) : (
+                                                      <Play size={13} />
+                                                      )}
+                                                    </div>
+                                                  </div>
+                                                )
+                                              })()}
+                                            </td>
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                whiteSpace: 'nowrap',
+                                                background: 'rgba(15,23,42,0.22)',
+                                                fontWeight: 600,
+                                                color: 'rgba(226,232,240,0.94)',
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                              }}
+                                            >
+                                              {row.liquidationDate || '—'}
+                                            </td>
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                whiteSpace: 'normal',
+                                                background: 'rgba(15,23,42,0.2)',
+                                                fontWeight: 600,
+                                                color: 'rgba(226,232,240,0.9)',
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                              }}
+                                            >
+                                              {(() => {
+                                                const raw = String(row.orgaoReceivedDate ?? '').trim()
+                                                if (!raw) return '—'
+                                                const parts = raw.split(' | ').map((value) => value.trim()).filter(Boolean)
+                                                if (parts.length <= 1) return raw
+                                                return (
+                                                  <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+                                                    {parts.map((value, index) => (
+                                                      <span key={`${value}-${index}`}>{value}</span>
+                                                    ))}
+                                                  </span>
+                                                )
+                                              })()}
+                                            </td>
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                background: 'rgba(15,23,42,0.18)',
+                                                color: 'rgba(226,232,240,0.92)',
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                                overflowWrap: 'anywhere',
+                                              }}
+                                            >
+                                              {formatConciliacaoOrgaoLabel(row.orgao || '—')}
+                                            </td>
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                textAlign: 'right',
+                                                whiteSpace: 'nowrap',
+                                                background:
+                                                  'linear-gradient(180deg, rgba(30,41,59,0.18) 0%, rgba(15,23,42,0.08) 100%)',
+                                                color: 'rgba(248,250,252,0.96)',
+                                                fontWeight: 700,
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                              }}
+                                            >
+                                              {withCurrency(centsToPtBr(row.orgaoReceivedCents))}
+                                            </td>
+                                            {orderedEventColumns.map((column) => {
+                                              const value = row.values[column.key] ?? 0
+                                              const isExcludedDebitEvent =
+                                                column.side === 'debit' &&
+                                                isConciliacaoPorDataExcludedDebitTotalLabel(column.label)
+                                              return (
+                                                <td
+                                                  key={`${row.liquidationDate}-${row.orgao}-${column.key}`}
+                                                  style={{
+                                                    padding: '12px 10px',
+                                                    borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                    textAlign: 'right',
+                                                    whiteSpace: 'nowrap',
+                                                    color:
+                                                      value !== 0
+                                                        ? isExcludedDebitEvent
+                                                          ? '#fef08a'
+                                                          : 'rgba(248,250,252,0.96)'
+                                                        : 'rgba(148,163,184,0.42)',
+                                                    background:
+                                                      value !== 0
+                                                        ? isExcludedDebitEvent
+                                                          ? 'linear-gradient(180deg, rgba(234,179,8,0.22) 0%, rgba(133,77,14,0.18) 100%)'
+                                                          : 'linear-gradient(180deg, rgba(30,41,59,0.18) 0%, rgba(15,23,42,0.08) 100%)'
+                                                        : 'rgba(255,255,255,0.01)',
+                                                    fontWeight: value !== 0 ? 600 : 500,
+                                                    fontSize: '0.72rem',
+                                                    lineHeight: 1.2,
+                                                    boxShadow:
+                                                      value !== 0 && isExcludedDebitEvent
+                                                        ? 'inset 0 0 0 1px rgba(250,204,21,0.24)'
+                                                        : undefined,
+                                                  }}
+                                                >
+                                                  {value !== 0 ? withCurrency(centsToPtBr(value)) : '—'}
+                                                </td>
+                                              )
+                                            })}
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                textAlign: 'right',
+                                                whiteSpace: 'nowrap',
+                                                fontWeight: 700,
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                                background:
+                                                  row.tarifaCents !== 0
+                                                    ? 'linear-gradient(180deg, rgba(180,83,9,0.24) 0%, rgba(120,53,15,0.18) 100%)'
+                                                    : 'rgba(255,255,255,0.01)',
+                                                color:
+                                                  row.tarifaCents !== 0 ? '#fde68a' : 'rgba(148,163,184,0.42)',
+                                                boxShadow:
+                                                  row.tarifaCents !== 0
+                                                    ? 'inset 0 0 0 1px rgba(251,191,36,0.24)'
+                                                    : undefined,
+                                              }}
+                                            >
+                                              {row.tarifaCents !== 0
+                                                ? withCurrency(centsToPtBr(row.tarifaCents))
+                                                : '—'}
+                                            </td>
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                textAlign: 'right',
+                                                whiteSpace: 'nowrap',
+                                                fontWeight: 700,
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                                background:
+                                                  'linear-gradient(180deg, rgba(30,41,59,0.18) 0%, rgba(15,23,42,0.08) 100%)',
+                                                color: '#f8fafc',
+                                                boxShadow: 'inset 0 0 0 1px rgba(148,163,184,0.16)',
+                                              }}
+                                            >
+                                              {withCurrency(centsToPtBr(row.totalDebitCents))}
+                                            </td>
+                                            <td
+                                              style={{
+                                                padding: '12px 10px',
+                                                borderBottom: '1px solid rgba(148,163,184,0.14)',
+                                                textAlign: 'right',
+                                                whiteSpace: 'nowrap',
+                                                fontWeight: 800,
+                                                fontSize: '0.72rem',
+                                                lineHeight: 1.2,
+                                                background:
+                                                  'linear-gradient(180deg, rgba(127,29,29,0.32) 0%, rgba(69,10,10,0.22) 100%)',
+                                                color: '#fecdd3',
+                                                boxShadow: 'inset 0 0 0 1px rgba(239,68,68,0.24)',
+                                              }}
+                                            >
+                                              {withCurrency(centsToPtBr(row.saldoCents))}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                        <tr>
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              whiteSpace: 'normal',
+                                              background: 'rgba(226,232,240,0.08)',
+                                              color: 'rgba(226,232,240,0.82)',
+                                              fontWeight: 700,
+                                              textAlign: 'center',
+                                            }}
+                                          >
+                                            —
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              whiteSpace: 'nowrap',
+                                              background: 'rgba(226,232,240,0.08)',
+                                              fontWeight: 700,
+                                              color: 'rgba(226,232,240,0.92)',
+                                            }}
+                                          >
+                                            —
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              whiteSpace: 'nowrap',
+                                              background: 'rgba(226,232,240,0.08)',
+                                              fontWeight: 700,
+                                              color: 'rgba(226,232,240,0.92)',
+                                            }}
+                                          >
+                                            —
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              background: 'rgba(226,232,240,0.08)',
+                                              color: '#f8fafc',
+                                              fontWeight: 800,
+                                              fontSize: '0.72rem',
+                                              overflowWrap: 'anywhere',
+                                            }}
+                                          >
+                                            Totais
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              textAlign: 'right',
+                                              whiteSpace: 'nowrap',
+                                              background: 'rgba(226,232,240,0.08)',
+                                              color: '#f8fafc',
+                                              fontWeight: 800,
+                                              fontSize: '0.72rem',
+                                            }}
+                                          >
+                                            {withCurrency(centsToPtBr(totalReceivedCents))}
+                                          </td>
+                                          {orderedEventColumns.map((column) => {
+                                            const value = eventColumnTotals[column.key] ?? 0
+                                            const isExcludedDebitTotalizer =
+                                              column.side === 'debit' &&
+                                              isConciliacaoPorDataExcludedDebitTotalLabel(column.label)
+                                            return (
+                                              <td
+                                                key={`totals-${column.key}`}
+                                                style={{
+                                                  padding: '12px 10px',
+                                                  borderTop: '1px solid rgba(148,163,184,0.24)',
+                                                  textAlign: 'right',
+                                                  whiteSpace: 'nowrap',
+                                                  color:
+                                                    value !== 0
+                                                      ? isExcludedDebitTotalizer
+                                                        ? '#fef08a'
+                                                        : column.side === 'debit'
+                                                          ? '#fecaca'
+                                                          : '#f8fafc'
+                                                      : 'rgba(148,163,184,0.42)',
+                                                  background: isExcludedDebitTotalizer
+                                                    ? 'linear-gradient(180deg, rgba(234,179,8,0.22) 0%, rgba(133,77,14,0.18) 100%)'
+                                                    : 'rgba(226,232,240,0.08)',
+                                                  fontWeight: 800,
+                                                  fontSize: '0.72rem',
+                                                  boxShadow: isExcludedDebitTotalizer
+                                                    ? 'inset 0 0 0 1px rgba(250,204,21,0.24)'
+                                                    : undefined,
+                                                }}
+                                              >
+                                                {value !== 0 ? withCurrency(centsToPtBr(value)) : '—'}
+                                              </td>
+                                            )
+                                          })}
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              textAlign: 'right',
+                                              whiteSpace: 'nowrap',
+                                              fontWeight: 800,
+                                              fontSize: '0.72rem',
+                                              background:
+                                                totalTarifasCents !== 0
+                                                  ? 'linear-gradient(180deg, rgba(180,83,9,0.24) 0%, rgba(120,53,15,0.18) 100%)'
+                                                  : 'rgba(226,232,240,0.08)',
+                                              color:
+                                                totalTarifasCents !== 0 ? '#fde68a' : 'rgba(148,163,184,0.42)',
+                                              boxShadow:
+                                                totalTarifasCents !== 0
+                                                  ? 'inset 0 0 0 1px rgba(251,191,36,0.24)'
+                                                  : undefined,
+                                            }}
+                                          >
+                                            {totalTarifasCents !== 0
+                                              ? withCurrency(centsToPtBr(totalTarifasCents))
+                                              : '—'}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              textAlign: 'right',
+                                              whiteSpace: 'nowrap',
+                                              fontWeight: 800,
+                                              fontSize: '0.72rem',
+                                              background: 'rgba(226,232,240,0.08)',
+                                              color: '#f8fafc',
+                                              boxShadow: 'inset 0 0 0 1px rgba(148,163,184,0.16)',
+                                            }}
+                                          >
+                                            {withCurrency(centsToPtBr(totalDebitadoCents))}
+                                          </td>
+                                          <td
+                                            style={{
+                                              padding: '12px 10px',
+                                              borderTop: '1px solid rgba(148,163,184,0.24)',
+                                              textAlign: 'right',
+                                              whiteSpace: 'nowrap',
+                                              fontWeight: 800,
+                                              fontSize: '0.72rem',
+                                              background:
+                                                'linear-gradient(180deg, rgba(127,29,29,0.32) 0%, rgba(69,10,10,0.22) 100%)',
+                                              color: '#fecdd3',
+                                              boxShadow: 'inset 0 0 0 1px rgba(239,68,68,0.24)',
+                                            }}
+                                          >
+                                            {withCurrency(centsToPtBr(totalSaldoDevedorCents))}
+                                          </td>
+                                        </tr>
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )
+                              })()
+                            )}
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
+            {conciliacaoPorDataValidationModal && typeof document !== 'undefined'
+              ? createPortal(
+                  <div
+                    role="dialog"
+                    aria-modal="true"
+                    style={{
+                      position: 'fixed',
+                      inset: 0,
+                      background: 'rgba(0,0,0,0.62)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      padding: 24,
+                      overflowY: 'auto',
+                      zIndex: 240,
+                    }}
+                    onClick={() => setConciliacaoPorDataValidationModal(null)}
+                  >
+                    <div
+                      style={{
+                        width: 'min(900px, 96vw)',
+                        maxHeight: 'calc(100vh - 48px)',
+                        borderRadius: 20,
+                        border: '1px solid rgba(148,163,184,0.28)',
+                        background: 'rgba(12,22,40,0.98)',
+                        color: 'rgba(255,255,255,0.92)',
+                        boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                        overflow: 'hidden',
+                        display: 'grid',
+                        gridTemplateRows: 'auto 1fr',
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {(() => {
+                        const process = conciliacaoPorDataValidationModal.process
+                        const statusMeta = getConciliacaoPorDataValidationStatusMeta(process.status)
+                        const snapshot = process.rowSnapshot
+                        const modalDateKey = String(conciliacaoPorDataValidationModal.liquidationDate ?? '').trim()
+                        const aggregateForBreakdown = modalDateKey
+                          ? buildConciliacaoPorDataAggregateRowForValidation(modalDateKey)
+                          : null
+                        const orgaoBreakdown = Array.isArray((aggregateForBreakdown as any)?.orgaoBreakdown)
+                          ? (((aggregateForBreakdown as any).orgaoBreakdown as Array<{
+                              orgao: string
+                              orgaoReceivedCents: number
+                              totalDebitCents: number
+                              totalCreditCents: number
+                              saldoCents: number
+                            }>) ?? [])
+                          : []
+                        const isResendingFromModal =
+                          conciliacaoPorDataValidationSubmittingKey === modalDateKey
+                        const notificationEntries = Object.entries(process.notification)
+                        const decisionNotificationEntries = Object.entries(process.decisionNotification)
+                        const formatRecipients = (value: string | string[] | null) => {
+                          if (Array.isArray(value)) {
+                            return value.filter(Boolean).join(', ') || '—'
+                          }
+                          return String(value ?? '').trim() || '—'
+                        }
+                        return (
+                          <>
+                            <div
+                              style={{
+                                padding: '16px 18px',
+                                borderBottom: '1px solid rgba(255,255,255,0.10)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 12,
+                                flexWrap: 'wrap',
+                              }}
+                            >
+                              <div style={{ display: 'grid', gap: 6 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                                  <div style={{ fontWeight: 900, fontSize: '1.02rem' }}>
+                                    Processo de validação contábil
+                                  </div>
+                                  <span
+                                    className="chip"
+                                    style={{
+                                      borderColor: statusMeta.accent,
+                                      color: statusMeta.color,
+                                      background: statusMeta.background,
+                                    }}
+                                  >
+                                    {statusMeta.label}
+                                  </span>
+                                </div>
+                                <div
+                                  className="help"
+                                  style={{ margin: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}
+                                >
+                                  {formatConciliacaoOrgaoLabel(conciliacaoPorDataValidationModal.orgao || '—')} •{' '}
+                                  {snapshot?.displayDateLabel || 'Data de Liquidação'}:{' '}
+                                  {snapshot?.displayDateValue ||
+                                    conciliacaoPorDataValidationModal.liquidationDate ||
+                                    '—'}
+                                </div>
+                              </div>
+                              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                                {process.status === 'rejected' &&
+                                conciliacaoPorDataValidationModal.resendPayload ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    disabled={isResendingFromModal}
+                                    onClick={() =>
+                                      requestConciliacaoPorDataValidationNow({
+                                        liquidationDate: conciliacaoPorDataValidationModal.liquidationDate,
+                                        orgao: conciliacaoPorDataValidationModal.orgao,
+                                        orgaoReceivedCents:
+                                          conciliacaoPorDataValidationModal.resendPayload!
+                                            .orgaoReceivedCents,
+                                        totalDebitCents:
+                                          conciliacaoPorDataValidationModal.resendPayload!
+                                            .totalDebitCents,
+                                        saldoCents:
+                                          conciliacaoPorDataValidationModal.resendPayload!.saldoCents,
+                                        values: {},
+                                        displayDateLabel:
+                                          conciliacaoPorDataValidationModal.process.rowSnapshot
+                                            ?.displayDateLabel,
+                                        displayDateValue:
+                                          conciliacaoPorDataValidationModal.process.rowSnapshot
+                                            ?.displayDateValue,
+                                        eventColumns:
+                                          conciliacaoPorDataValidationModal.resendPayload!.eventColumns,
+                                      })
+                                    }
+                                  >
+                                    {isResendingFromModal
+                                      ? 'Reenviando...'
+                                      : 'Enviar novamente para aprovação'}
+                                  </button>
+                                ) : null}
+                                {process.link ? (
+                                  <a
+                                    className="btn btn-ghost"
+                                    href={process.link}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  >
+                                    Abrir link
+                                  </a>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  onClick={() => setConciliacaoPorDataValidationModal(null)}
+                                >
+                                  Fechar
+                                </button>
+                              </div>
+                            </div>
+                            <div style={{ padding: '16px 18px', overflowY: 'auto', display: 'grid', gap: 16 }}>
+                              <div
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                                  gap: 10,
+                                }}
+                              >
+                                {[
+                                  {
+                                    label: 'Solicitado em',
+                                    value: formatIsoToPtBrDateTime(process.requestedAt),
+                                  },
+                                  {
+                                    label: 'Solicitado por',
+                                    value: process.requestedBy || '—',
+                                  },
+                                  {
+                                    label: 'Respondido em',
+                                    value: formatIsoToPtBrDateTime(process.respondedAt),
+                                  },
+                                  {
+                                    label: 'Contabilidade',
+                                    value: process.accountingEmail || '—',
+                                  },
+                                  {
+                                    label: 'Financeiro',
+                                    value: process.financeEmail || '—',
+                                  },
+                                  {
+                                    label: 'Validado por',
+                                    value: process.approvedBy || process.rejectedBy || '—',
+                                  },
+                                ].map((item) => (
+                                  <div
+                                    key={item.label}
+                                    style={{
+                                      padding: '12px 14px',
+                                      borderRadius: 14,
+                                      border: '1px solid rgba(148,163,184,0.18)',
+                                      background: 'rgba(255,255,255,0.03)',
+                                      display: 'grid',
+                                      gap: 6,
+                                      minWidth: 0,
+                                    }}
+                                  >
+                                    <div style={{ fontSize: '0.74rem', color: 'rgba(148,163,184,0.92)' }}>
+                                      {item.label}
+                                    </div>
+                                    <div
+                                      style={{
+                                        fontWeight: 800,
+                                        whiteSpace: 'normal',
+                                        overflowWrap: 'anywhere',
+                                        wordBreak: 'break-word',
+                                        minWidth: 0,
+                                      }}
+                                    >
+                                      {item.value}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {snapshot ? (
+                                <div
+                                  style={{
+                                    borderRadius: 16,
+                                    border: '1px solid rgba(148,163,184,0.18)',
+                                    background: 'rgba(255,255,255,0.03)',
+                                    padding: '14px 16px',
+                                    display: 'grid',
+                                    gap: 12,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900 }}>Linha validada</div>
+                                  <div
+                                    style={{
+                                      display: 'grid',
+                                      gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                                      gap: 10,
+                                    }}
+                                  >
+                                    {[
+                                      { label: 'Competência', value: snapshot.monthKey || '—' },
+                                      {
+                                        label: snapshot.displayDateLabel || 'Data de Liquidação',
+                                        value: snapshot.displayDateValue || snapshot.liquidationDate || '—',
+                                      },
+                                      { label: 'Órgão', value: snapshot.orgao || '—' },
+                                      {
+                                        label: 'Recurso Recebido',
+                                        value: withCurrency(centsToPtBr(snapshot.recursoRecebidoCents)),
+                                      },
+                                      {
+                                        label: 'Total Debitado',
+                                        value: `- ${withCurrency(
+                                          centsToPtBr(Math.abs(snapshot.totalDebitadoCents)),
+                                        )}`,
+                                      },
+                                      {
+                                        label: 'Saldo Devedor',
+                                        value: `${snapshot.saldoDevedorCents < 0 ? '- ' : ''}${withCurrency(
+                                          centsToPtBr(Math.abs(snapshot.saldoDevedorCents)),
+                                        )}`,
+                                      },
+                                    ].map((item) => (
+                                      <div
+                                        key={item.label}
+                                        style={{
+                                          padding: '12px 14px',
+                                          borderRadius: 12,
+                                          background: 'rgba(15,23,42,0.42)',
+                                          border: '1px solid rgba(148,163,184,0.12)',
+                                          display: 'grid',
+                                          gap: 6,
+                                          minWidth: 0,
+                                        }}
+                                      >
+                                        <div style={{ fontSize: '0.74rem', color: 'rgba(148,163,184,0.92)' }}>
+                                          {item.label}
+                                        </div>
+                                        <div
+                                          style={{
+                                            fontWeight: 800,
+                                            whiteSpace: 'pre-wrap',
+                                            overflowWrap: 'anywhere',
+                                            wordBreak: 'break-word',
+                                            minWidth: 0,
+                                          }}
+                                        >
+                                          {item.value}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+
+                                  {orgaoBreakdown.length > 0 && snapshot ? (
+                                    <div style={{ display: 'grid', gap: 10 }}>
+                                      <div style={{ fontWeight: 900 }}>Detalhamento por órgão</div>
+                                      <div
+                                        style={{
+                                          borderRadius: 14,
+                                          border: '1px solid rgba(148,163,184,0.16)',
+                                          background: 'rgba(15,23,42,0.32)',
+                                          overflow: 'hidden',
+                                        }}
+                                      >
+                                        <div style={{ overflowX: 'auto' }}>
+                                          <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
+                                            <thead>
+                                              <tr>
+                                                {['Órgão', 'Recurso Recebido', 'Total Debitado', 'Saldo Devedor'].map(
+                                                  (h) => (
+                                                    <th
+                                                      key={h}
+                                                      style={{
+                                                        textAlign: h === 'Órgão' ? 'left' : 'right',
+                                                        padding: '10px 12px',
+                                                        fontSize: '0.72rem',
+                                                        letterSpacing: '0.08em',
+                                                        textTransform: 'uppercase',
+                                                        color: 'rgba(148,163,184,0.92)',
+                                                        borderBottom: '1px solid rgba(148,163,184,0.18)',
+                                                        whiteSpace: 'nowrap',
+                                                      }}
+                                                    >
+                                                      {h}
+                                                    </th>
+                                                  ),
+                                                )}
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {orgaoBreakdown.map((item) => {
+                                                const saldo = Number(item.saldoCents ?? 0) || 0
+                                                const saldoTone =
+                                                  saldo === 0
+                                                    ? 'rgba(226,232,240,0.92)'
+                                                    : saldo < 0
+                                                      ? '#fecaca'
+                                                      : '#bbf7d0'
+                                                return (
+                                                  <tr key={item.orgao}>
+                                                    <td
+                                                      style={{
+                                                        padding: '10px 12px',
+                                                        borderBottom: '1px solid rgba(148,163,184,0.10)',
+                                                        fontSize: '0.78rem',
+                                                        color: 'rgba(255,255,255,0.92)',
+                                                        maxWidth: 340,
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        whiteSpace: 'nowrap',
+                                                      }}
+                                                      title={formatConciliacaoOrgaoLabel(item.orgao)}
+                                                    >
+                                                      {formatConciliacaoOrgaoLabel(item.orgao)}
+                                                    </td>
+                                                    <td
+                                                      style={{
+                                                        padding: '10px 12px',
+                                                        borderBottom: '1px solid rgba(148,163,184,0.10)',
+                                                        textAlign: 'right',
+                                                        fontSize: '0.78rem',
+                                                        whiteSpace: 'nowrap',
+                                                      }}
+                                                    >
+                                                      {withCurrency(centsToPtBr(item.orgaoReceivedCents))}
+                                                    </td>
+                                                    <td
+                                                      style={{
+                                                        padding: '10px 12px',
+                                                        borderBottom: '1px solid rgba(148,163,184,0.10)',
+                                                        textAlign: 'right',
+                                                        fontSize: '0.78rem',
+                                                        whiteSpace: 'nowrap',
+                                                        color: '#fecaca',
+                                                      }}
+                                                    >
+                                                      - {withCurrency(centsToPtBr(Math.abs(item.totalDebitCents)))}
+                                                    </td>
+                                                    <td
+                                                      style={{
+                                                        padding: '10px 12px',
+                                                        borderBottom: '1px solid rgba(148,163,184,0.10)',
+                                                        textAlign: 'right',
+                                                        fontSize: '0.78rem',
+                                                        whiteSpace: 'nowrap',
+                                                        color: saldoTone,
+                                                      }}
+                                                    >
+                                                      {saldo < 0 ? '- ' : ''}
+                                                      {withCurrency(centsToPtBr(Math.abs(saldo)))}
+                                                    </td>
+                                                  </tr>
+                                                )
+                                              })}
+                                              <tr>
+                                                <td
+                                                  style={{
+                                                    padding: '12px 12px',
+                                                    borderTop: '1px solid rgba(148,163,184,0.18)',
+                                                    fontWeight: 900,
+                                                    fontSize: '0.78rem',
+                                                    background: 'rgba(148,163,184,0.08)',
+                                                  }}
+                                                >
+                                                  Total do dia
+                                                </td>
+                                                <td
+                                                  style={{
+                                                    padding: '12px 12px',
+                                                    borderTop: '1px solid rgba(148,163,184,0.18)',
+                                                    textAlign: 'right',
+                                                    fontWeight: 900,
+                                                    fontSize: '0.78rem',
+                                                    background: 'rgba(148,163,184,0.08)',
+                                                    whiteSpace: 'nowrap',
+                                                  }}
+                                                >
+                                                  {withCurrency(centsToPtBr(snapshot.recursoRecebidoCents))}
+                                                </td>
+                                                <td
+                                                  style={{
+                                                    padding: '12px 12px',
+                                                    borderTop: '1px solid rgba(148,163,184,0.18)',
+                                                    textAlign: 'right',
+                                                    fontWeight: 900,
+                                                    fontSize: '0.78rem',
+                                                    background: 'rgba(148,163,184,0.08)',
+                                                    whiteSpace: 'nowrap',
+                                                    color: '#fecaca',
+                                                  }}
+                                                >
+                                                  - {withCurrency(centsToPtBr(Math.abs(snapshot.totalDebitadoCents)))}
+                                                </td>
+                                                <td
+                                                  style={{
+                                                    padding: '12px 12px',
+                                                    borderTop: '1px solid rgba(148,163,184,0.18)',
+                                                    textAlign: 'right',
+                                                    fontWeight: 900,
+                                                    fontSize: '0.78rem',
+                                                    background: 'rgba(148,163,184,0.08)',
+                                                    whiteSpace: 'nowrap',
+                                                    color:
+                                                      snapshot.saldoDevedorCents === 0
+                                                        ? 'rgba(226,232,240,0.92)'
+                                                        : snapshot.saldoDevedorCents < 0
+                                                          ? '#fecaca'
+                                                          : '#bbf7d0',
+                                                  }}
+                                                >
+                                                  {snapshot.saldoDevedorCents < 0 ? '- ' : ''}
+                                                  {withCurrency(centsToPtBr(Math.abs(snapshot.saldoDevedorCents)))}
+                                                </td>
+                                              </tr>
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ) : null}
+
+                                  {snapshot.eventColumns.length > 0 ? (
+                                    <div style={{ display: 'grid', gap: 8 }}>
+                                      <div style={{ fontWeight: 800 }}>Eventos da linha</div>
+                                      <div
+                                        style={{
+                                          display: 'grid',
+                                          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                                          gap: 10,
+                                        }}
+                                      >
+                                        {snapshot.eventColumns.map((item) => {
+                                          const isExcludedDebitEvent =
+                                            item.side === 'debit' &&
+                                            isConciliacaoPorDataExcludedDebitTotalLabel(item.label)
+                                          return (
+                                            <div
+                                              key={`${item.label}-${item.side}`}
+                                              style={{
+                                                padding: '12px 14px',
+                                                borderRadius: 12,
+                                                border: `1px solid ${
+                                                  isExcludedDebitEvent
+                                                    ? 'rgba(250,204,21,0.35)'
+                                                    : item.side === 'debit'
+                                                      ? 'rgba(239,68,68,0.28)'
+                                                      : 'rgba(148,163,184,0.18)'
+                                                }`,
+                                                background: isExcludedDebitEvent
+                                                  ? 'linear-gradient(180deg, rgba(234,179,8,0.22) 0%, rgba(133,77,14,0.18) 100%)'
+                                                  : item.side === 'debit'
+                                                    ? 'rgba(127,29,29,0.18)'
+                                                    : 'rgba(15,23,42,0.42)',
+                                                display: 'grid',
+                                                gap: 6,
+                                                minWidth: 0,
+                                              }}
+                                            >
+                                              <div
+                                                style={{
+                                                  fontSize: '0.76rem',
+                                                  color: isExcludedDebitEvent
+                                                    ? '#fde68a'
+                                                    : 'rgba(148,163,184,0.92)',
+                                                  whiteSpace: 'normal',
+                                                  overflowWrap: 'anywhere',
+                                                  wordBreak: 'break-word',
+                                                }}
+                                              >
+                                                {item.label}
+                                              </div>
+                                              <div
+                                                style={{
+                                                  fontWeight: 900,
+                                                  color: isExcludedDebitEvent
+                                                    ? '#fef08a'
+                                                    : item.side === 'debit'
+                                                      ? '#fecaca'
+                                                      : '#f8fafc',
+                                                  whiteSpace: 'normal',
+                                                  overflowWrap: 'anywhere',
+                                                  wordBreak: 'break-word',
+                                                }}
+                                              >
+                                                {item.side === 'debit' ? '- ' : ''}
+                                                {withCurrency(centsToPtBr(Math.abs(item.valueCents)))}
+                                              </div>
+                                            </div>
+                                          )
+                                        })}
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
+
+                              {process.rejectionJustification ? (
+                                <div
+                                  style={{
+                                    borderRadius: 16,
+                                    border: '1px solid rgba(239,68,68,0.30)',
+                                    background: 'rgba(127,29,29,0.16)',
+                                    padding: '14px 16px',
+                                    display: 'grid',
+                                    gap: 8,
+                                    minWidth: 0,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900, color: '#fecaca' }}>Justificativa da não validação</div>
+                                  <div
+                                    style={{
+                                      whiteSpace: 'pre-wrap',
+                                      lineHeight: 1.5,
+                                      overflowWrap: 'anywhere',
+                                      wordBreak: 'break-word',
+                                    }}
+                                  >
+                                    {process.rejectionJustification}
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              <div
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+                                  gap: 14,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    borderRadius: 16,
+                                    border: '1px solid rgba(148,163,184,0.18)',
+                                    background: 'rgba(255,255,255,0.03)',
+                                    padding: '14px 16px',
+                                    display: 'grid',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900 }}>Disparos para a contabilidade</div>
+                                  {notificationEntries.length === 0 ? (
+                                    <div className="help" style={{ margin: 0 }}>
+                                      Nenhum retorno de envio registrado.
+                                    </div>
+                                  ) : (
+                                    notificationEntries.map(([key, item]) => (
+                                      <div
+                                        key={key}
+                                        style={{
+                                          borderRadius: 12,
+                                          border: '1px solid rgba(148,163,184,0.14)',
+                                          background: 'rgba(15,23,42,0.42)',
+                                          padding: '12px 14px',
+                                          display: 'grid',
+                                          gap: 6,
+                                          minWidth: 0,
+                                        }}
+                                      >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                                          <div style={{ fontWeight: 800 }}>
+                                            {key === 'requestEmail'
+                                              ? 'E-mail'
+                                              : key === 'requestTeams'
+                                                ? 'Teams'
+                                                : key}
+                                          </div>
+                                          <div
+                                            style={{
+                                              fontWeight: 800,
+                                              color: item.sent
+                                                ? '#bbf7d0'
+                                                : item.attempted
+                                                  ? '#fde68a'
+                                                  : 'rgba(148,163,184,0.92)',
+                                            }}
+                                          >
+                                            {item.sent
+                                              ? 'Enviado'
+                                              : item.attempted
+                                                ? 'Tentado'
+                                                : 'Pendente'}
+                                          </div>
+                                        </div>
+                                        <div
+                                          className="help"
+                                          style={{
+                                            margin: 0,
+                                            whiteSpace: 'normal',
+                                            overflowWrap: 'anywhere',
+                                            wordBreak: 'break-word',
+                                          }}
+                                        >
+                                          Destino: {formatRecipients(item.to)}
+                                        </div>
+                                        {item.error ? (
+                                          <div
+                                            style={{
+                                              color: '#fecaca',
+                                              whiteSpace: 'pre-wrap',
+                                              overflowWrap: 'anywhere',
+                                              wordBreak: 'break-word',
+                                            }}
+                                          >
+                                            {item.error}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+
+                                <div
+                                  style={{
+                                    borderRadius: 16,
+                                    border: '1px solid rgba(148,163,184,0.18)',
+                                    background: 'rgba(255,255,255,0.03)',
+                                    padding: '14px 16px',
+                                    display: 'grid',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900 }}>Disparos para o financeiro</div>
+                                  {decisionNotificationEntries.length === 0 ? (
+                                    <div className="help" style={{ margin: 0 }}>
+                                      Nenhuma notificação ao financeiro registrada.
+                                    </div>
+                                  ) : (
+                                    decisionNotificationEntries.map(([key, item]) => (
+                                      <div
+                                        key={key}
+                                        style={{
+                                          borderRadius: 12,
+                                          border: '1px solid rgba(148,163,184,0.14)',
+                                          background: 'rgba(15,23,42,0.42)',
+                                          padding: '12px 14px',
+                                          display: 'grid',
+                                          gap: 6,
+                                          minWidth: 0,
+                                        }}
+                                      >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                                          <div style={{ fontWeight: 800 }}>
+                                            {key === 'financeEmail'
+                                              ? 'E-mail'
+                                              : key === 'financeTeams'
+                                                ? 'Teams'
+                                                : key}
+                                          </div>
+                                          <div
+                                            style={{
+                                              fontWeight: 800,
+                                              color: item.sent
+                                                ? '#bbf7d0'
+                                                : item.attempted
+                                                  ? '#fde68a'
+                                                  : 'rgba(148,163,184,0.92)',
+                                            }}
+                                          >
+                                            {item.sent
+                                              ? 'Enviado'
+                                              : item.attempted
+                                                ? 'Tentado'
+                                                : 'Pendente'}
+                                          </div>
+                                        </div>
+                                        <div
+                                          className="help"
+                                          style={{
+                                            margin: 0,
+                                            whiteSpace: 'normal',
+                                            overflowWrap: 'anywhere',
+                                            wordBreak: 'break-word',
+                                          }}
+                                        >
+                                          Destino: {formatRecipients(item.to)}
+                                        </div>
+                                        {item.error ? (
+                                          <div
+                                            style={{
+                                              color: '#fecaca',
+                                              whiteSpace: 'pre-wrap',
+                                              overflowWrap: 'anywhere',
+                                              wordBreak: 'break-word',
+                                            }}
+                                          >
+                                            {item.error}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    ))
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        )
+                      })()}
+                    </div>
+                  </div>,
+                  document.body,
+                )
+              : null}
 
             {view === 'relatorios-auditoria' ? (
               <section className="grid">
@@ -6211,7 +13960,7 @@ export default function CreditoPage() {
                           <option value="">Todos</option>
                           {conciliacaoOrgaoOptions.map((v) => (
                             <option key={v} value={v}>
-                              {v}
+                              {formatConciliacaoOrgaoLabel(v)}
                             </option>
                           ))}
                         </select>
@@ -6373,6 +14122,1200 @@ export default function CreditoPage() {
               </section>
             ) : null}
 
+            {view === 'relatorios-ocorrencias' ? (
+              <section className="grid">
+                <div className="panel" style={{ gridColumn: '1 / -1' }}>
+                  <div className="panel-head">
+                    <h2>Ocorrências</h2>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <span className="chip">
+                        <GitBranch size={16} />
+                        Relatório
+                      </span>
+                      <button
+                        type="button"
+                        className="btn"
+                        title="Exportar XLSX"
+                        aria-label="Exportar XLSX"
+                        disabled={
+                          !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth) ||
+                          conciliacaoLoading ||
+                          relatoriosOcorrenciasRowsFiltered.length === 0 ||
+                          relatoriosOcorrenciasExportingXlsx
+                        }
+                        onClick={exportRelatoriosOcorrenciasXlsx}
+                        style={{ padding: 10, width: 44, justifyContent: 'center' }}
+                      >
+                        <FileSpreadsheet size={18} />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="panel-body">
+                    <div className="home-toolbar" style={{ marginBottom: 10 }}>
+                      <div className="grid" style={{ gridTemplateColumns: '180px 1fr 200px 240px', gap: 12 }}>
+                        <div className="field">
+                          <label>Competência</label>
+                          <select
+                            className="control month-select"
+                            value={conciliacaoMonth}
+                            onChange={(e) => setConciliacaoMonth(e.target.value)}
+                            disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
+                            style={{ height: 44 }}
+                          >
+                            {conciliacaoMonthOptions.map((o) => (
+                              <option key={o.value} value={o.value}>
+                                {o.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="field">
+                          <label>Órgão</label>
+                          <select
+                            className="control month-select"
+                            value={conciliacaoOrgao}
+                            onChange={(e) => setConciliacaoOrgao(e.target.value)}
+                            disabled={orgaoDeParaLoading || conciliacaoOrgaoOptions.length === 0}
+                            style={{ height: 44 }}
+                          >
+                            {conciliacaoOrgaoOptions.length === 0 ? (
+                              <option value="">Todos</option>
+                            ) : (
+                              <>
+                                <option value="">Selecione...</option>
+                                {conciliacaoOrgaoOptions.map((o) => (
+                                  <option key={o} value={o}>
+                                    {formatConciliacaoOrgaoLabel(o)}
+                                  </option>
+                                ))}
+                              </>
+                            )}
+                          </select>
+                        </div>
+
+                        <div className="field">
+                          <label>Vencimento</label>
+                          <select
+                            className="control month-select"
+                            value={relatorioVencimentoFilter}
+                            onChange={(e) => setRelatorioVencimentoFilter(e.target.value)}
+                            disabled={
+                              relatoriosOcorrenciasVencimentoOptions.length === 0
+                            }
+                            style={{ height: 44 }}
+                          >
+                            <option value="">Total</option>
+                            {relatoriosOcorrenciasVencimentoOptions.map((v) => (
+                              <option key={v} value={v}>
+                                {v}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="field">
+                          <label>Ação</label>
+                          <select
+                            className="control month-select"
+                            value={relatoriosOcorrenciasActionFilter}
+                            onChange={(e) => setRelatoriosOcorrenciasActionFilter(e.target.value)}
+                            disabled={
+                              relatoriosOcorrenciasActionOptions.length === 0
+                            }
+                            style={{ height: 44 }}
+                          >
+                            <option value="">Todas</option>
+                            {relatoriosOcorrenciasActionOptions.map((v) => (
+                              <option key={v.value} value={v.value}>
+                                {v.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+
+                    {(() => {
+                      const loading = relatoriosOcorrenciasApiLoading
+                      const error = relatoriosOcorrenciasApiError
+                      if (loading) return <div className="help">Carregando ocorrências...</div>
+                      if (error)
+                        return (
+                          <div className="help" style={{ color: 'rgba(255, 99, 132, 0.95)' }}>
+                            {error}
+                          </div>
+                        )
+                      return (
+                        <>
+                          <div className="help" style={{ marginBottom: 12 }}>
+                            Total de ocorrências encontradas: {relatoriosOcorrenciasRowsFiltered.length}
+                          </div>
+                          <div style={{ overflow: 'auto' }}>
+                            <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
+                              <thead>
+                                <tr>
+                                  {(() => {
+                                    const isQuitadoOnly = relatoriosOcorrenciasActionFilter
+                                      .trim()
+                                      .toLowerCase()
+                                      .startsWith('quitado_recurso') ||
+                                      relatoriosOcorrenciasActionFilter
+                                        .trim()
+                                        .toLowerCase()
+                                        .startsWith('antecipado_devolvido')
+                                    const isQuitadoFilter = relatoriosOcorrenciasActionFilter
+                                      .trim()
+                                      .toLowerCase()
+                                      .startsWith('quitado_recurso');
+                                    const isAntecipadoDevolvidoFilter = relatoriosOcorrenciasActionFilter
+                                      .trim()
+                                      .toLowerCase()
+                                      .startsWith('antecipado_devolvido');
+                                    const headers = [
+                                      'Data/Hora',
+                                      'Origem',
+                                      'Competência',
+                                      'Órgão',
+                                      'Vencimento',
+                                      'Ação',
+                                      ...(isQuitadoOnly
+                                        ? [
+                                            isQuitadoFilter
+                                              ? 'Data de Quitação (Data de Liquidação)'
+                                              : isAntecipadoDevolvidoFilter
+                                                ? 'Data de Devolução'
+                                                : 'Data',
+                                          ]
+                                        : []),
+                                      'CPF',
+                                      'Nome',
+                                      'Valor',
+                                      'Status',
+                                      'Gerente',
+                                      'Justificativa',
+                                    ]
+                                    return headers.map((h) => (
+                                    <th
+                                      key={h}
+                                      style={{
+                                        textAlign: 'left',
+                                        padding: '10px 12px',
+                                        fontSize: '0.78rem',
+                                        letterSpacing: '0.08em',
+                                        textTransform: 'uppercase',
+                                        color: 'rgba(255,255,255,0.62)',
+                                        borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                        whiteSpace: 'nowrap',
+                                      }}
+                                    >
+                                      {h}
+                                    </th>
+                                    ))
+                                  })()}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {relatoriosOcorrenciasRowsFiltered.map((it) => {
+                                  const isQuitadoOnly = relatoriosOcorrenciasActionFilter
+                                    .trim()
+                                    .toLowerCase()
+                                    .startsWith('quitado_recurso')
+                                  return (
+                                    <tr key={it.key}>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.dataHora ? formatIsoToPtBrDateTime(it.dataHora) : '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.origem || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.competencia || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.orgao || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.vencimento || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.acao || '—'}
+                                    </td>
+                                    {isQuitadoOnly ? (
+                                      <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                        {(it as any).dataQuitacao || '—'}
+                                      </td>
+                                    ) : null}
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.cpf || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.nome || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', whiteSpace: 'nowrap' }}>
+                                      {it.valor ? withCurrency(it.valor) : '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.status || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                                      {it.gerenteEmail || '—'}
+                                    </td>
+                                    <td style={{ padding: '10px 12px', borderBottom: '1px solid rgba(255,255,255,0.08)', minWidth: 320 }}>
+                                      {it.justificativa || '—'}
+                                    </td>
+                                  </tr>
+                                  )
+                                })}
+                                {relatoriosOcorrenciasRowsFiltered.length === 0 ? (
+                                  <tr>
+                                    <td
+                                      colSpan={
+                                        relatoriosOcorrenciasActionFilter
+                                          .trim()
+                                          .toLowerCase()
+                                          .startsWith('quitado_recurso')
+                                          ? 13
+                                          : 12
+                                      }
+                                      style={{
+                                        padding: '16px 12px',
+                                        color: 'rgba(255,255,255,0.7)',
+                                        textAlign: 'center',
+                                      }}
+                                    >
+                                      Nenhuma ocorrência encontrada para os filtros selecionados.
+                                    </td>
+                                  </tr>
+                                ) : null}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )
+                    })()}
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
+            {view === 'fluxo-pendencias' ? (
+              <>
+                <style>{`
+                  @keyframes fluxoCountBlink {
+                    0%, 100% { opacity: 1; transform: translateZ(0) scale(1); filter: brightness(1); }
+                    50% { opacity: 0.35; transform: translateZ(0) scale(1.04); filter: brightness(1.08); }
+                  }
+                `}</style>
+                <section className="panel">
+                  <div className="panel-head">
+                    <h2>Fluxo de Pendências</h2>
+                    {fluxoPendenciasLoading ? (
+                      <span className="chip">
+                        <Clock size={16} />
+                        Carregando
+                      </span>
+                    ) : (
+                      <span className="chip">
+                        <GitBranch size={16} />
+                        Fluxo
+                      </span>
+                    )}
+                  </div>
+                  <div className="panel-body">
+                    <div
+                      className="form-grid form-grid-4"
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '180px minmax(360px, 1fr) 260px 240px',
+                        gap: 12,
+                        alignItems: 'start',
+                      }}
+                    >
+                      <div
+                        className="field"
+                        style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                      >
+                        <label>Competência</label>
+                        <select
+                          className="control month-select"
+                          value={conciliacaoMonth}
+                          onChange={(e) => setConciliacaoMonth(e.target.value)}
+                          disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
+                          style={{ height: 44, boxSizing: 'border-box' }}
+                        >
+                          {conciliacaoMonthOptions.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div
+                        className="field"
+                        style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                      >
+                        <label>Órgão</label>
+                        <select
+                          className="control month-select"
+                          value={conciliacaoOrgao}
+                          onChange={(e) => setConciliacaoOrgao(e.target.value)}
+                          disabled={orgaoDeParaLoading}
+                          style={{ height: 44, boxSizing: 'border-box' }}
+                        >
+                          <option value="">Todos os órgãos</option>
+                          {conciliacaoOrgaoOptions.map((o) => (
+                            <option key={o} value={o}>
+                              {formatConciliacaoOrgaoLabel(o)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div
+                        className="field"
+                        style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                      >
+                        <label>Vencimento</label>
+                        <input
+                          className="control"
+                          value={fluxoPendenciasVencimento}
+                          onChange={(e) => setFluxoPendenciasVencimento(e.target.value)}
+                          placeholder="Opcional (ex.: 01/06/2026)"
+                          style={{ height: 44, boxSizing: 'border-box' }}
+                        />
+                      </div>
+                      <div
+                        className="field"
+                        style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                      >
+                        <label>Opções</label>
+                        <label
+                          className="day"
+                          style={{
+                            width: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'flex-start',
+                            gap: 10,
+                            height: 44,
+                            boxSizing: 'border-box',
+                            margin: 0,
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={fluxoPendenciasIncludeConcluidas}
+                            onChange={(e) => setFluxoPendenciasIncludeConcluidas(e.target.checked)}
+                          />
+                          <span>Somente concluídas</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    {fluxoPendenciasError ? (
+                      <div className="help" style={{ marginTop: 12, color: 'rgba(255, 99, 132, 0.95)' }}>
+                        {fluxoPendenciasError}
+                      </div>
+                    ) : null}
+
+                    {fluxoPendenciasItems ? (
+                      (() => {
+                        const items = fluxoPendenciasItems
+                        const viewerEmail = String(
+                          typeof window !== 'undefined'
+                            ? sessionStorage.getItem('consignado_user_email') || ''
+                            : '',
+                        )
+                          .trim()
+                          .toLowerCase()
+
+                        const grouped: Record<FluxoPendenciaStage, FluxoPendenciaItem[]> = {
+                          financeiro: items.filter((i) => i.stage === 'financeiro'),
+                          credito: items.filter((i) => i.stage === 'credito'),
+                          negocios: items.filter((i) => {
+                            if (i.stage !== 'negocios') return false
+                            if (userRole === 'admin') return true
+                            if (!canActOnFlowStage('negocios')) return true
+                            if (!viewerEmail) return true
+                            const assigned = String(i.gerenteEmail || '')
+                              .trim()
+                              .toLowerCase()
+                            return Boolean(assigned) && assigned === viewerEmail
+                          }),
+                        }
+
+                        const renderItem = (it: FluxoPendenciaItem) => {
+                          const isConcluida = String(it.status) === 'concluida'
+                          const canManageStage = canActOnFlowStage(it.stage)
+                          const moveTargets = (
+                            it.stage === 'financeiro'
+                              ? (['credito', 'negocios'] as FluxoPendenciaStage[])
+                              : it.stage === 'credito'
+                                ? (['negocios'] as FluxoPendenciaStage[])
+                                : it.stage === 'negocios'
+                                  ? (['credito', 'financeiro'] as FluxoPendenciaStage[])
+                                  : []
+                          )
+                          const canConcluir = canManageStage
+                          const canReabrir = isConcluida && canManageStage
+                          const showActions = !isConcluida && canManageStage
+                          const canMove = showActions && moveTargets.length > 0
+                          const stageMeta = fluxoPendenciaStageMeta[it.stage]
+                          const historyCount = Array.isArray(it.history) ? it.history.length : 0
+                          const lastFluxoHistoryBy = (() => {
+                            const history = Array.isArray(it.history) ? it.history : []
+                            let bestMs = -Infinity
+                            let bestBy: string | null = null
+                            for (const entry of history) {
+                              if (!entry || entry.source !== 'fluxo') continue
+                              const createdAt = String((entry as any).createdAt || '').trim()
+                              if (!createdAt) continue
+                              const ms = Date.parse(createdAt)
+                              if (!Number.isFinite(ms)) continue
+                              if (ms > bestMs) {
+                                bestMs = ms
+                                const by = String((entry as any).createdBy || '').trim()
+                                bestBy = by || null
+                              }
+                            }
+                            return bestBy
+                          })()
+                          const slaDueMs = it.slaDueAt ? Date.parse(String(it.slaDueAt)) : NaN
+                          const slaActive =
+                            !isConcluida &&
+                            (it.stage === 'credito' || it.stage === 'negocios') &&
+                            Number.isFinite(slaDueMs) &&
+                            !String(it.slaStoppedAt || '').trim()
+                          const slaRemainingMs = slaActive ? slaDueMs - fluxoPendenciasNowMs : NaN
+                          const slaOverdue = slaActive && slaRemainingMs <= 0
+                          return (
+                            <div
+                              key={String(it.id)}
+                              onClick={() => openFluxoPendenciaHistoryModal(it)}
+                              style={{
+                                border: `1px solid ${stageMeta.cardBorder}`,
+                                background: stageMeta.cardBackground,
+                                boxShadow: `inset 0 1px 0 ${stageMeta.badgeBackground}`,
+                                borderRadius: 14,
+                                padding: 12,
+                                display: 'grid',
+                                gap: 8,
+                                opacity: isConcluida ? 0.75 : 1,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                                <div style={{ fontWeight: 900, minWidth: 0 }}>
+                                  {String(it.nome || '').trim() || '—'}
+                                </div>
+                                <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                  {slaActive ? (
+                                    <span
+                                      className="chip"
+                                      style={{
+                                        background: slaOverdue ? 'rgba(239, 68, 68, 0.16)' : 'rgba(249, 115, 22, 0.14)',
+                                        borderColor: slaOverdue ? 'rgba(248, 113, 113, 0.60)' : 'rgba(251, 146, 60, 0.55)',
+                                        color: 'rgba(255,255,255,0.92)',
+                                        fontWeight: 900,
+                                      }}
+                                      title="Prazo de resolução: 2 dias (contagem regressiva)."
+                                    >
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                        PRAZO {toHms(slaRemainingMs)} <Clock size={14} />
+                                      </span>
+                                    </span>
+                                  ) : null}
+                                  <span
+                                    className="chip"
+                                    style={{
+                                      background: stageMeta.badgeBackground,
+                                      borderColor: stageMeta.cardBorder,
+                                    }}
+                                  >
+                                    #{it.id}
+                                  </span>
+                                </div>
+                              </div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                                <span
+                                  className="chip"
+                                  style={{
+                                    background: stageMeta.badgeBackground,
+                                    borderColor: stageMeta.cardBorder,
+                                  }}
+                                >
+                                  {formatOcorrenciaActionLabel(it.action)}
+                                </span>
+                                <span className="chip">{String(it.cpf || '').trim() || '—'}</span>
+                                <span className="chip">{withCurrency(String(it.value || '').trim() || '0')}</span>
+                                {it.vencimento ? <span className="chip">Venc: {it.vencimento}</span> : null}
+                                <span className="chip">{stageMeta.label}</span>
+                                {isConcluida ? <span className="chip">Concluída</span> : null}
+                                <span className="chip">
+                                  {historyCount === 1 ? '1 justificativa' : `${historyCount} justificativas`}
+                                </span>
+                              </div>
+                              {String(it.justification || '').trim() ? (
+                                <div className="help" style={{ margin: 0, opacity: 0.85 }}>
+                                  {String(it.justification)}
+                                </div>
+                              ) : null}
+                              {it.createdBy ? (
+                                <div className="help" style={{ margin: 0, opacity: 0.7 }}>
+                                  Abertura: {it.createdAt || '—'} • {it.createdBy}
+                                </div>
+                              ) : null}
+                              {it.updatedAt || it.updatedBy ? (
+                                <div className="help" style={{ margin: 0, opacity: 0.7 }}>
+                                  Última atualização: {it.updatedAt || '—'}
+                                  {lastFluxoHistoryBy || it.updatedBy ? ` • ${lastFluxoHistoryBy || it.updatedBy}` : ''}
+                                </div>
+                              ) : null}
+                              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                {showActions && canConcluir ? (
+                                  <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    disabled={fluxoPendenciasLoading}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      openFluxoPendenciaModal(it, 'concluir')
+                                    }}
+                                  >
+                                    Concluir
+                                  </button>
+                                ) : null}
+                                {canMove && it.stage === 'financeiro' ? (
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={fluxoPendenciasLoading}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      openFluxoPendenciaModal(it, 'mover', undefined, moveTargets)
+                                    }}
+                                  >
+                                    Encaminhar
+                                  </button>
+                                ) : null}
+                                {canMove && it.stage === 'credito' ? (
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={fluxoPendenciasLoading}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      openFluxoPendenciaModal(
+                                        it,
+                                        'mover',
+                                        moveTargets.length === 1 ? moveTargets[0] : undefined,
+                                        moveTargets,
+                                      )
+                                    }}
+                                  >
+                                    Encaminhar
+                                  </button>
+                                ) : null}
+                                {canMove && it.stage === 'negocios' ? (
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={fluxoPendenciasLoading}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      openFluxoPendenciaModal(it, 'mover', undefined, moveTargets)
+                                    }}
+                                  >
+                                    Encaminhar
+                                  </button>
+                                ) : null}
+                                {canReabrir ? (
+                                  <button
+                                    type="button"
+                                    className="btn"
+                                    disabled={fluxoPendenciasLoading}
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      openFluxoPendenciaModal(it, 'reabrir', 'financeiro')
+                                    }}
+                                  >
+                                    Reabrir
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+                          )
+                        }
+
+                        const column = (stage: FluxoPendenciaStage, title: string, list: FluxoPendenciaItem[]) => {
+                          const stageMeta = fluxoPendenciaStageMeta[stage]
+                          return (
+                            <div
+                              style={{
+                                flex: 1,
+                                minWidth: 320,
+                                borderRadius: 18,
+                                border: `1px solid ${stageMeta.columnBorder}`,
+                                background: stageMeta.columnBackground,
+                                padding: 12,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  marginBottom: 10,
+                                }}
+                              >
+                                <div style={{ fontWeight: 950, letterSpacing: '0.02em' }}>{title}</div>
+                                <span
+                                  className="chip"
+                                  style={{
+                                    background: stageMeta.badgeBackground,
+                                    borderColor: stageMeta.cardBorder,
+                                    animation: list.length > 0 ? 'fluxoCountBlink 1.15s ease-in-out infinite' : undefined,
+                                    willChange: list.length > 0 ? 'opacity, transform, filter' : undefined,
+                                  }}
+                                >
+                                  {list.length}
+                                </span>
+                              </div>
+                              <div style={{ display: 'grid', gap: 10 }}>
+                                {list.length === 0 ? (
+                                  <div className="help" style={{ margin: 0, opacity: 0.75 }}>
+                                    Sem pendências.
+                                  </div>
+                                ) : (
+                                  list.map(renderItem)
+                                )}
+                              </div>
+                            </div>
+                          )
+                        }
+
+                        return (
+                          <div style={{ marginTop: 14, display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 6 }}>
+                            {column('financeiro', 'Financeiro (origem)', grouped.financeiro)}
+                            {column('credito', 'Crédito', grouped.credito)}
+                            {column('negocios', 'Negócios', grouped.negocios)}
+                          </div>
+                        )
+                      })()
+                    ) : (
+                      <div className="help" style={{ marginTop: 12 }}>
+                        Selecione competência e órgão para visualizar o fluxo.
+                      </div>
+                    )}
+                  </div>
+                </section>
+                {fluxoPendenciaModal && typeof document !== 'undefined'
+                  ? createPortal(
+                      <div
+                        role="dialog"
+                        aria-modal="true"
+                        style={{
+                          position: 'fixed',
+                          inset: 0,
+                          background: 'rgba(0,0,0,0.62)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: 24,
+                          overflowY: 'auto',
+                          zIndex: 240,
+                        }}
+                        onClick={() => {
+                          if (fluxoPendenciasLoading) return
+                          setFluxoPendenciaModal(null)
+                          setFluxoPendenciaModalNote('')
+                          setFluxoPendenciaModalGerenteEmail('')
+                          setFluxoPendenciaGerenteQuery('')
+                          setFluxoPendenciaGerenteResults([])
+                          setFluxoPendenciaGerenteError(null)
+                          setFluxoPendenciaDestinoOpen(false)
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 'min(560px, 96vw)',
+                            maxHeight: 'calc(100vh - 48px)',
+                            borderRadius: 18,
+                            border: `1px solid ${fluxoPendenciaModal.accent}`,
+                            background: 'rgba(12, 22, 40, 0.96)',
+                            color: 'rgba(255,255,255,0.92)',
+                            boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                            overflow: 'hidden',
+                            display: 'grid',
+                            gridTemplateRows: 'auto 1fr',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div
+                            style={{
+                              padding: '14px 16px',
+                              borderBottom: '1px solid rgba(255,255,255,0.10)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: 10,
+                            }}
+                          >
+                            <div style={{ fontWeight: 900 }}>{fluxoPendenciaModal.title}</div>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              disabled={fluxoPendenciasLoading}
+                              onClick={() => {
+                                setFluxoPendenciaModal(null)
+                                setFluxoPendenciaModalNote('')
+                                setFluxoPendenciaModalGerenteEmail('')
+                                setFluxoPendenciaGerenteQuery('')
+                                setFluxoPendenciaGerenteResults([])
+                                setFluxoPendenciaGerenteError(null)
+                                setFluxoPendenciaDestinoOpen(false)
+                              }}
+                            >
+                              Fechar
+                            </button>
+                          </div>
+                          <div style={{ padding: '14px 16px', display: 'grid', gap: 12, overflowY: 'auto' }}>
+                            <div
+                              style={{
+                                borderRadius: 12,
+                                border: `1px solid ${fluxoPendenciaModal.accent}`,
+                                background: 'rgba(255,255,255,0.03)',
+                                padding: '12px 14px',
+                                display: 'grid',
+                                gap: 6,
+                              }}
+                            >
+                              <div style={{ fontWeight: 800 }}>
+                                {fluxoPendenciaModal.nome || `Pendência #${fluxoPendenciaModal.id}`}
+                              </div>
+                              <div className="help" style={{ margin: 0 }}>
+                                ID #{fluxoPendenciaModal.id} • Origem:{' '}
+                                {fluxoPendenciaStageMeta[fluxoPendenciaModal.fromStage].label}
+                                {fluxoPendenciaModal.toStage
+                                  ? ` • Destino: ${fluxoPendenciaStageMeta[fluxoPendenciaModal.toStage].label}`
+                                  : ''}
+                              </div>
+                            </div>
+                            {fluxoPendenciaModal.action === 'mover' ? (
+                              <div className="field" style={{ margin: 0 }}>
+                                <label>Destino</label>
+                                <div ref={fluxoPendenciaDestinoRef} style={{ position: 'relative' }}>
+                                  <button
+                                    type="button"
+                                    className="control"
+                                    disabled={fluxoPendenciasLoading}
+                                    style={{
+                                      width: '100%',
+                                      height: 44,
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      gap: 10,
+                                      textAlign: 'left',
+                                      background: 'rgba(187, 247, 208, 0.22)',
+                                      borderColor: 'rgba(134, 239, 172, 0.55)',
+                                      color: 'rgba(236, 253, 245, 0.98)',
+                                      cursor: fluxoPendenciasLoading ? 'not-allowed' : 'pointer',
+                                    }}
+                                    onClick={() => {
+                                      if (fluxoPendenciasLoading) return
+                                      setFluxoPendenciaDestinoOpen((v) => !v)
+                                    }}
+                                  >
+                                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                      {fluxoPendenciaModal.toStage
+                                        ? fluxoPendenciaStageMeta[fluxoPendenciaModal.toStage].label
+                                        : 'Selecione...'}
+                                    </span>
+                                    <span style={{ opacity: 0.75, fontWeight: 900 }}>▾</span>
+                                  </button>
+                                  {fluxoPendenciaDestinoOpen ? (
+                                    <div
+                                      style={{
+                                        position: 'absolute',
+                                        top: 'calc(100% + 8px)',
+                                        left: 0,
+                                        right: 0,
+                                        zIndex: 260,
+                                        borderRadius: 14,
+                                        border: '1px solid rgba(134, 239, 172, 0.85)',
+                                        background: '#d1fae5',
+                                        boxShadow: '0 20px 60px rgba(0,0,0,0.45)',
+                                        padding: 8,
+                                        display: 'grid',
+                                        gap: 8,
+                                      }}
+                                    >
+                                      {(() => {
+                                        const allowed = Array.isArray(fluxoPendenciaModal.allowedToStages)
+                                          ? fluxoPendenciaModal.allowedToStages
+                                          : []
+                                        const fallback =
+                                          fluxoPendenciaModal.fromStage === 'financeiro'
+                                            ? (['credito', 'negocios'] as FluxoPendenciaStage[])
+                                            : fluxoPendenciaModal.fromStage === 'credito'
+                                              ? (['negocios'] as FluxoPendenciaStage[])
+                                              : (['credito', 'financeiro'] as FluxoPendenciaStage[])
+                                        const list = allowed.length > 0 ? allowed : fallback
+                                        return list.map((s) => {
+                                          const isSelected = fluxoPendenciaModal.toStage === s
+                                          return (
+                                            <button
+                                              key={s}
+                                              type="button"
+                                              className="btn btn-ghost"
+                                              style={{
+                                                width: '100%',
+                                                justifyContent: 'space-between',
+                                                padding: '10px 12px',
+                                                border: isSelected ? '1px solid rgba(5, 150, 105, 0.55)' : '1px solid rgba(6, 95, 70, 0.20)',
+                                                background: isSelected ? '#86efac' : '#d1fae5',
+                                                color: '#064e3b',
+                                                fontWeight: isSelected ? 900 : 800,
+                                              }}
+                                              onClick={() => {
+                                                const targetLabel = fluxoPendenciaStageMeta[s].label
+                                                const title = `Encaminhar para ${targetLabel}`
+                                                const confirmLabel = `Enviar para ${targetLabel}`
+                                                setFluxoPendenciaModal((prev) =>
+                                                  prev
+                                                    ? {
+                                                        ...prev,
+                                                        toStage: s,
+                                                        title,
+                                                        confirmLabel,
+                                                      }
+                                                    : prev,
+                                                )
+                                                setFluxoPendenciaDestinoOpen(false)
+                                              }}
+                                            >
+                                              <span>{fluxoPendenciaStageMeta[s].label}</span>
+                                              <span style={{ opacity: isSelected ? 0.95 : 0.65, fontWeight: 900 }}>
+                                                {isSelected ? 'Selecionado' : 'Selecionar'}
+                                              </span>
+                                            </button>
+                                          )
+                                        })
+                                      })()}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ) : null}
+                            {fluxoPendenciaModal.action === 'mover' &&
+                            (fluxoPendenciaModal.toStage === 'credito' || fluxoPendenciaModal.toStage === 'negocios') ? (
+                              <div style={{ display: 'grid', gap: 10 }}>
+                                <div className="field" style={{ margin: 0 }}>
+                                  <label>Gerente responsável (e-mail/Teams)</label>
+                                  <input
+                                    className="control"
+                                    value={fluxoPendenciaGerenteQuery}
+                                    style={{
+                                      background: fluxoPendenciaModalGerenteEmail.trim()
+                                        ? 'rgba(249, 115, 22, 0.16)'
+                                        : undefined,
+                                      borderColor: fluxoPendenciaModalGerenteEmail.trim()
+                                        ? 'rgba(251, 146, 60, 0.55)'
+                                        : undefined,
+                                      color: fluxoPendenciaModalGerenteEmail.trim()
+                                        ? 'rgba(255, 237, 213, 0.98)'
+                                        : undefined,
+                                    }}
+                                    onChange={(e) => {
+                                      const v = String(e.target.value || '')
+                                      setFluxoPendenciaGerenteQuery(v)
+                                      const maybeEmail = v.trim().toLowerCase()
+                                      if (maybeEmail.includes('@')) setFluxoPendenciaModalGerenteEmail(maybeEmail)
+                                    }}
+                                    disabled={fluxoPendenciasLoading}
+                                    placeholder="Pesquise por nome ou digite o e-mail..."
+                                  />
+                                  <div className="help" style={{ margin: '6px 0 0 0', opacity: 0.85 }}>
+                                    Selecionado:{' '}
+                                    <span
+                                      style={{
+                                        fontWeight: 900,
+                                        color: fluxoPendenciaModalGerenteEmail.trim()
+                                          ? 'rgba(251, 146, 60, 0.98)'
+                                          : 'rgba(255,255,255,0.70)',
+                                      }}
+                                    >
+                                      {fluxoPendenciaModalGerenteEmail.trim() || '—'}
+                                    </span>
+                                  </div>
+                                  {fluxoPendenciaGerenteError ? (
+                                    <div
+                                      className="help"
+                                      style={{
+                                        margin: '6px 0 0 0',
+                                        color: fluxoPendenciaGerenteError.includes('Digite o e-mail manualmente')
+                                          ? '#FBBF24'
+                                          : '#FCA5A5',
+                                      }}
+                                    >
+                                      {fluxoPendenciaGerenteError}
+                                    </div>
+                                  ) : null}
+                                </div>
+                                {fluxoPendenciaGerenteLoading ? (
+                                  <div className="help" style={{ margin: 0 }}>
+                                    Buscando no Graph...
+                                  </div>
+                                ) : null}
+                                {!fluxoPendenciaGerenteLoading && fluxoPendenciaGerenteResults.length > 0 ? (
+                                  <div style={{ display: 'grid', gap: 8 }}>
+                                    {fluxoPendenciaGerenteResults.map((u) => (
+                                      (() => {
+                                        const isSelected =
+                                          String(fluxoPendenciaModalGerenteEmail || '').trim().toLowerCase() ===
+                                          String(u.email || '').trim().toLowerCase()
+                                        return (
+                                          <button
+                                            key={u.email}
+                                            type="button"
+                                            className="btn btn-ghost"
+                                            style={{
+                                              justifyContent: 'space-between',
+                                              textAlign: 'left',
+                                              border: isSelected
+                                                ? '1px solid rgba(251, 146, 60, 0.72)'
+                                                : '1px solid rgba(255,255,255,0.10)',
+                                              background: isSelected
+                                                ? 'linear-gradient(180deg, rgba(249, 115, 22, 0.20), rgba(251, 146, 60, 0.12))'
+                                                : 'rgba(255,255,255,0.03)',
+                                              boxShadow: isSelected
+                                                ? '0 0 0 1px rgba(249, 115, 22, 0.16) inset'
+                                                : 'none',
+                                              padding: '10px 12px',
+                                            }}
+                                            onClick={() => {
+                                              setFluxoPendenciaModalGerenteEmail(u.email)
+                                              setFluxoPendenciaGerenteQuery(`${u.displayName}`)
+                                              setFluxoPendenciaGerenteResults([])
+                                              setFluxoPendenciaGerenteError(null)
+                                            }}
+                                          >
+                                            <span style={{ display: 'grid' }}>
+                                              <span
+                                                style={{
+                                                  fontWeight: 800,
+                                                  color: isSelected ? 'rgba(255, 237, 213, 0.98)' : undefined,
+                                                }}
+                                              >
+                                                {u.displayName}
+                                              </span>
+                                              <span
+                                                style={{
+                                                  fontSize: 12,
+                                                  opacity: isSelected ? 0.96 : 0.8,
+                                                  color: isSelected ? 'rgba(255, 237, 213, 0.90)' : undefined,
+                                                }}
+                                              >
+                                                {u.email}
+                                              </span>
+                                            </span>
+                                            <span
+                                              style={{
+                                                fontSize: 12,
+                                                opacity: 0.9,
+                                                color: isSelected ? 'rgba(255, 237, 213, 0.98)' : undefined,
+                                                fontWeight: isSelected ? 800 : 600,
+                                              }}
+                                            >
+                                              {isSelected ? 'Selecionado' : 'Selecionar'}
+                                            </span>
+                                          </button>
+                                        )
+                                      })()
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ) : null}
+                            <div className="field" style={{ margin: 0 }}>
+                              <label>Justificativa</label>
+                              <textarea
+                                className="control"
+                                rows={5}
+                                value={fluxoPendenciaModalNote}
+                                onChange={(e) => setFluxoPendenciaModalNote(e.target.value)}
+                                disabled={fluxoPendenciasLoading}
+                                placeholder="Descreva o motivo da movimentação..."
+                              />
+                            </div>
+                            <div className="help" style={{ margin: 0, opacity: 0.8 }}>
+                              A justificativa é obrigatória e será gravada no banco de dados para rastreabilidade.
+                            </div>
+                            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                disabled={fluxoPendenciasLoading}
+                                onClick={() => {
+                                  setFluxoPendenciaModal(null)
+                                  setFluxoPendenciaModalNote('')
+                                  setFluxoPendenciaModalGerenteEmail('')
+                                  setFluxoPendenciaGerenteQuery('')
+                                  setFluxoPendenciaGerenteResults([])
+                                  setFluxoPendenciaGerenteError(null)
+                                  setFluxoPendenciaDestinoOpen(false)
+                                }}
+                              >
+                                Cancelar
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                disabled={
+                                  fluxoPendenciasLoading ||
+                                  !fluxoPendenciaModalNote.trim() ||
+                                  (fluxoPendenciaModal.action === 'mover' && !fluxoPendenciaModal.toStage) ||
+                                  (fluxoPendenciaModal.action === 'mover' &&
+                                    (fluxoPendenciaModal.toStage === 'credito' || fluxoPendenciaModal.toStage === 'negocios') &&
+                                    !fluxoPendenciaModalGerenteEmail.trim().includes('@'))
+                                }
+                                onClick={() => {
+                                  if (!fluxoPendenciaModal || !fluxoPendenciaModalNote.trim()) return
+                                  if (fluxoPendenciaModal.action === 'mover' && !fluxoPendenciaModal.toStage) return
+                                  if (
+                                    fluxoPendenciaModal.action === 'mover' &&
+                                    (fluxoPendenciaModal.toStage === 'credito' || fluxoPendenciaModal.toStage === 'negocios') &&
+                                    !fluxoPendenciaModalGerenteEmail.trim().includes('@')
+                                  ) {
+                                    return
+                                  }
+                                  void doUpdateFluxoPendencia({
+                                    id: fluxoPendenciaModal.id,
+                                    action: fluxoPendenciaModal.action,
+                                    toStage: fluxoPendenciaModal.toStage,
+                                    note: fluxoPendenciaModalNote.trim(),
+                                    gerenteEmail: fluxoPendenciaModalGerenteEmail.trim().toLowerCase() || null,
+                                    requestedBy:
+                                      String(
+                                        typeof window !== 'undefined'
+                                          ? sessionStorage.getItem('consignado_user_email') || ''
+                                          : '',
+                                      )
+                                        .trim()
+                                        .toLowerCase() || null,
+                                  })
+                                }}
+                              >
+                                {fluxoPendenciasLoading ? 'Salvando...' : fluxoPendenciaModal.confirmLabel}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>,
+                      document.body,
+                    )
+                  : null}
+                {fluxoPendenciaHistoryModal && typeof document !== 'undefined'
+                  ? createPortal(
+                      <div
+                        role="dialog"
+                        aria-modal="true"
+                        style={{
+                          position: 'fixed',
+                          inset: 0,
+                          background: 'rgba(0,0,0,0.62)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: 24,
+                          overflowY: 'auto',
+                          zIndex: 239,
+                        }}
+                        onClick={() => setFluxoPendenciaHistoryModal(null)}
+                      >
+                        <div
+                          style={{
+                            width: 'min(720px, 96vw)',
+                            maxHeight: 'calc(100vh - 48px)',
+                            borderRadius: 18,
+                            border: `1px solid ${fluxoPendenciaHistoryModal.accent}`,
+                            background: 'rgba(12, 22, 40, 0.97)',
+                            color: 'rgba(255,255,255,0.92)',
+                            boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                            overflow: 'hidden',
+                            display: 'grid',
+                            gridTemplateRows: 'auto 1fr',
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div
+                            style={{
+                              padding: '14px 16px',
+                              borderBottom: '1px solid rgba(255,255,255,0.10)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              gap: 10,
+                            }}
+                          >
+                            <div>
+                              <div style={{ fontWeight: 900 }}>Histórico de justificativas</div>
+                              <div className="help" style={{ margin: '4px 0 0 0' }}>
+                                {fluxoPendenciaHistoryModal.nome || `Pendência #${fluxoPendenciaHistoryModal.id}`} • ID #
+                                {fluxoPendenciaHistoryModal.id}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() => setFluxoPendenciaHistoryModal(null)}
+                            >
+                              Fechar
+                            </button>
+                          </div>
+                          <div style={{ padding: '14px 16px', overflowY: 'auto', display: 'grid', gap: 12 }}>
+                            {fluxoPendenciaHistoryModal.history.length === 0 ? (
+                              <div className="help" style={{ margin: 0 }}>
+                                Nenhuma justificativa encontrada.
+                              </div>
+                            ) : (
+                              fluxoPendenciaHistoryModal.history.map((entry, idx) => (
+                                <div
+                                  key={`${entry.createdAt}-${entry.action}-${idx}`}
+                                  style={{
+                                    borderRadius: 14,
+                                    border: `1px solid ${fluxoPendenciaHistoryModal.accent}`,
+                                    background: 'rgba(255,255,255,0.03)',
+                                    padding: '12px 14px',
+                                    display: 'grid',
+                                    gap: 8,
+                                  }}
+                                >
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                                    <div style={{ fontWeight: 850 }}>{getFluxoPendenciaHistoryActionLabel(entry)}</div>
+                                    <div className="help" style={{ margin: 0 }}>
+                                      {formatIsoToPtBrDateTime(entry.createdAt)}
+                                    </div>
+                                  </div>
+                                  {entry.createdBy ? (
+                                    <div className="help" style={{ margin: 0 }}>
+                                      Registrado por: {entry.createdBy}
+                                    </div>
+                                  ) : null}
+                                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{entry.note}</div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      </div>,
+                      document.body,
+                    )
+                  : null}
+              </>
+            ) : null}
+
             {view === 'conciliacao-extratos' ? (
               <section className="panel">
                 <div className="panel-head">
@@ -6396,8 +15339,9 @@ export default function CreditoPage() {
                       style={{ padding: 11, width: 44, justifyContent: 'center' }}
                       onClick={() => {
                         setTarifaError(null)
-                        setTarifaTypeDraft('linha')
-                        setTarifaDraft('')
+                        const initialType = getInitialTarifaType()
+                        setTarifaTypeDraft(initialType)
+                        setTarifaDraft(getSavedTarifaDraft(initialType))
                         setTarifaModalOpen(true)
                       }}
                     >
@@ -6444,6 +15388,7 @@ export default function CreditoPage() {
                           if (conciliacaoIsClosed) {
                             setConciliacaoReopenError(null)
                             setConciliacaoReopenPassword('')
+                            setConciliacaoReopenJustification('')
                             setConciliacaoReopenMode(conciliacaoTotalIsClosed ? 'total' : 'parcial')
                             setConciliacaoReopenVencimento(
                               conciliacaoTotalIsClosed ? '' : vencimentoSelecionado,
@@ -6483,6 +15428,7 @@ export default function CreditoPage() {
                           if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
                           setConciliacaoReopenError(null)
                           setConciliacaoReopenPassword('')
+                          setConciliacaoReopenJustification('')
                           setConciliacaoReopenMode('parcial')
                           setConciliacaoReopenVencimento('')
                           setConciliacaoReopenModalOpen(true)
@@ -6491,7 +15437,7 @@ export default function CreditoPage() {
                         <Unlock size={18} />
                       </button>
                     ) : null}
-                    {conciliacaoIsClosed &&
+                    {conciliacaoHasAnyFechamento &&
                     conciliacaoClosedBalloonVisible &&
                     conciliacaoLockBalloonPos &&
                     typeof document !== 'undefined'
@@ -6503,12 +15449,16 @@ export default function CreditoPage() {
                               top: conciliacaoLockBalloonPos.top,
                             }}
                           >
-                            Conciliação fechada{vencimentoSelecionado ? ` • Vencimento ${vencimentoSelecionado}` : ''}
+                            {conciliacaoTotalIsClosed
+                              ? 'Conciliação fechada'
+                              : conciliacaoIsClosed
+                                ? `Conciliação fechada${vencimentoSelecionado ? ` • Vencimento ${vencimentoSelecionado}` : ''}`
+                                : `Fechamentos parciais (${closedVencimentos.length})`}
                           </div>,
                           document.body,
                         )
                       : null}
-                    {conciliacaoIsClosed ? (
+                    {conciliacaoTotalIsClosed || closedVencimentos.length > 0 ? (
                       <button
                         type="button"
                         className="btn btn-ghost"
@@ -6527,7 +15477,16 @@ export default function CreditoPage() {
                         onClick={async () => {
                           if (!conciliacaoOrgao.trim()) return
                           if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
-                          if (!conciliacaoIsClosed) return
+                          if (!conciliacaoTotalIsClosed && closedVencimentos.length === 0) return
+                          const vencimentoToSend =
+                            vencimentoSelecionado ||
+                            (!conciliacaoTotalIsClosed && closedVencimentos.length === 1
+                              ? closedVencimentos[0]
+                              : '')
+                          if (!conciliacaoTotalIsClosed && !vencimentoToSend) {
+                            setConciliacaoError('Selecione o vencimento fechado para reenviar à contabilidade.')
+                            return
+                          }
                           setConciliacaoError(null)
                           setConciliacaoResending(true)
                           try {
@@ -6540,7 +15499,7 @@ export default function CreditoPage() {
                                 body: JSON.stringify({
                                   month: conciliacaoMonth,
                                   orgao: conciliacaoOrgao.trim(),
-                                  vencimento: vencimentoSelecionado || undefined,
+                                  vencimento: vencimentoToSend || undefined,
                                   requestedBy: accessFixedEmail,
                                   contabilidadeEmail: notificationEmailContabilidade,
                                   evidencePngBase64,
@@ -6576,8 +15535,13 @@ export default function CreditoPage() {
                       <span
                         className="chip"
                         title={`Fechamentos parciais: ${closedVencimentos.join(' | ')}`}
+                        style={{
+                          borderColor: 'rgba(255,140,0,0.55)',
+                          background: 'rgba(255,140,0,0.16)',
+                          color: 'rgba(255,255,255,0.94)',
+                        }}
                       >
-                        <Lock size={16} />
+                        <Lock size={16} color="rgba(255,140,0,0.98)" />
                         Parcial ({closedVencimentos.length})
                       </span>
                     ) : null}
@@ -6601,7 +15565,7 @@ export default function CreditoPage() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                        <Lock size={16} />
+                        <Lock size={16} color={conciliacaoTotalIsClosed ? undefined : 'rgba(255,140,0,0.98)'} />
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 850, letterSpacing: '0.02em' }}>
                             Conciliação fechada{vencimentoSelecionado ? ` • Vencimento ${vencimentoSelecionado}` : ''}
@@ -6618,7 +15582,7 @@ export default function CreditoPage() {
                       </div>
                     </div>
                   ) : null}
-                  {!conciliacaoTotalIsClosed && closedVencimentos.length > 0 ? (
+                  {!conciliacaoTotalIsClosed && closedVencimentos.length > 0 && !vencimentoSelecionado ? (
                     <div
                       style={{
                         marginBottom: 12,
@@ -6632,7 +15596,7 @@ export default function CreditoPage() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                        <Lock size={16} />
+                        <Lock size={16} color="rgba(255,140,0,0.98)" />
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 850, letterSpacing: '0.02em' }}>
                             Fechamentos parciais ({closedVencimentos.length})
@@ -6644,15 +15608,26 @@ export default function CreditoPage() {
                       </div>
                     </div>
                   ) : null}
-                  <div className="form-grid form-grid-4">
-                    <div className="field">
+                  <div
+                    className="form-grid form-grid-4"
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '180px minmax(360px, 1fr) 260px 240px',
+                      gap: 12,
+                      alignItems: 'start',
+                    }}
+                  >
+                    <div
+                      className="field"
+                      style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                    >
                       <label>Competência</label>
                       <select
                         className="control month-select"
                         value={conciliacaoMonth}
                         onChange={(e) => setConciliacaoMonth(e.target.value)}
                         disabled={conciliacaoMonthsLoading || conciliacaoMonthOptions.length === 0}
-                        style={{ height: 44 }}
+                        style={{ height: 44, boxSizing: 'border-box' }}
                       >
                         {conciliacaoMonthOptions.map((o) => (
                           <option key={o.value} value={o.value}>
@@ -6661,44 +15636,51 @@ export default function CreditoPage() {
                         ))}
                       </select>
                     </div>
-                    <div className="field">
+                    <div
+                      className="field"
+                      style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                    >
                       <label>Orgão</label>
                       <select
                         className="control month-select"
                         value={conciliacaoOrgao}
                         onChange={(e) => setConciliacaoOrgao(e.target.value)}
                         disabled={orgaoDeParaLoading}
-                        style={{ height: 44 }}
+                        style={{ height: 44, boxSizing: 'border-box' }}
                       >
-                        <option value="">Nenhum</option>
+                        <option value="">Selecione...</option>
                         {conciliacaoOrgaoOptions.map((o) => (
                           <option key={o} value={o}>
-                            {o}
+                            {formatConciliacaoOrgaoLabel(o)}
                           </option>
                         ))}
                       </select>
                     </div>
-                    <div className="field">
+                    <div
+                      className="field"
+                      style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                    >
                       <label>Vencimento</label>
-                      <select
-                        className="control month-select control-highlight"
+                      <input
+                        className="control"
                         value={relatorioVencimentoFilter}
                         onChange={(e) => setRelatorioVencimentoFilter(e.target.value)}
                         disabled={!conciliacaoOrgao.trim() || relatorioVencimentoOptions.length === 0}
-                        style={{ height: 44 }}
-                      >
-                        <option value="">Todos</option>
+                        placeholder="Opcional (ex.: 01/06/2026)"
+                        list="conciliacao-vencimentos"
+                        style={{ height: 44, boxSizing: 'border-box' }}
+                      />
+                      <datalist id="conciliacao-vencimentos">
                         {relatorioVencimentoOptions.map((v) => {
                           const isClosed = closedVencimentos.includes(v)
-                          return (
-                            <option key={v} value={v}>
-                              {isClosed ? `${v} (Fechado)` : v}
-                            </option>
-                          )
+                          return <option key={v} value={v} label={isClosed ? `${v} (Fechado)` : v} />
                         })}
-                      </select>
+                      </datalist>
                     </div>
-                    <div className="field">
+                    <div
+                      className="field"
+                      style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
+                    >
                       <label>Exibir</label>
                       <label
                         className="day"
@@ -6709,6 +15691,8 @@ export default function CreditoPage() {
                           justifyContent: 'flex-start',
                           gap: 10,
                           height: 44,
+                          boxSizing: 'border-box',
+                          margin: 0,
                         }}
                       >
                         <input
@@ -6735,7 +15719,7 @@ export default function CreditoPage() {
                         wordBreak: 'break-word',
                       }}
                     >
-                      Órgão: {conciliacaoOrgao.trim() || '—'}
+                      Órgão: {formatConciliacaoOrgaoLabel(conciliacaoOrgao.trim() || '—')}
                     </div>
                   ) : null}
 
@@ -6794,39 +15778,67 @@ export default function CreditoPage() {
                           color: rgba(0,174,157,0.98);
                           animation: celebrateCheck 8000ms ease-out infinite;
                         }
+                        .stats-responsive .stat {
+                          flex: 1 1 0;
+                          min-width: 0;
+                        }
+                        .stats-responsive .stat .label {
+                          font-size: clamp(0.56rem, 0.65vw, 0.72rem);
+                          overflow: hidden;
+                          display: -webkit-box;
+                          -webkit-line-clamp: 3;
+                          -webkit-box-orient: vertical;
+                          line-height: 1.15;
+                          text-align: center;
+                        }
+                        .stats-responsive .stat .value {
+                          font-size: clamp(0.86rem, 1.05vw, 1.18rem);
+                          line-height: 1.1;
+                          overflow: hidden;
+                        }
                         `}
                       </style>
                       <div
                         className="stats stats-responsive"
                         style={{
                           marginTop: 14,
-                          display: 'grid',
-                          gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+                          display: 'flex',
+                          flexWrap: 'nowrap',
                           gap: 12,
                           alignItems: 'stretch',
+                          width: '100%',
                         }}
                       >
                         {(() => {
                           const totalRecursoItens = conciliacaoData.recurso.length
                           const totalRelatorioItens = conciliacaoData.relatorio.length
-                          const tarifaSumCents =
-                            (conciliacaoData.totals.tarifaLinha?.cents ?? 0) +
-                            (conciliacaoData.totals.tarifaTed?.cents ?? 0)
-                          const recursoNetCents =
-                            conciliacaoData.totals.recurso.cents -
-                            conciliacaoData.totals.tarifaLinha.cents -
-                            conciliacaoData.totals.tarifaTed.cents
-                          const diffNetCents = tarifaSumCents - Math.abs(conciliacaoData.totals.diff.cents)
-                          const isExtratoEqualRecurso = conciliacaoData.totals.extratos.cents === recursoNetCents
+                          const recursoCents = Number(conciliacaoData.totals.recurso.cents ?? 0) || 0
+                          const recursoRecebidoMenorDebitoCents =
+                            sumRecursoRecebidoMenorDebitoCentsFromRelatorioRows(conciliacaoData.relatorio)
+                          const recursoRecebidoMaiorDevolucaoCents =
+                            sumRecursoRecebidoMaiorDevolucaoCentsFromRelatorioRows(conciliacaoData.relatorio)
+                          const tarifasCents =
+                            (Number(conciliacaoData.totals.tarifaLinha.cents ?? 0) || 0) +
+                            (Number(conciliacaoData.totals.tarifaTed.cents ?? 0) || 0)
+                          const recursoNetCents = recursoCents - tarifasCents
+                          const diffCents =
+                            conciliacaoData.totals.extratos.cents -
+                            recursoNetCents -
+                            recursoRecebidoMaiorDevolucaoCents
+                          const isDiffZero = diffCents === 0
                           const green = 'rgba(0,174,157,0.98)'
-                          const red = 'rgba(255, 99, 132, 0.95)'
+                          const yellow = 'rgba(245,184,0,0.98)'
+                          const extratosCents = Number(conciliacaoData.totals.extratos.cents ?? 0) || 0
+                          const isExtratoEqualRecurso = extratosCents === recursoCents
+                          const isExtratoEqualRelatorio =
+                            extratosCents === (Number(conciliacaoData.totals.relatorio.cents ?? 0) || 0)
+                          const isAllEqual = isExtratoEqualRecurso && isExtratoEqualRelatorio
                           return [
                             {
                               label: 'Extrato SicoobNet',
                               value: (
                                 <span
-                                  className={isExtratoEqualRecurso ? 'celebrate-check' : undefined}
-                                  style={isExtratoEqualRecurso ? { color: green } : undefined}
+                                  style={{ color: green }}
                                 >
                                   {withCurrency(conciliacaoData.totals.extratos.text)}
                                 </span>
@@ -6837,15 +15849,30 @@ export default function CreditoPage() {
                               value: (
                                 <span
                                   className={isExtratoEqualRecurso ? 'celebrate-check' : undefined}
-                                  style={isExtratoEqualRecurso ? { color: green } : { color: red }}
+                                  style={
+                                    isExtratoEqualRecurso
+                                      ? { color: green }
+                                      : { color: yellow }
+                                  }
                                 >
-                                  {withCurrency(centsToPtBr(recursoNetCents))}
+                                  {withCurrency(conciliacaoData.totals.recurso.text)}
                                 </span>
                               ),
                             },
                             {
                               label: 'Total relatório SISbr',
-                              value: withCurrency(conciliacaoData.totals.relatorio.text),
+                              value: (
+                                <span
+                                  className={isExtratoEqualRelatorio ? 'celebrate-check' : undefined}
+                                  style={
+                                    isExtratoEqualRelatorio
+                                      ? { color: green }
+                                      : { color: yellow }
+                                  }
+                                >
+                                  {withCurrency(conciliacaoData.totals.relatorio.text)}
+                                </span>
+                              ),
                             },
                             {
                               label: 'Tarifa Linha',
@@ -6856,9 +15883,24 @@ export default function CreditoPage() {
                               value: withCurrency(conciliacaoData.totals.tarifaTed?.text ?? '0,00'),
                             },
                             {
+                              label: 'Recurso Recebido a Menor (Débito em Conta)',
+                              value: withCurrency(centsToPtBr(recursoRecebidoMenorDebitoCents)),
+                            },
+                            {
+                              label: 'Valor Recebido a Maior (Estorno na conta)',
+                              value: withCurrency(centsToPtBr(recursoRecebidoMaiorDevolucaoCents)),
+                            },
+                            {
                               label: 'Diferença',
-                              value: withCurrency(centsToPtBr(diffNetCents)),
-                              diff: diffNetCents !== 0,
+                              value: (
+                                <span
+                                  className={isAllEqual || isDiffZero ? 'celebrate-check' : undefined}
+                                  style={isAllEqual || isDiffZero ? { color: green } : undefined}
+                                >
+                                  {withCurrency(centsToPtBr(diffCents))}
+                                </span>
+                              ),
+                              diff: !(isAllEqual || isDiffZero),
                             },
                             {
                               label: 'Itens',
@@ -6895,7 +15937,7 @@ export default function CreditoPage() {
                             },
                           ]
                         })().map((s) => (
-                          <div className="stat" key={s.label}>
+                          <div className="stat" key={s.label} style={{ textAlign: 'center' }}>
                             <div className="label">{s.label}</div>
                             <div
                               className="value"
@@ -6915,7 +15957,7 @@ export default function CreditoPage() {
                         ))}
                       </div>
 
-                      <div style={{ marginTop: 14, overflow: 'auto' }}>
+                      <div data-evidence-skip="1" style={{ marginTop: 14, overflow: 'auto' }}>
                         <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0 }}>
                           <thead>
                             <tr>
@@ -6955,7 +15997,9 @@ export default function CreditoPage() {
                               const tarifaSumCents =
                                 (conciliacaoData.totals.tarifaLinha?.cents ?? 0) +
                                 (conciliacaoData.totals.tarifaTed?.cents ?? 0)
-                              const diffNetCents = tarifaSumCents - Math.abs(conciliacaoData.totals.diff.cents)
+                              const diffAdjustedCents =
+                                Number(conciliacaoData.totals.diff.cents ?? 0) || 0
+                              const diffNetCents = tarifaSumCents - Math.abs(diffAdjustedCents)
                               const hasDiff = diffNetCents !== 0
                               const ok = !hasDiff
                               const expanded = conciliacaoExpandedKeys.includes(monthKey)
@@ -6965,6 +16009,56 @@ export default function CreditoPage() {
                               const linkedPairId =
                                 conciliacaoSelectedPairId ??
                                 (conciliacaoSelectedPersonKey ? null : conciliacaoAutoPairId)
+
+                              const sumValueCents = (items: Array<{ value?: string }>) =>
+                                items.reduce((acc, it) => acc + ptBrMoneyToCents(it?.value ?? '0,00'), 0)
+
+                              const recursoVisible = conciliacaoData.recurso.filter((x) => !x.hideInFront)
+                              const relatorioVisible = conciliacaoData.relatorio.filter(
+                                (x) => !hasNaoPossuiRecursoOcorrencia(x),
+                              )
+
+                              const recursoPareadoCents = sumValueCents(recursoVisible.filter((x) => Boolean(x.pairId)))
+                              const recursoDivergenteCents = sumValueCents(recursoVisible.filter((x) => !x.pairId))
+                              const relatorioPareadoCents = sumValueCents(
+                                relatorioVisible.filter((x) => Boolean(x.pairId)),
+                              )
+                              const relatorioDivergenteCents = sumValueCents(relatorioVisible.filter((x) => !x.pairId))
+
+                              const breakdownCell = (pareadoCents: number, divergenteCents: number) => (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, lineHeight: 1.1 }}>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                    <span
+                                      style={{
+                                        fontSize: '0.66rem',
+                                        opacity: 0.72,
+                                        letterSpacing: '0.08em',
+                                        textTransform: 'uppercase',
+                                      }}
+                                    >
+                                      Pareado
+                                    </span>
+                                    <span style={{ fontWeight: 750 }}>
+                                      {withCurrency(centsToPtBr(pareadoCents))}
+                                    </span>
+                                  </div>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                    <span
+                                      style={{
+                                        fontSize: '0.66rem',
+                                        opacity: 0.72,
+                                        letterSpacing: '0.08em',
+                                        textTransform: 'uppercase',
+                                      }}
+                                    >
+                                      Divergente
+                                    </span>
+                                    <span style={{ fontWeight: 750 }}>
+                                      {withCurrency(centsToPtBr(divergenteCents))}
+                                    </span>
+                                  </div>
+                                </div>
+                              )
 
                               const searchText = normalizeSearchText(search)
                               const searchDigits = normalizeSearchDigits(search)
@@ -6976,12 +16070,36 @@ export default function CreditoPage() {
                                 return false
                               }
 
-                              const recursoBase = conciliacaoOnlyDiff
-                                ? conciliacaoData.recurso.filter((x) => x.status === 'pendencia')
-                                : conciliacaoData.recurso
-                              const relatorioBase = conciliacaoOnlyDiff
+                              const recursoBase = (() => {
+                                const baseRaw = conciliacaoOnlyDiff
+                                  ? conciliacaoData.recurso.filter((x) => x.status === 'pendencia')
+                                  : conciliacaoData.recurso
+                                const base = baseRaw.filter((x) => !x.hideInFront)
+
+                                const bestNomeByCpf = new Map<string, string>()
+                                for (const it of base) {
+                                  const cpfKey = normalizeSearchDigits(it?.cpf)
+                                  if (!cpfKey) continue
+                                  const nome = String(it?.nome ?? '').trim()
+                                  if (!nome) continue
+                                  const prev = bestNomeByCpf.get(cpfKey) ?? ''
+                                  if (!prev || nome.length > prev.length) bestNomeByCpf.set(cpfKey, nome)
+                                }
+
+                                return base.map((it) => {
+                                  const nome = String(it?.nome ?? '').trim()
+                                  if (nome) return it
+                                  const cpfKey = normalizeSearchDigits(it?.cpf)
+                                  const filled = cpfKey ? bestNomeByCpf.get(cpfKey) ?? '' : ''
+                                  return filled ? { ...it, nome: filled } : it
+                                })
+                              })()
+                              const relatorioBaseRaw = conciliacaoOnlyDiff
                                 ? conciliacaoData.relatorio.filter((x) => x.status === 'pendencia')
                                 : conciliacaoData.relatorio
+                              const relatorioBase = relatorioBaseRaw.filter(
+                                (x) => !hasNaoPossuiRecursoOcorrencia(x),
+                              )
                               const recursoRows = searchText || searchDigits
                                 ? recursoBase.filter((x) => matchesSearch(x))
                                 : recursoBase
@@ -6989,12 +16107,48 @@ export default function CreditoPage() {
                                 ? relatorioBase.filter((x) => matchesSearch(x))
                                 : relatorioBase
 
+                              const recursoNomeSearch = normalizeSearchText(recursoNomeFilter)
+                              const relatorioNomeSearch = normalizeSearchText(relatorioNomeFilter)
+                              const recursoRowsByNome = recursoNomeSearch
+                                ? recursoRows.filter((x) =>
+                                    normalizeSearchText(x?.nome).includes(recursoNomeSearch),
+                                  )
+                                : recursoRows
+                              const relatorioRowsByNome = relatorioNomeSearch
+                                ? relatorioRows.filter((x) =>
+                                    normalizeSearchText(x?.nome).includes(relatorioNomeSearch),
+                                  )
+                                : relatorioRows
+
                               const relatorioRowsByVencimento = (() => {
                                 const wanted = relatorioVencimentoFilter.trim()
-                                if (!wanted) return relatorioRows
-                                return relatorioRows.filter(
-                                  (r) => normalizeVencimentoLabel((r as any).vencimento) === wanted,
+                                if (!wanted) return relatorioRowsByNome
+                                return relatorioRowsByNome.filter(
+                                  (r) => getRelatorioLinkedVencimento(r) === wanted,
                                 )
+                              })()
+                              const recursoRowsByVencimento = (() => {
+                                const wanted = relatorioVencimentoFilter.trim()
+                                if (!wanted) return recursoRowsByNome
+                                const allowedPairIds = new Set(
+                                  relatorioRowsByVencimento
+                                    .map((r: any) => (typeof r?.pairId === 'string' ? r.pairId : ''))
+                                    .filter(Boolean),
+                                )
+                                const allowedCpfValue = new Set(
+                                  relatorioRowsByVencimento.map((r: any) => {
+                                    const cpfDigits = normalizeSearchDigits(r?.cpf)
+                                    const cents = ptBrMoneyToCents(r?.value)
+                                    return `${cpfDigits}|${cents}`
+                                  }),
+                                )
+                                return recursoRowsByNome.filter((r: any) => {
+                                  const pid = typeof r?.pairId === 'string' ? r.pairId : ''
+                                  if (pid && allowedPairIds.has(pid)) return true
+                                  const cpfDigits = normalizeSearchDigits(r?.cpf)
+                                  const cents = ptBrMoneyToCents(r?.value)
+                                  return allowedCpfValue.has(`${cpfDigits}|${cents}`)
+                                })
                               })()
 
                               const eligibleGroupKeys = (() => {
@@ -7013,7 +16167,7 @@ export default function CreditoPage() {
                                   }
                                   return true
                                 }
-                                const concRecurso = recursoRows.filter(
+                                const concRecurso = recursoRowsByVencimento.filter(
                                   (x) => x.status === 'conciliado' && Boolean(x.pairId),
                                 )
                                 const concRelatorio = relatorioRowsByVencimento.filter(
@@ -7046,8 +16200,8 @@ export default function CreditoPage() {
                               if (
                                 conciliacaoOnlyDiff &&
                                 !hasDiff &&
-                                recursoRows.length === 0 &&
-                                relatorioRows.length === 0
+                                recursoRowsByVencimento.length === 0 &&
+                                relatorioRowsByVencimento.length === 0
                               ) {
                                 return (
                                   <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
@@ -7112,10 +16266,10 @@ export default function CreditoPage() {
                                       </button>
                                     </td>
                                     <td style={{ padding: '10px 12px', borderBottom: `1px solid ${border}` }}>
-                                      {withCurrency(conciliacaoData.totals.recurso.text)}
+                                      {breakdownCell(recursoPareadoCents, recursoDivergenteCents)}
                                     </td>
                                     <td style={{ padding: '10px 12px', borderBottom: `1px solid ${border}` }}>
-                                      {withCurrency(conciliacaoData.totals.relatorio.text)}
+                                      {breakdownCell(relatorioPareadoCents, relatorioDivergenteCents)}
                                     </td>
                                     <td
                                       style={{
@@ -7127,9 +16281,38 @@ export default function CreditoPage() {
                                           : 'rgba(255,255,255,0.92)',
                                       }}
                                     >
-                                      <span className={hasDiff ? 'diff-pulse' : undefined}>
-                                        {diffText}
-                                      </span>
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, lineHeight: 1.1 }}>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                          <span
+                                            style={{
+                                              fontSize: '0.66rem',
+                                              opacity: 0.72,
+                                              letterSpacing: '0.08em',
+                                              textTransform: 'uppercase',
+                                            }}
+                                          >
+                                            Pareado
+                                          </span>
+                                          <span style={{ fontWeight: 750 }}>
+                                            {withCurrency(centsToPtBr(recursoPareadoCents - relatorioPareadoCents))}
+                                          </span>
+                                        </div>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                          <span
+                                            style={{
+                                              fontSize: '0.66rem',
+                                              opacity: 0.72,
+                                              letterSpacing: '0.08em',
+                                              textTransform: 'uppercase',
+                                            }}
+                                          >
+                                            Divergente
+                                          </span>
+                                          <span className={hasDiff ? 'diff-pulse' : undefined}>
+                                            {diffText}
+                                          </span>
+                                        </div>
+                                      </div>
                                     </td>
                                     <td
                                       style={{
@@ -7146,7 +16329,7 @@ export default function CreditoPage() {
                                         disabled={!canExportConciliacaoXlsx || conciliacaoExportingXlsx}
                                         onClick={(e) => {
                                           e.stopPropagation()
-                                          void exportConciliacaoXlsx()
+                                          openConciliacaoExportModal('xlsx')
                                         }}
                                         style={{ padding: 10, width: 44, justifyContent: 'center' }}
                                       >
@@ -7182,8 +16365,9 @@ export default function CreditoPage() {
                                             marginTop: 14,
                                             position: 'relative',
                                             display: 'grid',
-                                            gridTemplateColumns: '1fr 1fr',
+                                            gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
                                             gap: 72,
+                                            overflowX: 'hidden',
                                           }}
                                         >
                                           {conciliacaoLinkOverlay ? (
@@ -7231,8 +16415,79 @@ export default function CreditoPage() {
                                           ) : null}
 
                                           <div>
-                                            <div data-evidence-title="recurso" style={{ fontWeight: 850, marginBottom: 8 }}>
-                                              Recurso do Órgão ({conciliacaoData.recursoTable})
+                                            <div
+                                              data-evidence-title="recurso"
+                                              style={{
+                                                fontWeight: 850,
+                                                marginBottom: 6,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: 8,
+                                                flexWrap: 'nowrap',
+                                                minHeight: 34,
+                                                whiteSpace: 'nowrap',
+                                              }}
+                                            >
+                                              {inclusaoServidorDisponivel ? (
+                                                <button
+                                                  type="button"
+                                                  className="btn btn-primary"
+                                                  style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: 6,
+                                                    padding: '4px 8px',
+                                                    fontSize: '0.74rem',
+                                                    lineHeight: 1.1,
+                                                    maxWidth: 360,
+                                                    overflow: 'hidden',
+                                                  }}
+                                                  onClick={() => {
+                                                    setInclusaoAcordoJudicialError(null)
+                                                    setInclusaoAcordoJudicialRelatorioModalOpen(false)
+                                                    setInclusaoAcordoJudicialNome('')
+                                                    setInclusaoAcordoJudicialCpf('')
+                                                    setInclusaoAcordoJudicialValor('')
+                                                    setInclusaoAcordoJudicialCompetencia(
+                                                      defaultRecursoCompetencia(
+                                                        conciliacaoMonth,
+                                                        conciliacaoData.recursoTable,
+                                                      ),
+                                                    )
+                                                    setInclusaoAcordoJudicialRecursoModalOpen(true)
+                                                  }}
+                                                  disabled={conciliacaoIsClosed}
+                                                  title={
+                                                    conciliacaoIsClosed
+                                                      ? 'Conciliação fechada para alteração.'
+                                                      : `Incluir servidor em ${conciliacaoData.recursoTable}`
+                                                  }
+                                                >
+                                                  <Plus size={16} />
+                                                  <span
+                                                    style={{
+                                                      maxWidth: 300,
+                                                      overflow: 'hidden',
+                                                      textOverflow: 'ellipsis',
+                                                      whiteSpace: 'nowrap',
+                                                    }}
+                                                  >
+                                                    Inclusão de Servidor
+                                                  </span>
+                                                </button>
+                                              ) : null}
+                                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                Recurso do Órgão ({conciliacaoData.recursoTable})
+                                              </span>
+                                            </div>
+                                            <div className="field" style={{ marginBottom: 8 }}>
+                                              <input
+                                                className="control"
+                                                type="text"
+                                                value={recursoNomeFilter}
+                                                onChange={(e) => setRecursoNomeFilter(e.target.value)}
+                                                placeholder="Filtrar por nome no Recurso do Órgão..."
+                                              />
                                             </div>
                                             <div
                                               style={{
@@ -7249,9 +16504,9 @@ export default function CreditoPage() {
                                                 }}
                                               >
                                                 <colgroup>
-                                                  <col style={{ width: '54%' }} />
-                                                  <col style={{ width: '20%' }} />
-                                                  <col style={{ width: '26%' }} />
+                                                  <col style={{ width: '50%' }} />
+                                                  <col style={{ width: '18%' }} />
+                                                  <col style={{ width: '32%' }} />
                                                 </colgroup>
                                                 <thead>
                                                   <tr>
@@ -7279,9 +16534,10 @@ export default function CreditoPage() {
                                                 </thead>
                                                 <tbody>
                                                   {(() => {
-                                                    const withIndex = recursoRows
-                                                      .slice(0, 300)
-                                                      .map((r, idx) => ({ ...r, __idx: idx }))
+                                                    const withIndex = recursoRowsByVencimento.map((r, idx) => ({
+                                                      ...r,
+                                                      __idx: idx,
+                                                    }))
                                                     const conc = withIndex.filter((r) => r.status === 'conciliado')
                                                     const pend = withIndex.filter((r) => r.status !== 'conciliado')
                                                     const groupBorder = '2px solid rgba(255,140,0,0.85)'
@@ -7358,18 +16614,32 @@ export default function CreditoPage() {
                                                       >
                                                         <td
                                                           onClick={(e) => {
-                                                            if (r.status !== 'pendencia') return
-                                                            const rowLocked = isVencimentoLocked(r.vencimento)
+                                                            const isAllowed =
+                                                              r.status === 'pendencia' || r.status === 'conciliado'
+                                                            if (!isAllowed) return
+                                                            const rowLocked = isVencimentoLocked(
+                                                              getRelatorioLinkedVencimento(r),
+                                                            )
                                                             if (rowLocked) return
                                                             e.stopPropagation()
                                                             setCloneSisbrError(null)
-                                                            setCloneSisbrAction('clonar_para_relatorio_sisbr')
                                                             setCloneSisbrJustification('')
+                                                            setCloneSisbrVencimentoDate(
+                                                              String(r.vencimento ?? '').trim(),
+                                                            )
+                                                            const allowActionChange = r.status === 'pendencia'
+                                                            setCloneSisbrAction(
+                                                              allowActionChange
+                                                                ? 'clonar_para_relatorio_sisbr'
+                                                                : 'quitado_recurso',
+                                                            )
                                                             setCloneSisbrModal({
                                                               cpf: r.cpf,
                                                               nome: r.nome,
                                                               value: r.value,
+                                                              sourceRecursoTable: r.sourceRecursoTable ?? null,
                                                               vencimento: r.vencimento ?? null,
+                                                              allowActionChange,
                                                             })
                                                           }}
                                                           style={{
@@ -7384,17 +16654,25 @@ export default function CreditoPage() {
                                                             textOverflow: 'ellipsis',
                                                             whiteSpace: 'nowrap',
                                                             cursor:
-                                                              r.status === 'pendencia' && !isVencimentoLocked(r.vencimento)
+                                                              (r.status === 'pendencia' ||
+                                                                r.status === 'conciliado') &&
+                                                              !isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                 ? 'pointer'
-                                                                : r.status === 'pendencia' && isVencimentoLocked(r.vencimento)
+                                                                : (r.status === 'pendencia' ||
+                                                                      r.status === 'conciliado') &&
+                                                                    isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                   ? 'not-allowed'
                                                                   : undefined,
                                                             textDecoration:
-                                                              r.status === 'pendencia' && !isVencimentoLocked(r.vencimento)
+                                                              (r.status === 'pendencia' ||
+                                                                r.status === 'conciliado') &&
+                                                              !isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                 ? 'underline'
                                                                 : undefined,
                                                             opacity:
-                                                              r.status === 'pendencia' && isVencimentoLocked(r.vencimento)
+                                                              (r.status === 'pendencia' ||
+                                                                r.status === 'conciliado') &&
+                                                              isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                 ? 0.55
                                                                 : opts?.indented
                                                                   ? 0.92
@@ -7529,6 +16807,22 @@ export default function CreditoPage() {
                                                               ({g.items.length})
                                                             </span>
                                                           </td>
+                                                          <td
+                                                            style={{
+                                                              padding: '8px 10px',
+                                                              borderBottom:
+                                                                '1px solid rgba(255,255,255,0.08)',
+                                                              borderTop: isOpen ? groupBorder : undefined,
+                                                              borderRight: isOpen ? groupBorder : undefined,
+                                                              color: 'rgba(255,255,255,0.78)',
+                                                              whiteSpace: 'normal',
+                                                              lineHeight: 1.2,
+                                                            }}
+                                                          >
+                                                            {g.items[0]?.ocorrencia
+                                                              ? formatOcorrenciaActionLabel(g.items[0].ocorrencia.action)
+                                                              : '—'}
+                                                          </td>
                                                         </tr>,
                                                       )
                                                       if (isOpen) {
@@ -7561,8 +16855,74 @@ export default function CreditoPage() {
                                           </div>
 
                                           <div>
-                                            <div data-evidence-title="relatorio" style={{ fontWeight: 850, marginBottom: 8 }}>
-                                              Relatório SISBR
+                                            <div
+                                              data-evidence-title="relatorio"
+                                              style={{
+                                                fontWeight: 850,
+                                                marginBottom: 6,
+                                                minHeight: 34,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'space-between',
+                                                gap: 8,
+                                                whiteSpace: 'nowrap',
+                                              }}
+                                            >
+                                              <span>Relatório SISBR</span>
+                                              {inclusaoServidorDisponivel ? (
+                                                <button
+                                                  type="button"
+                                                  className="btn btn-primary"
+                                                  style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: 6,
+                                                    padding: '4px 8px',
+                                                    fontSize: '0.74rem',
+                                                    lineHeight: 1.1,
+                                                    maxWidth: 360,
+                                                    overflow: 'hidden',
+                                                  }}
+                                                  onClick={() => {
+                                                    setInclusaoAcordoJudicialError(null)
+                                                    setInclusaoAcordoJudicialRecursoModalOpen(false)
+                                                    setInclusaoAcordoJudicialNome('')
+                                                    setInclusaoAcordoJudicialCpf('')
+                                                    setInclusaoAcordoJudicialValor('')
+                                                    setInclusaoAcordoJudicialCompetencia(
+                                                      defaultRecursoCompetencia(conciliacaoMonth, null),
+                                                    )
+                                                    setInclusaoAcordoJudicialRelatorioModalOpen(true)
+                                                  }}
+                                                  disabled={conciliacaoIsClosed}
+                                                  title={
+                                                    conciliacaoIsClosed
+                                                      ? 'Conciliação fechada para alteração.'
+                                                      : 'Incluir servidor no Relatório SISBR'
+                                                  }
+                                                >
+                                                  <Plus size={16} />
+                                                  <span
+                                                    style={{
+                                                      maxWidth: 300,
+                                                      overflow: 'hidden',
+                                                      textOverflow: 'ellipsis',
+                                                      whiteSpace: 'nowrap',
+                                                    }}
+                                                  >
+                                                    Inclusão de Servidor
+                                                  </span>
+                                                </button>
+                                              ) : null}
+                                            </div>
+                                            <div className="field" style={{ marginBottom: 8 }}>
+                                              <input
+                                                className="control"
+                                                type="text"
+                                                value={relatorioNomeFilter}
+                                                onChange={(e) => setRelatorioNomeFilter(e.target.value)}
+                                                placeholder="Filtrar por nome no Relatório SISBR..."
+                                              />
                                             </div>
                                             <div
                                               style={{
@@ -7617,9 +16977,10 @@ export default function CreditoPage() {
                                                 </thead>
                                                 <tbody>
                                                   {(() => {
-                                                    const withIndex = relatorioRowsByVencimento
-                                                      .slice(0, 300)
-                                                      .map((r, idx) => ({ ...r, __idx: idx }))
+                                                    const withIndex = relatorioRowsByVencimento.map((r, idx) => ({
+                                                      ...r,
+                                                      __idx: idx,
+                                                    }))
                                                     const conc = withIndex.filter((r) => r.status === 'conciliado')
                                                     const pend = withIndex.filter((r) => r.status !== 'conciliado')
                                                     const groupBorder = '2px solid rgba(255,140,0,0.85)'
@@ -7727,25 +17088,25 @@ export default function CreditoPage() {
                                                                 whiteSpace: 'nowrap',
                                                                 cursor:
                                                                   (r.status === 'pendencia' || r.status === 'conciliado') &&
-                                                                  !isVencimentoLocked(r.vencimento)
+                                                                  !isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                     ? 'pointer'
                                                                     : (r.status === 'pendencia' ||
                                                                           r.status === 'conciliado') &&
-                                                                        isVencimentoLocked(r.vencimento)
+                                                                        isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                       ? 'not-allowed'
                                                                       : undefined,
                                                                 textDecoration:
-                                                                  r.status === 'pendencia' && !isVencimentoLocked(r.vencimento)
+                                                                  r.status === 'pendencia' && !isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                     ? 'underline'
                                                                     : undefined,
                                                                 opacity:
                                                                   (r.status === 'pendencia' || r.status === 'conciliado') &&
-                                                                  isVencimentoLocked(r.vencimento)
+                                                                  isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                     ? 0.55
                                                                     : undefined,
                                                               }}
                                                               onClick={(e) => {
-                                                                if (isVencimentoLocked(r.vencimento)) return
+                                                                if (isVencimentoLocked(getRelatorioLinkedVencimento(r))) return
                                                                 e.stopPropagation()
                                                                 if (!conciliacaoMonth || !conciliacaoOrgao) return
                                                                 setRelatorioOcorrenciaError(null)
@@ -7756,13 +17117,19 @@ export default function CreditoPage() {
                                                                 setRelatorioOcorrenciaJustification('')
                                                                 setRelatorioOcorrenciaUndoJustification('')
                                                                 setRelatorioLiquidacaoForaVencimentoDate('')
+                                                                setRelatorioDevolucaoParcialLiquidacaoDate('')
+                                                                setRelatorioDevolucaoParcialDevolucaoDate('')
+                                                                setRelatorioDevolucaoParcialDevolucaoValor('')
+                                                                setRelatorioEstornoLiquidacaoDate('')
+                                                                setRelatorioEstornoDate('')
+                                                                setRelatorioEstornoValor('')
                                                                 setRelatorioRepactuacaoStatus('pendente_gerente')
                                                                 setRelatorioRepactuacaoGerenteEmail('')
                                                                 setOcorrenciaModal({
                                                                   nome: r.nome,
                                                                   cpf: r.cpf,
                                                                   value: r.value,
-                                                                  vencimento: r.vencimento ?? null,
+                                                                  vencimento: getRelatorioLinkedVencimento(r) ?? null,
                                                                   empresa: r.empresa ?? null,
                                                                   status: r.status === 'conciliado' ? 'conciliado' : 'pendencia',
                                                                   ocorrencia: r.ocorrencia ?? null,
@@ -7774,7 +17141,7 @@ export default function CreditoPage() {
                                                                   repactuacoes: Array.isArray((r as any).repactuacoes)
                                                                     ? ((r as any).repactuacoes as any[])
                                                                     : [],
-                                                                  readOnly: isVencimentoLocked(r.vencimento),
+                                                                  readOnly: isVencimentoLocked(getRelatorioLinkedVencimento(r)),
                                                                 })
                                                               }}
                                                             >
@@ -7798,7 +17165,7 @@ export default function CreditoPage() {
                                                                 onClick={(e) => {
                                                                   e.stopPropagation()
                                                                   if (!conciliacaoMonth || !conciliacaoOrgao) return
-                                                                  const readOnly = isVencimentoLocked(r.vencimento)
+                                                                  const readOnly = isVencimentoLocked(getRelatorioLinkedVencimento(r))
                                                                   if (!readOnly) {
                                                                     setRelatorioOcorrenciaError(null)
                                                                     setRelatorioOcorrenciaAction(
@@ -7808,6 +17175,12 @@ export default function CreditoPage() {
                                                                     setRelatorioOcorrenciaJustification('')
                                                                     setRelatorioOcorrenciaUndoJustification('')
                                                                     setRelatorioLiquidacaoForaVencimentoDate('')
+                                                                    setRelatorioDevolucaoParcialLiquidacaoDate('')
+                                                                    setRelatorioDevolucaoParcialDevolucaoDate('')
+                                                                    setRelatorioDevolucaoParcialDevolucaoValor('')
+                                                                    setRelatorioEstornoLiquidacaoDate('')
+                                                                    setRelatorioEstornoDate('')
+                                                                    setRelatorioEstornoValor('')
                                                                     setRelatorioRepactuacaoStatus('pendente_gerente')
                                                                     setRelatorioRepactuacaoGerenteEmail('')
                                                                   }
@@ -8089,6 +17462,8 @@ export default function CreditoPage() {
                                   if (cloneSisbrLoading) return
                                   setCloneSisbrModal(null)
                                   setCloneSisbrError(null)
+                                  setCloneSisbrTransferModal(null)
+                                  setCloneSisbrTransferError(null)
                                 }}
                               >
                                 <div
@@ -8124,6 +17499,8 @@ export default function CreditoPage() {
                                   if (cloneSisbrLoading) return
                                   setCloneSisbrModal(null)
                                   setCloneSisbrError(null)
+                                  setCloneSisbrTransferModal(null)
+                                  setCloneSisbrTransferError(null)
                                 }}
                               >
                                 Fechar
@@ -8137,6 +17514,11 @@ export default function CreditoPage() {
                                 <div style={{ opacity: 0.82 }}>
                                   CPF: {cloneSisbrModal.cpf} • Valor: {withCurrency(cloneSisbrModal.value)}
                                 </div>
+                                {cloneSisbrModal.sourceRecursoTable ? (
+                                  <div style={{ opacity: 0.72, fontSize: '0.88rem' }}>
+                                    Origem do recurso: {cloneSisbrModal.sourceRecursoTable}
+                                  </div>
+                                ) : null}
                               </div>
 
                               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
@@ -8145,7 +17527,7 @@ export default function CreditoPage() {
                                   <CloneSisbrActionSelect
                                     value={cloneSisbrAction}
                                     onChange={setCloneSisbrAction}
-                                    disabled={cloneSisbrLoading}
+                                    disabled={cloneSisbrLoading || cloneSisbrModal.allowActionChange === false}
                                   />
                                 </div>
                                 {cloneSisbrAction === 'clonar_para_relatorio_sisbr' ? (
@@ -8179,6 +17561,24 @@ export default function CreditoPage() {
                                         {cloneSisbrContext.willUpdateCount}
                                       </div>
                                     ) : null}
+                                    <div className="field">
+                                      <label>Data de vencimento (dd/mm/aaaa)</label>
+                                      <input
+                                        className="control"
+                                        type="text"
+                                        value={cloneSisbrVencimentoDate}
+                                        onChange={(e) => {
+                                          const raw = e.target.value || ''
+                                          const next = raw
+                                            .replace(/[^\d/]/g, '')
+                                            .replace(/\/{2,}/g, '/')
+                                            .slice(0, 10)
+                                          setCloneSisbrVencimentoDate(next)
+                                        }}
+                                        disabled={cloneSisbrLoading}
+                                        placeholder="dd/mm/aaaa"
+                                      />
+                                    </div>
                                   </div>
                                 ) : null}
                                 {cloneSisbrAction === 'quitado_recurso' ? (
@@ -8267,6 +17667,8 @@ export default function CreditoPage() {
                                     cloneSisbrLoading ||
                                     (cloneSisbrAction === 'quitado_recurso' &&
                                       !/^\d{2}\/\d{2}\/\d{4}$/.test(cloneSisbrDevolucaoDate)) ||
+                                    (cloneSisbrAction === 'clonar_para_relatorio_sisbr' &&
+                                      !/^\d{2}\/\d{2}\/\d{4}$/.test(cloneSisbrVencimentoDate)) ||
                                     (cloneSisbrAction !== 'quitado_recurso' &&
                                       !cloneSisbrJustification.trim()) ||
                                     (cloneSisbrModal?.vencimento
@@ -8291,8 +17693,14 @@ export default function CreditoPage() {
                                             nome: cloneSisbrModal.nome,
                                             value: cloneSisbrModal.value,
                                             recursoTable: conciliacaoData?.recursoTable,
+                                            sourceRecursoTable:
+                                              cloneSisbrModal.sourceRecursoTable ?? null,
                                             action: cloneSisbrAction,
                                             justification: cloneSisbrJustification,
+                                            dueDate:
+                                              cloneSisbrAction === 'clonar_para_relatorio_sisbr'
+                                                ? cloneSisbrVencimentoDate
+                                                : null,
                                             devolucaoDate:
                                               cloneSisbrAction === 'quitado_recurso' ? cloneSisbrDevolucaoDate : null,
                                           }),
@@ -8312,6 +17720,19 @@ export default function CreditoPage() {
                                       const msg =
                                         e instanceof Error ? e.message : 'Falha ao clonar.'
                                       setCloneSisbrError(msg)
+                                      const shouldOfferTransfer =
+                                        cloneSisbrAction === 'clonar_para_relatorio_sisbr' &&
+                                        msg.includes('já existem no Relatório SISBR em outro órgão') &&
+                                        msg.includes('Alterar Órgão no Relatório SISBR')
+                                      if (shouldOfferTransfer && cloneSisbrModal) {
+                                        const opts = (cloneSisbrContext?.sourceEmpresas ?? [])
+                                          .map((s) => String(s ?? '').trim())
+                                          .filter(Boolean)
+                                        if (opts.length > 0) {
+                                          setCloneSisbrTransferError(null)
+                                          setCloneSisbrTransferModal({ fromEmpresa: opts[0]!, options: opts })
+                                        }
+                                      }
                                     } finally {
                                       setCloneSisbrLoading(false)
                                     }
@@ -8332,6 +17753,402 @@ export default function CreditoPage() {
                               document.body,
                             )
                           : null
+                        : null}
+
+                      {cloneSisbrTransferModal && cloneSisbrModal
+                        ? createPortal(
+                            <div
+                              role="dialog"
+                              aria-modal="true"
+                              style={{
+                                position: 'fixed',
+                                inset: 0,
+                                background: 'rgba(0,0,0,0.62)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: 16,
+                                zIndex: 230,
+                              }}
+                              onClick={() => {
+                                if (cloneSisbrTransferLoading) return
+                                setCloneSisbrTransferModal(null)
+                                setCloneSisbrTransferError(null)
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: 'min(720px, 96vw)',
+                                  borderRadius: 18,
+                                  border: '1px solid rgba(255,255,255,0.16)',
+                                  background: 'rgba(12, 22, 40, 0.98)',
+                                  color: 'rgba(255,255,255,0.92)',
+                                  boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                                  overflow: 'hidden',
+                                  maxHeight: '86vh',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div
+                                  style={{
+                                    padding: '14px 16px',
+                                    borderBottom: '1px solid rgba(255,255,255,0.10)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900 }}>Transferir órgão (Relatório SISBR)</div>
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={() => {
+                                      if (cloneSisbrTransferLoading) return
+                                      setCloneSisbrTransferModal(null)
+                                      setCloneSisbrTransferError(null)
+                                    }}
+                                  >
+                                    Fechar
+                                  </button>
+                                </div>
+                                <div style={{ padding: '14px 16px', overflowY: 'auto', flex: 1, minHeight: 0 }}>
+                                  <div style={{ display: 'grid', gap: 6 }}>
+                                    <div style={{ fontWeight: 850 }}>{cloneSisbrModal.nome || '-'}</div>
+                                    <div style={{ opacity: 0.82 }}>
+                                      CPF: {cloneSisbrModal.cpf} • Valor: {withCurrency(cloneSisbrModal.value)}
+                                    </div>
+                                  </div>
+
+                                  <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+                                    <div className="field">
+                                      <label>Órgão de origem (SISBR)</label>
+                                      {cloneSisbrTransferModal.options.length > 1 ? (
+                                        <select
+                                          className="control"
+                                          value={cloneSisbrTransferModal.fromEmpresa}
+                                          onChange={(e) =>
+                                            setCloneSisbrTransferModal((prev) =>
+                                              prev
+                                                ? {
+                                                    ...prev,
+                                                    fromEmpresa: e.target.value,
+                                                  }
+                                                : prev,
+                                            )
+                                          }
+                                          disabled={cloneSisbrTransferLoading}
+                                        >
+                                          {cloneSisbrTransferModal.options.map((opt) => (
+                                            <option key={opt} value={opt}>
+                                              {formatSisbrEmpresaLabel(opt)}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      ) : (
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={formatSisbrEmpresaLabel(cloneSisbrTransferModal.fromEmpresa)}
+                                          disabled
+                                        />
+                                      )}
+                                    </div>
+                                    <div className="field">
+                                      <label>Destino (SISBR)</label>
+                                      <input
+                                        className="control"
+                                        type="text"
+                                        value={
+                                          cloneSisbrContext?.targetEmpresa
+                                            ? formatSisbrEmpresaLabel(cloneSisbrContext.targetEmpresa)
+                                            : '(De/Para não configurado)'
+                                        }
+                                        disabled
+                                      />
+                                    </div>
+                                    <div className="help" style={{ margin: 0, opacity: 0.8 }}>
+                                      Esta ação altera o órgão no Relatório SISBR para o órgão atual da conciliação.
+                                    </div>
+                                  </div>
+
+                                  {cloneSisbrTransferError ? (
+                                    <div
+                                      className="help"
+                                      style={{ marginTop: 10, color: 'rgba(245,197,66,0.98)' }}
+                                    >
+                                      {cloneSisbrTransferError}
+                                    </div>
+                                  ) : null}
+
+                                  <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      disabled={cloneSisbrTransferLoading}
+                                      onClick={() => {
+                                        if (cloneSisbrTransferLoading) return
+                                        setCloneSisbrTransferModal(null)
+                                        setCloneSisbrTransferError(null)
+                                      }}
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      disabled={
+                                        cloneSisbrTransferLoading ||
+                                        !cloneSisbrTransferModal.fromEmpresa.trim() ||
+                                        !cloneSisbrJustification.trim() ||
+                                        !conciliacaoOrgao.trim()
+                                      }
+                                      onClick={async () => {
+                                        if (!cloneSisbrModal) return
+                                        if (!conciliacaoOrgao.trim()) return
+                                        setCloneSisbrTransferLoading(true)
+                                        setCloneSisbrTransferError(null)
+                                        try {
+                                          const res = await fetch(
+                                            '/api/consignado/conciliacao/recurso-vs-relatorio/alterar-orgao-relatorio',
+                                            {
+                                              method: 'POST',
+                                              headers: { 'content-type': 'application/json' },
+                                              body: JSON.stringify({
+                                                month: conciliacaoMonth,
+                                                orgao: conciliacaoOrgao.trim(),
+                                                cpf: cloneSisbrModal.cpf,
+                                                nome: cloneSisbrModal.nome,
+                                                value: cloneSisbrModal.value,
+                                                fromEmpresa: cloneSisbrTransferModal.fromEmpresa,
+                                                toOrgao: conciliacaoOrgao.trim(),
+                                                action: 'alterar_orgao_relatorio_sisbr',
+                                                justification: cloneSisbrJustification,
+                                              }),
+                                            },
+                                          )
+                                          const data = (await res.json().catch(() => null)) as null | {
+                                            message?: string
+                                          }
+                                          if (!res.ok) {
+                                            throw new Error(
+                                              data?.message || `Falha ao transferir órgão (HTTP ${res.status}).`,
+                                            )
+                                          }
+                                          await reloadConciliacaoKeepExpanded()
+                                          setCloneSisbrTransferModal(null)
+                                          setCloneSisbrModal(null)
+                                          setCloneSisbrError(null)
+                                        } catch (e) {
+                                          setCloneSisbrTransferError(
+                                            e instanceof Error ? e.message : 'Falha ao transferir órgão.',
+                                          )
+                                        } finally {
+                                          setCloneSisbrTransferLoading(false)
+                                        }
+                                      }}
+                                    >
+                                      {cloneSisbrTransferLoading ? 'Transferindo...' : 'Transferir órgão aqui'}
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>,
+                            document.body,
+                          )
+                        : null}
+
+                      {(inclusaoAcordoJudicialRecursoModalOpen ||
+                        inclusaoAcordoJudicialRelatorioModalOpen)
+                        ? createPortal(
+                            <div
+                              role="dialog"
+                              aria-modal="true"
+                              style={{
+                                position: 'fixed',
+                                inset: 0,
+                                background: 'rgba(0,0,0,0.62)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: 16,
+                                zIndex: 225,
+                              }}
+                              onClick={() => {
+                                if (inclusaoAcordoJudicialSaving) return
+                                setInclusaoAcordoJudicialRecursoModalOpen(false)
+                                setInclusaoAcordoJudicialRelatorioModalOpen(false)
+                                setInclusaoAcordoJudicialError(null)
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: 'min(680px, 96vw)',
+                                  borderRadius: 18,
+                                  border: '1px solid rgba(255,255,255,0.16)',
+                                  background: 'rgba(12, 22, 40, 0.96)',
+                                  color: 'rgba(255,255,255,0.92)',
+                                  boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                                  overflow: 'hidden',
+                                  maxHeight: '86vh',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div
+                                  style={{
+                                    padding: '14px 16px',
+                                    borderBottom: '1px solid rgba(255,255,255,0.10)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900 }}>{inclusaoAcordoJudicialModalTitle}</div>
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={() => {
+                                      if (inclusaoAcordoJudicialSaving) return
+                                      setInclusaoAcordoJudicialRecursoModalOpen(false)
+                                      setInclusaoAcordoJudicialRelatorioModalOpen(false)
+                                      setInclusaoAcordoJudicialError(null)
+                                    }}
+                                  >
+                                    Fechar
+                                  </button>
+                                </div>
+                                <div style={{ padding: '14px 16px', overflowY: 'auto', flex: 1, minHeight: 0 }}>
+                              <div style={{ opacity: 0.8, marginBottom: 12 }}>
+                                Órgão: {formatConciliacaoOrgaoLabel(conciliacaoOrgao.trim() || '—')} • Tabela:{' '}
+                                {inclusaoAcordoJudicialTargetLabel || '—'}
+                              </div>
+                              <div style={{ display: 'grid', gap: 12 }}>
+                                <div className="field">
+                                  <label>Nome</label>
+                                  <input
+                                    className="control"
+                                    type="text"
+                                    value={inclusaoAcordoJudicialNome}
+                                    onChange={(e) => setInclusaoAcordoJudicialNome(e.target.value)}
+                                    disabled={inclusaoAcordoJudicialSaving}
+                                    placeholder="Nome do servidor"
+                                  />
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                                  <div className="field">
+                                    <label>CPF</label>
+                                    <input
+                                      className="control"
+                                      type="text"
+                                      value={inclusaoAcordoJudicialCpf}
+                                      onChange={(e) =>
+                                        setInclusaoAcordoJudicialCpf(
+                                          e.target.value.replace(/[^\d.-]/g, '').slice(0, 14),
+                                        )
+                                      }
+                                      disabled={inclusaoAcordoJudicialSaving}
+                                      placeholder="000.000.000-00"
+                                    />
+                                  </div>
+                                  <div className="field">
+                                    <label>Valor Parcela</label>
+                                    <input
+                                      className="control"
+                                      type="text"
+                                      value={inclusaoAcordoJudicialValor}
+                                      onChange={(e) => setInclusaoAcordoJudicialValor(e.target.value)}
+                                      disabled={inclusaoAcordoJudicialSaving}
+                                      placeholder="0,00"
+                                    />
+                                  </div>
+                                </div>
+                                <div className="field">
+                                  <label>Competência</label>
+                                  <input
+                                    className="control"
+                                    type="text"
+                                    value={inclusaoAcordoJudicialCompetencia}
+                                    onChange={(e) =>
+                                      setInclusaoAcordoJudicialCompetencia(
+                                        e.target.value.replace(/[^\d/]/g, '').slice(0, 7),
+                                      )
+                                    }
+                                    disabled={inclusaoAcordoJudicialSaving}
+                                    placeholder="MM/AAAA"
+                                  />
+                                </div>
+                              </div>
+
+                              {inclusaoAcordoJudicialError ? (
+                                <div className="help" style={{ marginTop: 10, color: 'rgba(245,197,66,0.98)' }}>
+                                  {inclusaoAcordoJudicialError}
+                                </div>
+                              ) : null}
+
+                              <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  disabled={
+                                    inclusaoAcordoJudicialSaving ||
+                                    !inclusaoAcordoJudicialNome.trim() ||
+                                    !inclusaoAcordoJudicialCpf.trim() ||
+                                    !inclusaoAcordoJudicialValor.trim() ||
+                                    !/^\d{2}\/\d{4}$/.test(inclusaoAcordoJudicialCompetencia)
+                                  }
+                                  onClick={async () => {
+                                    if (!conciliacaoOrgao.trim()) return
+                                    setInclusaoAcordoJudicialSaving(true)
+                                    setInclusaoAcordoJudicialError(null)
+                                    try {
+                                      const res = await fetch(
+                                        '/api/consignado/conciliacao/recurso-vs-relatorio/inclusao-servidor-acordo-judicial-tjgo',
+                                        {
+                                          method: 'POST',
+                                          headers: { 'content-type': 'application/json' },
+                                          body: JSON.stringify({
+                                            target: inclusaoAcordoJudicialActiveTarget,
+                                            orgao: conciliacaoOrgao.trim(),
+                                            nome: inclusaoAcordoJudicialNome,
+                                            cpf: inclusaoAcordoJudicialCpf,
+                                            value: inclusaoAcordoJudicialValor,
+                                            competencia: inclusaoAcordoJudicialCompetencia,
+                                          }),
+                                        },
+                                      )
+                                      const data = (await res.json().catch(() => null)) as null | {
+                                        message?: string
+                                      }
+                                      if (!res.ok) {
+                                        throw new Error(
+                                          data?.message || `Falha ao incluir servidor (HTTP ${res.status}).`,
+                                        )
+                                      }
+                                      await reloadConciliacaoKeepExpanded()
+                                      setInclusaoAcordoJudicialRecursoModalOpen(false)
+                                      setInclusaoAcordoJudicialRelatorioModalOpen(false)
+                                    } catch (e) {
+                                      setInclusaoAcordoJudicialError(
+                                        e instanceof Error ? e.message : 'Falha ao incluir servidor.',
+                                      )
+                                    } finally {
+                                      setInclusaoAcordoJudicialSaving(false)
+                                    }
+                                  }}
+                                >
+                                  {inclusaoAcordoJudicialSaving ? 'Salvando...' : 'Salvar inclusão'}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                            </div>,
+                            document.body,
+                          )
                         : null}
 
                       {tarifaModalOpen ? (
@@ -8395,11 +18212,11 @@ export default function CreditoPage() {
                                 <select
                                   className="control"
                                   value={tarifaTypeDraft}
-                                  onChange={(e) =>
-                                    setTarifaTypeDraft(
-                                      e.target.value === 'ted' ? 'ted' : 'linha',
-                                    )
-                                  }
+                                  onChange={(e) => {
+                                    const nextType = e.target.value === 'ted' ? 'ted' : 'linha'
+                                    setTarifaTypeDraft(nextType)
+                                    setTarifaDraft(getSavedTarifaDraft(nextType))
+                                  }}
                                   disabled={tarifaSaving}
                                   style={{
                                     background: 'rgba(255,255,255,0.06)',
@@ -8560,7 +18377,7 @@ export default function CreditoPage() {
                                           : 'Ao fechar a conciliação, o relatório será enviado para a Contabilidade. Continuar?'}
                                     </div>
                                     <div style={{ opacity: 0.8 }}>
-                                      Órgão: {conciliacaoOrgao.trim() || '—'} • Competência:{' '}
+                                      Órgão: {formatConciliacaoOrgaoLabel(conciliacaoOrgao.trim() || '—')} • Competência:{' '}
                                       {conciliacaoMonthOptions.find((o) => o.value === conciliacaoMonth)?.label ??
                                         conciliacaoMonth}
                                     </div>
@@ -8730,7 +18547,7 @@ export default function CreditoPage() {
                                                   conciliacaoCloseMode === 'parcial'
                                                     ? conciliacaoCloseVencimento.trim()
                                                     : undefined,
-                                                closedBy: accessFixedEmail,
+                                                closedBy: currentSessionUserEmail,
                                                 contabilidadeEmail: notificationEmailContabilidade,
                                                 evidencePngBase64,
                                               }),
@@ -8826,6 +18643,7 @@ export default function CreditoPage() {
                                   setConciliacaoReopenMode('total')
                                   setConciliacaoReopenVencimento('')
                                   setConciliacaoReopenPassword('')
+                                  setConciliacaoReopenJustification('')
                                 }}
                               >
                                 Fechar
@@ -8945,6 +18763,19 @@ export default function CreditoPage() {
                               </div>
 
                               <div className="field">
+                                <label>Justificativa</label>
+                                <textarea
+                                  className="control"
+                                  value={conciliacaoReopenJustification}
+                                  onChange={(e) => setConciliacaoReopenJustification(e.target.value)}
+                                  disabled={conciliacaoReopening}
+                                  placeholder="Informe a justificativa da reabertura"
+                                  rows={4}
+                                  style={{ minHeight: 96, resize: 'vertical' }}
+                                />
+                              </div>
+
+                              <div className="field">
                                 <label>Senha</label>
                                 <input
                                   className="control"
@@ -8969,6 +18800,7 @@ export default function CreditoPage() {
                                   className="btn btn-primary"
                                   disabled={
                                     conciliacaoReopening ||
+                                    !conciliacaoReopenJustification.trim() ||
                                     !conciliacaoReopenPassword ||
                                     !conciliacaoOrgao.trim() ||
                                     !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth) ||
@@ -8979,6 +18811,7 @@ export default function CreditoPage() {
                                     if (!conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)) return
                                     if (conciliacaoReopenMode === 'parcial' && !conciliacaoReopenVencimento.trim())
                                       return
+                                    if (!conciliacaoReopenJustification.trim()) return
                                     setConciliacaoReopenError(null)
                                     setConciliacaoError(null)
                                     setConciliacaoReopening(true)
@@ -8996,7 +18829,8 @@ export default function CreditoPage() {
                                                 ? conciliacaoReopenVencimento.trim()
                                                 : undefined,
                                             password: conciliacaoReopenPassword,
-                                            reopenedBy: accessFixedEmail,
+                                            reopenedBy: currentSessionUserEmail,
+                                            justification: conciliacaoReopenJustification.trim(),
                                           }),
                                         },
                                       )
@@ -9006,6 +18840,7 @@ export default function CreditoPage() {
                                       }
                                       setConciliacaoReopenModalOpen(false)
                                       setConciliacaoReopenPassword('')
+                                      setConciliacaoReopenJustification('')
                                       setConciliacaoReopenMode('total')
                                       setConciliacaoReopenVencimento('')
                                       await reloadConciliacaoKeepExpanded()
@@ -9024,6 +18859,134 @@ export default function CreditoPage() {
                           </div>
                         </div>
                       ) : null}
+
+                      {conciliacaoExportModalOpen && typeof document !== 'undefined'
+                        ? createPortal(
+                            <div
+                              role="dialog"
+                              aria-modal="true"
+                              style={{
+                                position: 'fixed',
+                                inset: 0,
+                                background: 'rgba(0,0,0,0.62)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: 16,
+                                zIndex: 240,
+                              }}
+                              onClick={() => setConciliacaoExportModalOpen(false)}
+                            >
+                              <div
+                                style={{
+                                  width: 'min(560px, 96vw)',
+                                  borderRadius: 18,
+                                  border: '1px solid rgba(255,255,255,0.16)',
+                                  background: 'rgba(12, 22, 40, 0.96)',
+                                  color: 'rgba(255,255,255,0.92)',
+                                  boxShadow: '0 30px 90px rgba(0,0,0,0.55)',
+                                  overflow: 'hidden',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div
+                                  style={{
+                                    padding: '14px 16px',
+                                    borderBottom: '1px solid rgba(255,255,255,0.10)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div style={{ fontWeight: 900 }}>
+                                    {conciliacaoExportModalFormat === 'pdf' ? 'Exportar PDF' : 'Exportar XLSX'}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="btn btn-ghost"
+                                    onClick={() => setConciliacaoExportModalOpen(false)}
+                                  >
+                                    Fechar
+                                  </button>
+                                </div>
+                                <div style={{ padding: '14px 16px', display: 'grid', gap: 12 }}>
+                                  <div style={{ display: 'grid', gap: 10 }}>
+                                    <label style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                      <input
+                                        type="radio"
+                                        name="conciliacao-export-mode"
+                                        checked={conciliacaoExportModalMode === 'total'}
+                                        onChange={() => setConciliacaoExportModalMode('total')}
+                                      />
+                                      <span>Total</span>
+                                    </label>
+                                    <label
+                                      style={{
+                                        display: 'flex',
+                                        gap: 10,
+                                        alignItems: 'center',
+                                        opacity: relatorioVencimentoOptions.length === 0 ? 0.55 : 1,
+                                      }}
+                                    >
+                                      <input
+                                        type="radio"
+                                        name="conciliacao-export-mode"
+                                        checked={conciliacaoExportModalMode === 'vencimento'}
+                                        onChange={() => setConciliacaoExportModalMode('vencimento')}
+                                        disabled={relatorioVencimentoOptions.length === 0}
+                                      />
+                                      <span>Selecionar vencimento</span>
+                                    </label>
+                                  </div>
+
+                                  {conciliacaoExportModalMode === 'vencimento' ? (
+                                    <div className="field">
+                                      <label>Vencimento</label>
+                                      <select
+                                        className="control month-select"
+                                        value={conciliacaoExportModalVencimento}
+                                        onChange={(e) => setConciliacaoExportModalVencimento(e.target.value)}
+                                        style={{ height: 44 }}
+                                      >
+                                        <option value="">Selecione...</option>
+                                        {relatorioVencimentoOptions.map((v) => (
+                                          <option key={v} value={v}>
+                                            {v}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ) : null}
+
+                                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      onClick={() => setConciliacaoExportModalOpen(false)}
+                                    >
+                                      Cancelar
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-primary"
+                                      disabled={
+                                        conciliacaoExportingPdf ||
+                                        conciliacaoExportingXlsx ||
+                                        (conciliacaoExportModalMode === 'vencimento' &&
+                                          !conciliacaoExportModalVencimento.trim())
+                                      }
+                                      onClick={() => void confirmConciliacaoExport()}
+                                    >
+                                      Exportar
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>,
+                            document.body,
+                          )
+                        : null}
 
                       {ocorrenciaModal
                         ? typeof document !== 'undefined'
@@ -9085,6 +19048,9 @@ export default function CreditoPage() {
                                       setRelatorioRepactuacaoStatus('pendente_gerente')
                                       setRelatorioRepactuacaoGerenteEmail('')
                                       setRelatorioNaoPossuiRecursoGerenteEmail('')
+                                      setRelatorioDevolucaoParcialLiquidacaoDate('')
+                                      setRelatorioDevolucaoParcialDevolucaoDate('')
+                                      setRelatorioDevolucaoParcialDevolucaoValor('')
                                       setRelatorioRecursoJudicialNovoValor(ocorrenciaModal.value)
                                       setRelatorioRecursoJudicialAutoJustification(true)
                                       setOcorrenciaModalShowNew(true)
@@ -9109,7 +19075,7 @@ export default function CreditoPage() {
                                   CPF: {ocorrenciaModal.cpf} • Valor: {withCurrency(ocorrenciaModal.value)}
                                 </div>
                                 <div style={{ opacity: 0.82 }}>
-                                  Empresa atual (SISBR): {ocorrenciaModal.empresa || '-'}
+                                  Empresa atual (SISBR): {formatSisbrEmpresaLabel(ocorrenciaModal.empresa)}
                                 </div>
                               </div>
 
@@ -9225,6 +19191,148 @@ export default function CreditoPage() {
                                                   <div style={{ opacity: 0.86, whiteSpace: 'pre-wrap' }}>
                                                     {String(o.justification || '-')}
                                                   </div>
+                                                  {String(
+                                                    o.liquidationDate ||
+                                                      o.liquidatedValue ||
+                                                      o.devolucaoDate ||
+                                                      o.devolucaoValue ||
+                                                      o.debitAccountDate ||
+                                                      o.debitAccountValue ||
+                                                      o.differenceValue ||
+                                                      '',
+                                                  ).trim() ? (
+                                                    <div
+                                                      style={{
+                                                        display: 'grid',
+                                                        gap: 6,
+                                                        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                                                      }}
+                                                    >
+                                                      {String(o.liquidationDate || '').trim() ? (
+                                                        <div
+                                                          style={{
+                                                            padding: '8px 10px',
+                                                            borderRadius: 10,
+                                                            border: '1px solid rgba(255,255,255,0.1)',
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                          }}
+                                                        >
+                                                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                            Data de Liquidação
+                                                          </div>
+                                                          <div style={{ fontWeight: 800 }}>
+                                                            {String(o.liquidationDate)}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                      {String(o.liquidatedValue || '').trim() ? (
+                                                        <div
+                                                          style={{
+                                                            padding: '8px 10px',
+                                                            borderRadius: 10,
+                                                            border: '1px solid rgba(255,255,255,0.1)',
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                          }}
+                                                        >
+                                                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                            {String(o.action || '')
+                                                              .trim()
+                                                              .startsWith('liquidacao_antecipada_via_caixa')
+                                                              ? 'Valor da Antecipação'
+                                                              : 'Valor Liquidado'}
+                                                          </div>
+                                                          <div style={{ fontWeight: 800 }}>
+                                                            {withCurrency(String(o.liquidatedValue))}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                      {String(o.devolucaoDate || '').trim() ? (
+                                                        <div
+                                                          style={{
+                                                            padding: '8px 10px',
+                                                            borderRadius: 10,
+                                                            border: '1px solid rgba(255,255,255,0.1)',
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                          }}
+                                                        >
+                                                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                            Data de Devolução
+                                                          </div>
+                                                          <div style={{ fontWeight: 800 }}>
+                                                            {String(o.devolucaoDate)}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                      {String(o.devolucaoValue || '').trim() ? (
+                                                        <div
+                                                          style={{
+                                                            padding: '8px 10px',
+                                                            borderRadius: 10,
+                                                            border: '1px solid rgba(255,255,255,0.1)',
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                          }}
+                                                        >
+                                                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                            Valor Devolvido
+                                                          </div>
+                                                          <div style={{ fontWeight: 800 }}>
+                                                            {withCurrency(String(o.devolucaoValue))}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                      {String(o.debitAccountDate || '').trim() ? (
+                                                        <div
+                                                          style={{
+                                                            padding: '8px 10px',
+                                                            borderRadius: 10,
+                                                            border: '1px solid rgba(255,255,255,0.1)',
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                          }}
+                                                        >
+                                                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                            Data de Débito em Conta
+                                                          </div>
+                                                          <div style={{ fontWeight: 800 }}>
+                                                            {String(o.debitAccountDate)}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                      {String(o.debitAccountValue || '').trim() ? (
+                                                        <div
+                                                          style={{
+                                                            padding: '8px 10px',
+                                                            borderRadius: 10,
+                                                            border: '1px solid rgba(255,255,255,0.1)',
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                          }}
+                                                        >
+                                                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                            Valor de Débito em Conta
+                                                          </div>
+                                                          <div style={{ fontWeight: 800 }}>
+                                                            {withCurrency(String(o.debitAccountValue))}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                      {String(o.differenceValue || '').trim() ? (
+                                                        <div
+                                                          style={{
+                                                            padding: '8px 10px',
+                                                            borderRadius: 10,
+                                                            border: '1px solid rgba(255,255,255,0.1)',
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                          }}
+                                                        >
+                                                          <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                            Diferença de valores
+                                                          </div>
+                                                          <div style={{ fontWeight: 800 }}>
+                                                            {withCurrency(String(o.differenceValue))}
+                                                          </div>
+                                                        </div>
+                                                      ) : null}
+                                                    </div>
+                                                  ) : null}
                                                 </div>
                                               ))}
                                             </div>
@@ -9359,6 +19467,89 @@ export default function CreditoPage() {
                                         } else {
                                           setRelatorioLiquidacaoForaVencimentoDate('')
                                         }
+                                        if (
+                                          next ===
+                                          'liquidacao_antecipada_via_caixa_relatorio_sisbr'
+                                        ) {
+                                          setRelatorioLiquidacaoAntecipadaViaCaixaDate('')
+                                          setRelatorioLiquidacaoAntecipadaViaCaixaValor('')
+                                          setRelatorioOcorrenciaJustification(
+                                            buildLiquidacaoAntecipadaViaCaixaDefaultJustification(''),
+                                          )
+                                          setRelatorioLiquidacaoAntecipadaViaCaixaAutoJustification(true)
+                                        } else {
+                                          setRelatorioLiquidacaoAntecipadaViaCaixaDate('')
+                                          setRelatorioLiquidacaoAntecipadaViaCaixaValor('')
+                                          setRelatorioLiquidacaoAntecipadaViaCaixaAutoJustification(false)
+                                        }
+                                        if (next === 'estorno_valores_relatorio_sisbr') {
+                                          setRelatorioEstornoLiquidacaoDate('')
+                                          setRelatorioEstornoDate('')
+                                          setRelatorioEstornoValor('')
+                                          setRelatorioOcorrenciaJustification('')
+                                          setRelatorioEstornoAutoJustification(true)
+                                        } else {
+                                          setRelatorioEstornoLiquidacaoDate('')
+                                          setRelatorioEstornoDate('')
+                                          setRelatorioEstornoValor('')
+                                          setRelatorioEstornoAutoJustification(false)
+                                        }
+                                        if (next === 'recurso_recebido_a_menor_relatorio_sisbr') {
+                                          setRelatorioRecursoRecebidoMenorLiquidacaoDate('')
+                                          setRelatorioRecursoRecebidoMenorDebitoDate('')
+                                          setRelatorioRecursoRecebidoMenorDebitoValor('')
+                                          setRelatorioRecursoRecebidoMenorNoDebitInAccount(false)
+                                          setRelatorioRecursoRecebidoMenorDifferenceValor('')
+                                          setRelatorioOcorrenciaJustification(
+                                            buildRecursoRecebidoMenorDefaultJustification('', '', false),
+                                          )
+                                          setRelatorioRecursoRecebidoMenorAutoJustification(true)
+                                        } else {
+                                          setRelatorioRecursoRecebidoMenorLiquidacaoDate('')
+                                          setRelatorioRecursoRecebidoMenorDebitoDate('')
+                                          setRelatorioRecursoRecebidoMenorDebitoValor('')
+                                          setRelatorioRecursoRecebidoMenorNoDebitInAccount(false)
+                                          setRelatorioRecursoRecebidoMenorDifferenceValor('')
+                                          setRelatorioRecursoRecebidoMenorAutoJustification(false)
+                                        }
+                                        if (next === 'recurso_recebido_a_maior_relatorio_sisbr') {
+                                          setRelatorioRecursoRecebidoMaiorLiquidacaoDate('')
+                                          setRelatorioRecursoRecebidoMaiorDevolucaoDate('')
+                                          setRelatorioRecursoRecebidoMaiorDevolucaoValor('')
+                                          setRelatorioOcorrenciaJustification(
+                                            buildRecursoRecebidoMaiorDefaultJustification(''),
+                                          )
+                                          setRelatorioRecursoRecebidoMaiorAutoJustification(true)
+                                        } else {
+                                          setRelatorioRecursoRecebidoMaiorLiquidacaoDate('')
+                                          setRelatorioRecursoRecebidoMaiorDevolucaoDate('')
+                                          setRelatorioRecursoRecebidoMaiorDevolucaoValor('')
+                                          setRelatorioRecursoRecebidoMaiorAutoJustification(false)
+                                        }
+                                        if (next === 'devolucao_parcial_averbacao_relatorio_sisbr') {
+                                          setRelatorioDevolucaoParcialLiquidacaoDate('')
+                                          setRelatorioDevolucaoParcialDevolucaoDate('')
+                                          setRelatorioDevolucaoParcialDevolucaoValor('')
+                                          setRelatorioOcorrenciaJustification(
+                                            buildDevolucaoParcialAverbacaoDefaultJustification(''),
+                                          )
+                                        } else {
+                                          setRelatorioDevolucaoParcialLiquidacaoDate('')
+                                          setRelatorioDevolucaoParcialDevolucaoDate('')
+                                          setRelatorioDevolucaoParcialDevolucaoValor('')
+                                        }
+                                        if (next === 'liquidacao_recurso_judicial_relatorio_sisbr') {
+                                          setRelatorioLiquidacaoRecursoJudicalDate('')
+                                          setRelatorioLiquidacaoRecursoJudicalValor('')
+                                          setRelatorioOcorrenciaJustification(
+                                            buildLiquidacaoRecursoJudicalDefaultJustification(''),
+                                          )
+                                          setRelatorioLiquidacaoRecursoJudicalAutoJustification(true)
+                                        } else {
+                                          setRelatorioLiquidacaoRecursoJudicalDate('')
+                                          setRelatorioLiquidacaoRecursoJudicalValor('')
+                                          setRelatorioLiquidacaoRecursoJudicalAutoJustification(false)
+                                        }
                                         if (next === 'recurso_judicial_valor_a_menor_relatorio_sisbr') {
                                           setRelatorioRecursoJudicialNovoValor(ocorrenciaModal.value)
                                           setRelatorioOcorrenciaJustification('')
@@ -9366,6 +19557,26 @@ export default function CreditoPage() {
                                         } else {
                                           setRelatorioRecursoJudicialNovoValor('')
                                           setRelatorioRecursoJudicialAutoJustification(false)
+                                        }
+                                        if (next === 'antecipado_devolvido_relatorio_sisbr') {
+                                          setRelatorioAntecipadoDevolvidoDate('')
+                                          if (!relatorioOcorrenciaJustification.trim()) {
+                                            setRelatorioOcorrenciaJustification('')
+                                          }
+                                        } else {
+                                          setRelatorioAntecipadoDevolvidoDate('')
+                                        }
+                                        if (next === 'liquidacao_processo_judicial_relatorio_sisbr') {
+                                          const DEFAULT_PROCESSO_JUDICIAL = 'Parcelas em Deposito Judical'
+                                          if (
+                                            !relatorioOcorrenciaJustification.trim() ||
+                                            relatorioOcorrenciaJustification
+                                              .trim()
+                                              .toLowerCase()
+                                              .startsWith('parcelas em deposito judical')
+                                          ) {
+                                            setRelatorioOcorrenciaJustification(DEFAULT_PROCESSO_JUDICIAL)
+                                          }
                                         }
                                       }}
                                       disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
@@ -9407,6 +19618,15 @@ export default function CreditoPage() {
                                         Liquidação CCS (Excluir do Relatório SISBR)
                                       </option>
                                       <option
+                                        value="liquidacao_processo_judicial_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Liquidação Processo Judicial (Excluir do Relatório SISBR)
+                                      </option>
+                                      <option
                                         value="liquidacao_fora_vencimento_relatorio_sisbr"
                                         disabled={ocorrenciaModal?.status !== 'conciliado'}
                                         style={{
@@ -9415,6 +19635,15 @@ export default function CreditoPage() {
                                         }}
                                       >
                                         Liquidação Fora do Vencimento
+                                      </option>
+                                      <option
+                                        value="liquidacao_antecipada_via_caixa_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Liquidação Antecipada Via Caixa
                                       </option>
                                       <option
                                         value="nao_possui_recurso_relatorio_sisbr"
@@ -9426,6 +19655,42 @@ export default function CreditoPage() {
                                         Não possui Recurso
                                       </option>
                                       <option
+                                        value="liquidacao_recurso_judicial_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Liquidação de Recurso Judical
+                                      </option>
+                                      <option
+                                        value="recurso_recebido_a_maior_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Recurso Recebido a Maior
+                                      </option>
+                                      <option
+                                        value="devolucao_parcial_averbacao_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Devolução Parcial (Averbação)
+                                      </option>
+                                      <option
+                                        value="recurso_recebido_a_menor_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Recurso Recebido a Menor
+                                      </option>
+                                      <option
                                         value="recurso_judicial_valor_a_menor_relatorio_sisbr"
                                         style={{
                                           background: 'rgb(12, 22, 40)',
@@ -9433,6 +19698,24 @@ export default function CreditoPage() {
                                         }}
                                       >
                                         Recurso Judicial - Valor a Menor
+                                      </option>
+                                      <option
+                                        value="estorno_valores_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Estorno de Valores
+                                      </option>
+                                      <option
+                                        value="antecipado_devolvido_relatorio_sisbr"
+                                        style={{
+                                          background: 'rgb(12, 22, 40)',
+                                          color: 'rgba(255,255,255,0.92)',
+                                        }}
+                                      >
+                                        Antecipado Devolvido
                                       </option>
                                     </select>
                                   </div>
@@ -9517,6 +19800,21 @@ export default function CreditoPage() {
                                     </div>
                                   ) : null}
                                   {relatorioOcorrenciaAction ===
+                                  'liquidacao_processo_judicial_relatorio_sisbr' ? (
+                                    <div
+                                      style={{
+                                        marginTop: 14,
+                                        padding: '10px 12px',
+                                        borderRadius: 12,
+                                        border: '1px solid rgba(255,255,255,0.12)',
+                                        background: 'rgba(255,255,255,0.03)',
+                                        opacity: 0.92,
+                                      }}
+                                    >
+                                      Esta ação remove a linha do Relatório SISBR para não compor a conciliação.
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction ===
                                   'liquidacao_fora_vencimento_relatorio_sisbr' ? (
                                     <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
                                       <div className="field">
@@ -9563,6 +19861,100 @@ export default function CreditoPage() {
                                       </div>
                                     </div>
                                   ) : null}
+                                  {relatorioOcorrenciaAction ===
+                                  'liquidacao_antecipada_via_caixa_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data de Liquidação (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioLiquidacaoAntecipadaViaCaixaDate}
+                                          onChange={(e) =>
+                                            setRelatorioLiquidacaoAntecipadaViaCaixaDate(
+                                              e.target.value,
+                                            )
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 03/07/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Valor da Antecipação</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioLiquidacaoAntecipadaViaCaixaValor}
+                                          onChange={(e) => {
+                                            const next = e.target.value
+                                            setRelatorioLiquidacaoAntecipadaViaCaixaValor(next)
+                                            setRelatorioOcorrenciaJustification((prev) => {
+                                              const normalizedPrev = prev.trim().toLowerCase()
+                                              const shouldAuto =
+                                                relatorioLiquidacaoAntecipadaViaCaixaAutoJustification ||
+                                                !prev.trim() ||
+                                                normalizedPrev.startsWith(
+                                                  'contrato antecipado via caixa no valor de',
+                                                )
+                                              return shouldAuto
+                                                ? buildLiquidacaoAntecipadaViaCaixaDefaultJustification(
+                                                    next,
+                                                  )
+                                                : prev
+                                            })
+                                            setRelatorioLiquidacaoAntecipadaViaCaixaAutoJustification(true)
+                                          }}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 50,00"
+                                        />
+                                      </div>
+                                      <div
+                                        style={{
+                                          padding: '10px 12px',
+                                          borderRadius: 12,
+                                          border: '1px solid rgba(255,255,255,0.12)',
+                                          background: 'rgba(255,255,255,0.03)',
+                                          opacity: 0.92,
+                                        }}
+                                      >
+                                        O valor da antecipação será somado ao valor da parcela no Relatório SISBR.
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction === 'antecipado_devolvido_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data de devolução (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioAntecipadoDevolvidoDate}
+                                          onChange={(e) => {
+                                            const next = e.target.value
+                                            setRelatorioAntecipadoDevolvidoDate(next)
+                                            const normalized = next.trim()
+                                            if (
+                                              !relatorioOcorrenciaJustification.trim() ||
+                                              relatorioOcorrenciaJustification
+                                                .trim()
+                                                .toLowerCase()
+                                                .startsWith('antecipado devolvido')
+                                            ) {
+                                              if (normalized) {
+                                                setRelatorioOcorrenciaJustification(
+                                                  `Antecipado Devolvido. Data de devolução: ${normalized}`,
+                                                )
+                                              } else {
+                                                setRelatorioOcorrenciaJustification('')
+                                              }
+                                            }
+                                          }}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 05/06/2026"
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : null}
                                   {relatorioOcorrenciaAction === 'nao_possui_recurso_relatorio_sisbr' ? (
                                     <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
                                       <div className="field">
@@ -9590,6 +19982,227 @@ export default function CreditoPage() {
                                         Esta ação exclui a linha do Relatório SISBR, registra a ocorrência e envia a
                                         mensagem ao gerente.
                                       </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction ===
+                                  'liquidacao_recurso_judicial_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data da Liquidação (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioLiquidacaoRecursoJudicalDate}
+                                          onChange={(e) =>
+                                            setRelatorioLiquidacaoRecursoJudicalDate(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 03/07/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Valor Liquidado</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioLiquidacaoRecursoJudicalValor}
+                                          onChange={(e) =>
+                                            setRelatorioLiquidacaoRecursoJudicalValor(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 115,19"
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction ===
+                                  'recurso_recebido_a_maior_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data de Liquidação (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioRecursoRecebidoMaiorLiquidacaoDate}
+                                          onChange={(e) =>
+                                            setRelatorioRecursoRecebidoMaiorLiquidacaoDate(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 03/07/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Data de Devolução (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioRecursoRecebidoMaiorDevolucaoDate}
+                                          onChange={(e) =>
+                                            setRelatorioRecursoRecebidoMaiorDevolucaoDate(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 04/07/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Valor Devolvido</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioRecursoRecebidoMaiorDevolucaoValor}
+                                          onChange={(e) =>
+                                            setRelatorioRecursoRecebidoMaiorDevolucaoValor(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 115,19"
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction ===
+                                  'devolucao_parcial_averbacao_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data de Liquidação (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioDevolucaoParcialLiquidacaoDate}
+                                          onChange={(e) =>
+                                            setRelatorioDevolucaoParcialLiquidacaoDate(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 03/07/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Data de Devolução (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioDevolucaoParcialDevolucaoDate}
+                                          onChange={(e) =>
+                                            setRelatorioDevolucaoParcialDevolucaoDate(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 04/07/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Valor Devolvido</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioDevolucaoParcialDevolucaoValor}
+                                          onChange={(e) =>
+                                            setRelatorioDevolucaoParcialDevolucaoValor(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 115,19"
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                  {relatorioOcorrenciaAction ===
+                                  'recurso_recebido_a_menor_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data de Liquidação (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioRecursoRecebidoMenorLiquidacaoDate}
+                                          onChange={(e) =>
+                                            setRelatorioRecursoRecebidoMenorLiquidacaoDate(e.target.value)
+                                          }
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 03/07/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Débito em Conta</label>
+                                        <label
+                                          className="day"
+                                          style={{
+                                            width: '100%',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'flex-start',
+                                            gap: 10,
+                                            height: 44,
+                                          }}
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={relatorioRecursoRecebidoMenorNoDebitInAccount}
+                                            onChange={(e) => {
+                                              const checked = e.target.checked
+                                              setRelatorioRecursoRecebidoMenorNoDebitInAccount(checked)
+                                              if (checked) {
+                                                setRelatorioRecursoRecebidoMenorDebitoDate('')
+                                                setRelatorioRecursoRecebidoMenorDebitoValor('')
+                                              }
+                                              const template = buildRecursoRecebidoMenorDefaultJustification(
+                                                relatorioRecursoRecebidoMenorDebitoValor,
+                                                relatorioRecursoRecebidoMenorDifferenceValor,
+                                                checked,
+                                              )
+                                              setRelatorioOcorrenciaJustification((prev) =>
+                                                relatorioRecursoRecebidoMenorAutoJustification || !prev.trim()
+                                                  ? template
+                                                  : prev,
+                                              )
+                                            }}
+                                            disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          />
+                                          <span>Sem débito em conta corrente</span>
+                                        </label>
+                                      </div>
+                                      {relatorioRecursoRecebidoMenorNoDebitInAccount ? (
+                                        <div className="field">
+                                          <label>Diferença de valores (automático)</label>
+                                          <input
+                                            className="control"
+                                            type="text"
+                                            value={relatorioRecursoRecebidoMenorDifferenceValor}
+                                            onChange={(e) =>
+                                              setRelatorioRecursoRecebidoMenorDifferenceValor(e.target.value)
+                                            }
+                                            disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                            placeholder="ex.: 115,19"
+                                          />
+                                        </div>
+                                      ) : null}
+                                      {!relatorioRecursoRecebidoMenorNoDebitInAccount ? (
+                                        <>
+                                          <div className="field">
+                                            <label>Data de Débito em Conta (dd/mm/aaaa)</label>
+                                            <input
+                                              className="control"
+                                              type="text"
+                                              value={relatorioRecursoRecebidoMenorDebitoDate}
+                                              onChange={(e) =>
+                                                setRelatorioRecursoRecebidoMenorDebitoDate(e.target.value)
+                                              }
+                                              disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                              placeholder="ex.: 04/07/2026"
+                                            />
+                                          </div>
+                                          <div className="field">
+                                            <label>Valor de Débito em Conta</label>
+                                            <input
+                                              className="control"
+                                              type="text"
+                                              value={relatorioRecursoRecebidoMenorDebitoValor}
+                                              onChange={(e) => {
+                                                setRelatorioRecursoRecebidoMenorDebitoValor(e.target.value)
+                                              }}
+                                              disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                              placeholder="ex.: 115,19"
+                                            />
+                                          </div>
+                                        </>
+                                      ) : null}
                                     </div>
                                   ) : null}
                                   {relatorioOcorrenciaAction ===
@@ -9645,6 +20258,57 @@ export default function CreditoPage() {
                                       })()}
                                     </div>
                                   ) : null}
+                                  {relatorioOcorrenciaAction === 'estorno_valores_relatorio_sisbr' ? (
+                                    <div style={{ marginTop: 14, display: 'grid', gap: 10 }}>
+                                      <div className="field">
+                                        <label>Data de Liquidação do Estorno (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioEstornoLiquidacaoDate}
+                                          onChange={(e) => setRelatorioEstornoLiquidacaoDate(e.target.value)}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 03/06/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Data de Estorno (dd/mm/aaaa)</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioEstornoDate}
+                                          onChange={(e) => setRelatorioEstornoDate(e.target.value)}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 10/06/2026"
+                                        />
+                                      </div>
+                                      <div className="field">
+                                        <label>Valor de Estorno</label>
+                                        <input
+                                          className="control"
+                                          type="text"
+                                          value={relatorioEstornoValor}
+                                          onChange={(e) => setRelatorioEstornoValor(e.target.value)}
+                                          disabled={relatorioOcorrenciaSaving || ocorrenciaReadOnly}
+                                          placeholder="ex.: 115,19"
+                                        />
+                                      </div>
+                                      <div
+                                        style={{
+                                          padding: '10px 12px',
+                                          borderRadius: 12,
+                                          border: '1px solid rgba(255,255,255,0.12)',
+                                          background: 'rgba(255,255,255,0.03)',
+                                          opacity: 0.92,
+                                        }}
+                                      >
+                                        Nova liquidação: <b>{getRelatorioNovaLiquidacaoDate(ocorrenciaModal) || '-'}</b>
+                                        <div style={{ marginTop: 6, opacity: 0.9 }}>
+                                          Valor da nova liquidação: <b>{withCurrency(ocorrenciaModal.value)}</b>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ) : null}
 
                                   <div style={{ marginTop: 14 }}>
                                     <div style={{ fontWeight: 750, marginBottom: 8 }}>
@@ -9658,9 +20322,39 @@ export default function CreditoPage() {
                                         setRelatorioOcorrenciaJustification(e.target.value)
                                         if (
                                           relatorioOcorrenciaAction ===
+                                          'liquidacao_recurso_judicial_relatorio_sisbr'
+                                        ) {
+                                          setRelatorioLiquidacaoRecursoJudicalAutoJustification(false)
+                                        }
+                                        if (
+                                          relatorioOcorrenciaAction ===
+                                          'liquidacao_antecipada_via_caixa_relatorio_sisbr'
+                                        ) {
+                                          setRelatorioLiquidacaoAntecipadaViaCaixaAutoJustification(false)
+                                        }
+                                        if (
+                                          relatorioOcorrenciaAction ===
+                                          'recurso_recebido_a_maior_relatorio_sisbr'
+                                        ) {
+                                          setRelatorioRecursoRecebidoMaiorAutoJustification(false)
+                                        }
+                                        if (
+                                          relatorioOcorrenciaAction ===
+                                          'recurso_recebido_a_menor_relatorio_sisbr'
+                                        ) {
+                                          setRelatorioRecursoRecebidoMenorAutoJustification(false)
+                                        }
+                                        if (
+                                          relatorioOcorrenciaAction ===
                                           'recurso_judicial_valor_a_menor_relatorio_sisbr'
                                         ) {
                                           setRelatorioRecursoJudicialAutoJustification(false)
+                                        }
+                                        if (
+                                          relatorioOcorrenciaAction ===
+                                          'estorno_valores_relatorio_sisbr'
+                                        ) {
+                                          setRelatorioEstornoAutoJustification(false)
                                         }
                                       }}
                                       rows={4}
@@ -9711,8 +20405,60 @@ export default function CreditoPage() {
                                             relatorioLiquidacaoForaVencimentoDate.trim(),
                                           )) ||
                                         (relatorioOcorrenciaAction ===
+                                          'liquidacao_antecipada_via_caixa_relatorio_sisbr' &&
+                                          (!/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioLiquidacaoAntecipadaViaCaixaDate.trim(),
+                                          ) ||
+                                            !relatorioLiquidacaoAntecipadaViaCaixaValor.trim())) ||
+                                        (relatorioOcorrenciaAction ===
                                           'recurso_judicial_valor_a_menor_relatorio_sisbr' &&
-                                          !relatorioRecursoJudicialNovoValor.trim())
+                                          !relatorioRecursoJudicialNovoValor.trim()) ||
+                                        (relatorioOcorrenciaAction ===
+                                          'liquidacao_recurso_judicial_relatorio_sisbr' &&
+                                          (!/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioLiquidacaoRecursoJudicalDate.trim(),
+                                          ) ||
+                                            !relatorioLiquidacaoRecursoJudicalValor.trim())) ||
+                                        (relatorioOcorrenciaAction ===
+                                          'recurso_recebido_a_maior_relatorio_sisbr' &&
+                                          (!/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioRecursoRecebidoMaiorLiquidacaoDate.trim(),
+                                          ) ||
+                                            !/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                              relatorioRecursoRecebidoMaiorDevolucaoDate.trim(),
+                                            ) ||
+                                            !relatorioRecursoRecebidoMaiorDevolucaoValor.trim())) ||
+                                        (relatorioOcorrenciaAction ===
+                                          'devolucao_parcial_averbacao_relatorio_sisbr' &&
+                                          (!/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioDevolucaoParcialLiquidacaoDate.trim(),
+                                          ) ||
+                                            !/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                              relatorioDevolucaoParcialDevolucaoDate.trim(),
+                                            ) ||
+                                            !relatorioDevolucaoParcialDevolucaoValor.trim())) ||
+                                        (relatorioOcorrenciaAction ===
+                                          'recurso_recebido_a_menor_relatorio_sisbr' &&
+                                          (!/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioRecursoRecebidoMenorLiquidacaoDate.trim(),
+                                          ) ||
+                                            (relatorioRecursoRecebidoMenorNoDebitInAccount &&
+                                              !relatorioRecursoRecebidoMenorDifferenceValor.trim()) ||
+                                            (!relatorioRecursoRecebidoMenorNoDebitInAccount &&
+                                              (!/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                                relatorioRecursoRecebidoMenorDebitoDate.trim(),
+                                              ) ||
+                                                !relatorioRecursoRecebidoMenorDebitoValor.trim())))) ||
+                                        (relatorioOcorrenciaAction === 'estorno_valores_relatorio_sisbr' &&
+                                          (!/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioEstornoLiquidacaoDate.trim(),
+                                          ) ||
+                                            !/^\d{2}\/\d{2}\/\d{4}$/.test(relatorioEstornoDate.trim()) ||
+                                            !relatorioEstornoValor.trim())) ||
+                                        (relatorioOcorrenciaAction === 'antecipado_devolvido_relatorio_sisbr' &&
+                                          !/^\d{2}\/\d{2}\/\d{4}$/.test(
+                                            relatorioAntecipadoDevolvidoDate.trim(),
+                                          ))
                                       }
                                       onClick={async () => {
                                         if (!conciliacaoMonth) return
@@ -9728,9 +20474,31 @@ export default function CreditoPage() {
                                         const isLiquidacaoForaVencimento =
                                           relatorioOcorrenciaAction ===
                                           'liquidacao_fora_vencimento_relatorio_sisbr'
+                                        const isLiquidacaoAntecipadaViaCaixa =
+                                          relatorioOcorrenciaAction ===
+                                          'liquidacao_antecipada_via_caixa_relatorio_sisbr'
                                         const isRecursoJudicialValorAMenor =
                                           relatorioOcorrenciaAction ===
                                           'recurso_judicial_valor_a_menor_relatorio_sisbr'
+                                        const isLiquidacaoRecursoJudical =
+                                          relatorioOcorrenciaAction ===
+                                          'liquidacao_recurso_judicial_relatorio_sisbr'
+                                        const isRecursoRecebidoAMenor =
+                                          relatorioOcorrenciaAction ===
+                                          'recurso_recebido_a_menor_relatorio_sisbr'
+                                        const isRecursoRecebidoAMaior =
+                                          relatorioOcorrenciaAction ===
+                                          'recurso_recebido_a_maior_relatorio_sisbr'
+                                        const isDevolucaoParcialAverbacao =
+                                          relatorioOcorrenciaAction ===
+                                          'devolucao_parcial_averbacao_relatorio_sisbr'
+                                        const isEstornoValores =
+                                          relatorioOcorrenciaAction === 'estorno_valores_relatorio_sisbr'
+                                        const isAntecipadoDevolvido =
+                                          relatorioOcorrenciaAction === 'antecipado_devolvido_relatorio_sisbr'
+                                        const isLiquidacaoProcessoJudicial =
+                                          relatorioOcorrenciaAction ===
+                                          'liquidacao_processo_judicial_relatorio_sisbr'
                                         if (isAlterarOrgao && !relatorioOcorrenciaToOrgao) return
                                         if (isAlterarOrgao && !ocorrenciaModal.empresa) {
                                           setRelatorioOcorrenciaError(
@@ -9769,6 +20537,34 @@ export default function CreditoPage() {
                                             return
                                           }
                                         }
+                                        if (isLiquidacaoAntecipadaViaCaixa) {
+                                          const liquidationDate =
+                                            relatorioLiquidacaoAntecipadaViaCaixaDate.trim()
+                                          const antecipacaoValue =
+                                            relatorioLiquidacaoAntecipadaViaCaixaValor.trim()
+                                          if (!liquidationDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data da liquidação (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data da liquidação no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (!antecipacaoValue) {
+                                            setRelatorioOcorrenciaError('Informe o valor da antecipação.')
+                                            return
+                                          }
+                                          if (!ptBrMoneyToCents(antecipacaoValue)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe um valor de antecipação válido.',
+                                            )
+                                            return
+                                          }
+                                        }
                                         if (isRecursoJudicialValorAMenor) {
                                           if (!relatorioRecursoJudicialNovoValor.trim()) {
                                             setRelatorioOcorrenciaError('Informe o valor judicial (valor editado).')
@@ -9783,6 +20579,235 @@ export default function CreditoPage() {
                                             return
                                           }
                                         }
+                                        if (isLiquidacaoRecursoJudical) {
+                                          const liquidationDate =
+                                            relatorioLiquidacaoRecursoJudicalDate.trim()
+                                          const liquidatedValue =
+                                            relatorioLiquidacaoRecursoJudicalValor.trim()
+                                          if (!liquidationDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data da liquidação (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data da liquidação no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (!liquidatedValue) {
+                                            setRelatorioOcorrenciaError('Informe o valor liquidado.')
+                                            return
+                                          }
+                                          if (!ptBrMoneyToCents(liquidatedValue)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe um valor liquidado válido.',
+                                            )
+                                            return
+                                          }
+                                        }
+                                        if (isRecursoRecebidoAMaior) {
+                                          const liquidationDate =
+                                            relatorioRecursoRecebidoMaiorLiquidacaoDate.trim()
+                                          const devolucaoDate =
+                                            relatorioRecursoRecebidoMaiorDevolucaoDate.trim()
+                                          const devolucaoValue =
+                                            relatorioRecursoRecebidoMaiorDevolucaoValor.trim()
+                                          if (!liquidationDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (!devolucaoDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de devolução (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de devolução no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (!devolucaoValue) {
+                                            setRelatorioOcorrenciaError('Informe o valor devolvido.')
+                                            return
+                                          }
+                                          if (!ptBrMoneyToCents(devolucaoValue)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe um valor devolvido válido.',
+                                            )
+                                            return
+                                          }
+                                        }
+                                        if (isDevolucaoParcialAverbacao) {
+                                          const liquidationDate =
+                                            relatorioDevolucaoParcialLiquidacaoDate.trim()
+                                          const devolucaoDate =
+                                            relatorioDevolucaoParcialDevolucaoDate.trim()
+                                          const devolucaoValue =
+                                            relatorioDevolucaoParcialDevolucaoValor.trim()
+                                          if (!liquidationDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (!devolucaoDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de devolução (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de devolução no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (!devolucaoValue) {
+                                            setRelatorioOcorrenciaError('Informe o valor devolvido.')
+                                            return
+                                          }
+                                          if (!ptBrMoneyToCents(devolucaoValue)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe um valor devolvido válido.',
+                                            )
+                                            return
+                                          }
+                                        }
+                                        if (isRecursoRecebidoAMenor) {
+                                          const liquidationDate =
+                                            relatorioRecursoRecebidoMenorLiquidacaoDate.trim()
+                                          if (!liquidationDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (relatorioRecursoRecebidoMenorNoDebitInAccount) {
+                                            const diffValue =
+                                              relatorioRecursoRecebidoMenorDifferenceValor.trim()
+                                            if (!diffValue) {
+                                              setRelatorioOcorrenciaError('Informe o valor da diferença.')
+                                              return
+                                            }
+                                            if (!ptBrMoneyToCents(diffValue)) {
+                                              setRelatorioOcorrenciaError(
+                                                'Informe um valor da diferença válido.',
+                                              )
+                                              return
+                                            }
+                                          }
+                                          if (!relatorioRecursoRecebidoMenorNoDebitInAccount) {
+                                            const debitDate =
+                                              relatorioRecursoRecebidoMenorDebitoDate.trim()
+                                            const debitValue =
+                                              relatorioRecursoRecebidoMenorDebitoValor.trim()
+                                            if (!debitDate) {
+                                              setRelatorioOcorrenciaError(
+                                                'Informe a data de débito em conta (dd/mm/aaaa).',
+                                              )
+                                              return
+                                            }
+                                            if (!/^\d{2}\/\d{2}\/\d{4}$/.test(debitDate)) {
+                                              setRelatorioOcorrenciaError(
+                                                'Informe a data de débito em conta no formato dd/mm/aaaa.',
+                                              )
+                                              return
+                                            }
+                                            if (!debitValue) {
+                                              setRelatorioOcorrenciaError(
+                                                'Informe o valor de débito em conta.',
+                                              )
+                                              return
+                                            }
+                                            if (!ptBrMoneyToCents(debitValue)) {
+                                              setRelatorioOcorrenciaError(
+                                                'Informe um valor de débito em conta válido.',
+                                              )
+                                              return
+                                            }
+                                          }
+                                        }
+                                        if (isEstornoValores) {
+                                          const estornoLiquidacaoDate =
+                                            relatorioEstornoLiquidacaoDate.trim()
+                                          if (!estornoLiquidacaoDate) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação do estorno (dd/mm/aaaa).',
+                                            )
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(estornoLiquidacaoDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de liquidação do estorno no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          const estornoDate = relatorioEstornoDate.trim()
+                                          if (!estornoDate) {
+                                            setRelatorioOcorrenciaError('Informe a data de estorno (dd/mm/aaaa).')
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(estornoDate)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de estorno no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                          if (!relatorioEstornoValor.trim()) {
+                                            setRelatorioOcorrenciaError('Informe o valor de estorno.')
+                                            return
+                                          }
+                                          const estornoCents = ptBrMoneyToCents(relatorioEstornoValor)
+                                          if (!estornoCents) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe um valor de estorno válido.',
+                                            )
+                                            return
+                                          }
+                                          if (!getRelatorioNovaLiquidacaoDate(ocorrenciaModal)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Não foi possível identificar a data da nova liquidação pela ocorrência Liquidação Fora do Vencimento.',
+                                            )
+                                            return
+                                          }
+                                        }
+                                        if (isAntecipadoDevolvido) {
+                                          const t = relatorioAntecipadoDevolvidoDate.trim()
+                                          if (!t) {
+                                            setRelatorioOcorrenciaError('Informe a data de devolução (dd/mm/aaaa).')
+                                            return
+                                          }
+                                          if (!/^\d{2}\/\d{2}\/\d{4}$/.test(t)) {
+                                            setRelatorioOcorrenciaError(
+                                              'Informe a data de devolução no formato dd/mm/aaaa.',
+                                            )
+                                            return
+                                          }
+                                        }
                                         setRelatorioOcorrenciaSaving(true)
                                         setRelatorioOcorrenciaError(null)
                                         try {
@@ -9791,13 +20816,29 @@ export default function CreditoPage() {
                                               ? '/api/consignado/conciliacao/recurso-vs-relatorio/alterar-orgao-relatorio'
                                               : isLiquidacaoCcs
                                                 ? '/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-ccs-excluir-relatorio'
-                                                : isNaoPossuiRecurso
+                                                : isLiquidacaoProcessoJudicial
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-processo-judicial-excluir-relatorio'
+                                                  : isNaoPossuiRecurso
                                                   ? '/api/consignado/conciliacao/recurso-vs-relatorio/nao-possui-recurso'
                                                   : isLiquidacaoForaVencimento
                                                     ? '/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-fora-vencimento'
+                                                : isLiquidacaoAntecipadaViaCaixa
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-antecipada-via-caixa'
+                                                : isLiquidacaoRecursoJudical
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-recurso-judicial'
+                                                : isRecursoRecebidoAMaior
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/recurso-recebido-a-maior'
+                                                : isDevolucaoParcialAverbacao
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/devolucao-parcial-averbacao'
+                                                : isRecursoRecebidoAMenor
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/recurso-recebido-a-menor'
                                                 : isRecursoJudicialValorAMenor
                                                   ? '/api/consignado/conciliacao/recurso-vs-relatorio/recurso-judicial-valor-a-menor'
-                                                : '/api/consignado/conciliacao/recurso-vs-relatorio/repactuacao-relatorio',
+                                                : isEstornoValores
+                                                  ? '/api/consignado/conciliacao/recurso-vs-relatorio/estorno-valores'
+                                                  : isAntecipadoDevolvido
+                                                    ? '/api/consignado/conciliacao/recurso-vs-relatorio/antecipado-devolvido'
+                                                    : '/api/consignado/conciliacao/recurso-vs-relatorio/repactuacao-relatorio',
                                             {
                                               method: 'POST',
                                               headers: { 'content-type': 'application/json' },
@@ -9825,7 +20866,18 @@ export default function CreditoPage() {
                                                         action: relatorioOcorrenciaAction,
                                                         justification: relatorioOcorrenciaJustification,
                                                       }
-                                                    : isNaoPossuiRecurso
+                                                    : isLiquidacaoProcessoJudicial
+                                                      ? {
+                                                          month: conciliacaoMonth,
+                                                          orgao: conciliacaoOrgao.trim(),
+                                                          cpf: ocorrenciaModal.cpf,
+                                                          nome: ocorrenciaModal.nome,
+                                                          value: ocorrenciaModal.value,
+                                                          fromEmpresa: ocorrenciaModal.empresa,
+                                                          action: relatorioOcorrenciaAction,
+                                                          justification: relatorioOcorrenciaJustification,
+                                                        }
+                                                      : isNaoPossuiRecurso
                                                       ? {
                                                           month: conciliacaoMonth,
                                                           orgao: conciliacaoOrgao.trim(),
@@ -9850,6 +20902,91 @@ export default function CreditoPage() {
                                                             action: relatorioOcorrenciaAction,
                                                             justification: relatorioOcorrenciaJustification,
                                                           }
+                                                      : isLiquidacaoAntecipadaViaCaixa
+                                                        ? {
+                                                            month: conciliacaoMonth,
+                                                            orgao: conciliacaoOrgao.trim(),
+                                                            cpf: ocorrenciaModal.cpf,
+                                                            nome: ocorrenciaModal.nome,
+                                                            value: ocorrenciaModal.value,
+                                                            fromEmpresa: ocorrenciaModal.empresa,
+                                                            liquidationDate:
+                                                              relatorioLiquidacaoAntecipadaViaCaixaDate.trim(),
+                                                            liquidatedValue:
+                                                              relatorioLiquidacaoAntecipadaViaCaixaValor.trim(),
+                                                            action: relatorioOcorrenciaAction,
+                                                            justification: relatorioOcorrenciaJustification,
+                                                          }
+                                                      : isLiquidacaoRecursoJudical
+                                                        ? {
+                                                            month: conciliacaoMonth,
+                                                            orgao: conciliacaoOrgao.trim(),
+                                                            cpf: ocorrenciaModal.cpf,
+                                                            nome: ocorrenciaModal.nome,
+                                                            value: ocorrenciaModal.value,
+                                                            fromEmpresa: ocorrenciaModal.empresa,
+                                                            liquidationDate:
+                                                              relatorioLiquidacaoRecursoJudicalDate.trim(),
+                                                            liquidatedValue:
+                                                              relatorioLiquidacaoRecursoJudicalValor.trim(),
+                                                            action: relatorioOcorrenciaAction,
+                                                            justification: relatorioOcorrenciaJustification,
+                                                          }
+                                                      : isRecursoRecebidoAMaior
+                                                        ? {
+                                                            month: conciliacaoMonth,
+                                                            orgao: conciliacaoOrgao.trim(),
+                                                            cpf: ocorrenciaModal.cpf,
+                                                            nome: ocorrenciaModal.nome,
+                                                            value: ocorrenciaModal.value,
+                                                            fromEmpresa: ocorrenciaModal.empresa,
+                                                            liquidationDate:
+                                                              relatorioRecursoRecebidoMaiorLiquidacaoDate.trim(),
+                                                            devolucaoDate:
+                                                              relatorioRecursoRecebidoMaiorDevolucaoDate.trim(),
+                                                            devolucaoValue:
+                                                              relatorioRecursoRecebidoMaiorDevolucaoValor.trim(),
+                                                            action: relatorioOcorrenciaAction,
+                                                            justification: relatorioOcorrenciaJustification,
+                                                          }
+                                                      : isDevolucaoParcialAverbacao
+                                                        ? {
+                                                            month: conciliacaoMonth,
+                                                            orgao: conciliacaoOrgao.trim(),
+                                                            cpf: ocorrenciaModal.cpf,
+                                                            nome: ocorrenciaModal.nome,
+                                                            value: ocorrenciaModal.value,
+                                                            fromEmpresa: ocorrenciaModal.empresa,
+                                                            liquidationDate:
+                                                              relatorioDevolucaoParcialLiquidacaoDate.trim(),
+                                                            devolucaoDate:
+                                                              relatorioDevolucaoParcialDevolucaoDate.trim(),
+                                                            devolucaoValue:
+                                                              relatorioDevolucaoParcialDevolucaoValor.trim(),
+                                                            action: relatorioOcorrenciaAction,
+                                                            justification: relatorioOcorrenciaJustification,
+                                                          }
+                                                      : isRecursoRecebidoAMenor
+                                                        ? {
+                                                            month: conciliacaoMonth,
+                                                            orgao: conciliacaoOrgao.trim(),
+                                                            cpf: ocorrenciaModal.cpf,
+                                                            nome: ocorrenciaModal.nome,
+                                                            value: ocorrenciaModal.value,
+                                                            fromEmpresa: ocorrenciaModal.empresa,
+                                                            liquidationDate:
+                                                              relatorioRecursoRecebidoMenorLiquidacaoDate.trim(),
+                                                            debitAccountDate:
+                                                              relatorioRecursoRecebidoMenorDebitoDate.trim(),
+                                                            debitAccountValue:
+                                                              relatorioRecursoRecebidoMenorDebitoValor.trim(),
+                                                            noDebitInAccount:
+                                                              relatorioRecursoRecebidoMenorNoDebitInAccount,
+                                                          differenceValue:
+                                                            relatorioRecursoRecebidoMenorDifferenceValor.trim(),
+                                                            action: relatorioOcorrenciaAction,
+                                                            justification: relatorioOcorrenciaJustification,
+                                                          }
                                                       : isRecursoJudicialValorAMenor
                                                         ? {
                                                             month: conciliacaoMonth,
@@ -9862,6 +20999,37 @@ export default function CreditoPage() {
                                                             action: relatorioOcorrenciaAction,
                                                             justification: relatorioOcorrenciaJustification,
                                                           }
+                                                        : isEstornoValores
+                                                          ? {
+                                                              month: conciliacaoMonth,
+                                                              orgao: conciliacaoOrgao.trim(),
+                                                              cpf: ocorrenciaModal.cpf,
+                                                              nome: ocorrenciaModal.nome,
+                                                              value: ocorrenciaModal.value,
+                                                              fromEmpresa: ocorrenciaModal.empresa,
+                                                              estornoLiquidationDate:
+                                                                relatorioEstornoLiquidacaoDate.trim(),
+                                                              estornoDate: relatorioEstornoDate.trim(),
+                                                              estornoValue: relatorioEstornoValor.trim(),
+                                                              liquidationDate: getRelatorioNovaLiquidacaoDate(
+                                                                ocorrenciaModal,
+                                                              ).trim(),
+                                                              correctValue: ocorrenciaModal.value,
+                                                              action: relatorioOcorrenciaAction,
+                                                              justification: relatorioOcorrenciaJustification,
+                                                            }
+                                                          : isAntecipadoDevolvido
+                                                            ? {
+                                                                month: conciliacaoMonth,
+                                                                orgao: conciliacaoOrgao.trim(),
+                                                                cpf: ocorrenciaModal.cpf,
+                                                                nome: ocorrenciaModal.nome,
+                                                                value: ocorrenciaModal.value,
+                                                                devolucaoDate:
+                                                                  relatorioAntecipadoDevolvidoDate.trim(),
+                                                                action: relatorioOcorrenciaAction,
+                                                                justification: relatorioOcorrenciaJustification,
+                                                              }
                                                     : {
                                                         month: conciliacaoMonth,
                                                         orgao: conciliacaoOrgao.trim(),
@@ -9909,6 +21077,15 @@ export default function CreditoPage() {
                                           : relatorioOcorrenciaAction ===
                                                 'liquidacao_ccs_relatorio_sisbr'
                                             ? 'Excluir do Relatório SISBR'
+                                            : relatorioOcorrenciaAction ===
+                                                  'liquidacao_processo_judicial_relatorio_sisbr'
+                                                ? 'Excluir do Relatório SISBR'
+                                                : relatorioOcorrenciaAction ===
+                                                      'devolucao_parcial_averbacao_relatorio_sisbr'
+                                              ? 'Registrar devolução parcial'
+                                            : relatorioOcorrenciaAction ===
+                                                  'estorno_valores_relatorio_sisbr'
+                                              ? 'Registrar estorno'
                                             : relatorioOcorrenciaAction ===
                                                   'nao_possui_recurso_relatorio_sisbr'
                                               ? 'Registrar e enviar'
@@ -9970,7 +21147,7 @@ export default function CreditoPage() {
                     ) : (
                       <span className="chip">
                         <Info size={16} />
-                        Selecione
+                        Todos os órgãos
                       </span>
                     )}
                   </div>
@@ -10001,10 +21178,10 @@ export default function CreditoPage() {
                           disabled={orgaoDeParaLoading}
                           style={{ height: 44 }}
                         >
-                          <option value="">Selecione...</option>
+                          <option value="">Todos os órgãos</option>
                           {conciliacaoOrgaoOptions.map((o) => (
                             <option key={o} value={o}>
-                              {o}
+                              {formatConciliacaoOrgaoLabel(o)}
                             </option>
                           ))}
                         </select>
@@ -10057,7 +21234,7 @@ export default function CreditoPage() {
                           !conciliacaoOrgao.trim() ||
                           !conciliacaoMonthOptions.some((o) => o.value === conciliacaoMonth)
                         }
-                        onClick={() => void exportConciliacaoXlsx()}
+                        onClick={() => openConciliacaoExportModal('xlsx')}
                         style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                       >
                         <FileSpreadsheet size={18} />
@@ -10081,6 +21258,73 @@ export default function CreditoPage() {
                 </section>
 
                 <section className="grid">
+                  <div className="panel" style={{ gridColumn: '1 / -1' }}>
+                    <div className="panel-head">
+                      <h2>Ocorrências pendentes por categoria</h2>
+                      <span className="chip">
+                        <GitBranch size={16} />
+                        Dashboard
+                      </span>
+                    </div>
+                    <div className="panel-body">
+                      {homeOcorrenciasAbertasLoading ? (
+                        <div className="help">Carregando gráfico de pendências...</div>
+                      ) : homeOcorrenciasAbertasError ? (
+                        <div className="help" style={{ color: 'rgba(255, 99, 132, 0.95)' }}>
+                          {homeOcorrenciasAbertasError}
+                        </div>
+                      ) : dashboardPendenciasCategoriaChart ? (
+                        <div style={{ display: 'grid', gap: 14 }}>
+                          <div
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              gap: 12,
+                              flexWrap: 'wrap',
+                              alignItems: 'center',
+                            }}
+                          >
+                            <div style={{ display: 'grid', gap: 4 }}>
+                              <strong style={{ fontSize: '1rem' }}>
+                                Total de pendências abertas: {dashboardPendenciasCategoriaChart.total}
+                              </strong>
+                              <small style={{ opacity: 0.76 }}>
+                                `Negócios` aparece segmentado por gerente responsável.
+                              </small>
+                            </div>
+                            {dashboardPendenciasCategoriaChart.negociosEntries.length > 0 ? (
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  gap: 8,
+                                  flexWrap: 'wrap',
+                                  justifyContent: 'flex-end',
+                                }}
+                              >
+                                {dashboardPendenciasCategoriaChart.negociosEntries.map(([label, count]) => (
+                                  <span key={label} className="chip">
+                                    {label}: {count}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                          <ReactECharts
+                            option={dashboardPendenciasCategoriaChart.option}
+                            style={{ height: 320, width: '100%' }}
+                            opts={{ renderer: 'canvas' }}
+                          />
+                        </div>
+                      ) : (
+                        <div className="help">
+                          {conciliacaoOrgao.trim()
+                            ? 'Nenhuma pendência aberta para a competência e órgão selecionados.'
+                            : 'Nenhuma pendência aberta para a competência selecionada.'}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
                   <div className="panel">
                     <div className="panel-head">
                       <h2>Status da Conciliação</h2>
@@ -10263,7 +21507,7 @@ export default function CreditoPage() {
                           const tarifasCents =
                             (Number(totals?.tarifaLinha?.cents ?? 0) || 0) +
                             (Number(totals?.tarifaTed?.cents ?? 0) || 0)
-                          const diffCents = extratosCents - recursoCents
+                          const diffCents = extratosCents - relatorioCents
                           const seriesData = [
                             { name: 'Recurso', value: recursoCents },
                             { name: 'Extrato', value: extratosCents },
@@ -10273,10 +21517,7 @@ export default function CreditoPage() {
                           ]
                           const maxAbs = Math.max(...seriesData.map((x) => Math.abs(x.value)), 1)
                           const limit = Math.ceil(maxAbs * 1.15)
-                          const fmtSigned = (cents: number) => {
-                            const sign = cents < 0 ? '- ' : ''
-                            return `${sign}R$ ${centsToPtBr(Math.abs(cents))}`
-                          }
+                          const fmtSigned = (cents: number) => withCurrency(centsToPtBr(cents))
                           const colorOf = (name: string) => {
                             if (name === 'Extrato') return '#00AE9D'
                             if (name === 'Recurso') return '#F5C542'
