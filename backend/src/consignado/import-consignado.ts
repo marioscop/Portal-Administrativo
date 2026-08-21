@@ -9496,6 +9496,16 @@ function resolveRecursoTableForOrgao(
       orgaoKey.includes('PIX RECEBIDO OUTRA IF') ||
       orgaoKeyCompact.includes('PIXRECEBIDOOUTRAIF'));
 
+  const goiasPrevTable = 'Recurso GOIAS PREVIDENCIA - GOIASPREV';
+  const hasGoiasPrev = tableExists(db, goiasPrevTable);
+  const isGoiasPrev =
+    Boolean(orgaoKey) &&
+    (orgaoKey.includes('GOIAS PREVIDENCIA') ||
+      orgaoKey.includes('GOIASPREV') ||
+      orgaoKeyCompact.includes('GOIASPREVIDENCIAGOIASPREV') ||
+      orgaoKeyCompact.includes('GOIASPREV') ||
+      orgaoKeyCompact.includes('PREVIDENCIA') && orgaoKeyCompact.includes('GOIAS'));
+
   if (isMpgo && hasMpgo) return mpgoTable;
   if (isAlego && hasAlego) return alegoTable;
   if (isTcm && hasTcm) return tcmTable;
@@ -9506,16 +9516,29 @@ function resolveRecursoTableForOrgao(
   if (isDgap && hasDgap) return dgapTable;
   if (isAdfego && hasAdfego) return adfegoTable;
   if (isEletra && hasEletra) return eletraTable;
+  if (isGoiasPrev && hasGoiasPrev) return goiasPrevTable;
 
   {
     const raw = String(orgaoInput ?? '')
       .replace(/\s+/g, ' ')
       .trim();
+    const compactOnlyAlnum = (s: string): string =>
+      String(s ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
     if (raw) {
       const directTable = `Recurso ${raw}`;
       if (tableExists(db, directTable)) return directTable;
+      const variants = [
+        `Recurso ${raw.replace(/\s+GOIASPREV$/i, ' - GOIASPREV')}`,
+        `Recurso ${raw.replace(/\s+(GOIASPREV|TJGO|TCM|TCE|TRE|TRT|MPGO|ALEGO|ADFEGO|SEAP|SEGUP|SEFAZ|SUCAP|JUCEG)$/i, ' - $1')}`,
+      ];
+      for (const v of variants) if (tableExists(db, v)) return v;
 
       const wantedKey = normalizeHeaderKey(raw);
+      const wantedCompact = compactOnlyAlnum(raw);
       const res = db.exec(
         `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Recurso %';`,
       );
@@ -9531,12 +9554,20 @@ function resolveRecursoTableForOrgao(
       for (const t of candidates) {
         const withoutPrefix = t.replace(/^Recurso\s+/i, '').trim();
         const key = normalizeHeaderKey(withoutPrefix);
-        if (!key || !wantedKey) continue;
+        const keyCompact = compactOnlyAlnum(withoutPrefix);
+        if ((!key && !keyCompact) || (!wantedKey && !wantedCompact)) continue;
         if (key === wantedKey) return t;
-        const a = key.includes(wantedKey);
-        const b = wantedKey.includes(key);
+        if (keyCompact && wantedCompact && keyCompact === wantedCompact) return t;
+        const a = key && wantedKey && (key.includes(wantedKey) || wantedKey.includes(key));
+        const b =
+          keyCompact &&
+          wantedCompact &&
+          (keyCompact.includes(wantedCompact) || wantedCompact.includes(keyCompact));
         if (!a && !b) continue;
-        const score = Math.min(key.length, wantedKey.length);
+        const score = Math.max(
+          a ? Math.min(key.length, wantedKey.length) : -1,
+          b ? Math.min(keyCompact.length, wantedCompact.length) : -1,
+        );
         if (score > bestScore) {
           bestScore = score;
           best = t;
@@ -11732,6 +11763,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
   const quitadoByDate = new Map<string, number>();
   const antecipadoDevolvidoByDate = new Map<string, number>();
   const recursoRecebidoMenorNoDebitByDate = new Map<string, number>();
+  const recursoRecebidoMenorDebitByDate = new Map<string, number>();
   const devolucaoParcialAverbacaoValorByDate = new Map<string, number>();
   const liquidacaoNormalEstornadaByDate = new Map<string, number>();
   const estornoByDate = new Map<string, number>();
@@ -11853,6 +11885,18 @@ function computeConsolidadoPorDataForContabilidade(opts: {
         liqDate,
         (recursoRecebidoMenorNoDebitByDate.get(liqDate) ?? 0) + diffCents,
       );
+    } else if (isRecursoRecebidoMenor && !Boolean(o?.noDebitInAccount)) {
+      const debitAccountDate = typeof o?.debitAccountDate === 'string' ? o.debitAccountDate.trim() : '';
+      const date = debitAccountDate && /^\d{2}\/\d{2}\/\d{4}$/.test(debitAccountDate)
+        ? debitAccountDate
+        : (typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '');
+      if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
+      const debitCents = parseMoneyToCents(o?.debitAccountValue ?? o?.differenceValue ?? o?.value);
+      if (debitCents === null || debitCents <= 0) continue;
+      recursoRecebidoMenorDebitByDate.set(
+        date,
+        (recursoRecebidoMenorDebitByDate.get(date) ?? 0) + debitCents,
+      );
     }
   }
   for (const r of relatorio) {
@@ -11967,6 +12011,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       ...recursoJudicialEditedByDate.keys(),
       ...repactuacaoEmAndamentoByDate.keys(),
       ...recursoRecebidoMenorNoDebitByDate.keys(),
+      ...recursoRecebidoMenorDebitByDate.keys(),
     ]),
   );
   dates.sort(sortDatePtBr);
@@ -11997,6 +12042,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     const recursoJudicialOriginalCents = recursoJudicialOriginalByDate.get(date) ?? 0;
     const recursoJudicialDiffCents = recursoJudicialDiffByDate.get(date) ?? 0;
     const recursoRecebidoMenorNoDebitCents = recursoRecebidoMenorNoDebitByDate.get(date) ?? 0;
+    const recursoRecebidoMenorDebitCents = recursoRecebidoMenorDebitByDate.get(date) ?? 0;
     const relatorioCents = relatorioCentsRaw - repactuacaoCents;
 
     if (relatorioCents !== 0 || extratosCents !== 0) {
@@ -12149,6 +12195,19 @@ function computeConsolidadoPorDataForContabilidade(opts: {
         extratosCents: 0,
         saldoCents: runningSaldo,
         event: 'RECURSO RECEBIDO A MENOR (SEM DÉBITO)',
+        skipAdjustDate: true,
+      });
+    }
+
+    if (recursoRecebidoMenorDebitCents !== 0) {
+      runningSaldo += -recursoRecebidoMenorDebitCents;
+      out.push({
+        vencimento: date,
+        recursoCents: 0,
+        relatorioCents: recursoRecebidoMenorDebitCents,
+        extratosCents: 0,
+        saldoCents: runningSaldo,
+        event: 'RECURSO RECEBIDO A MENOR (DÉBITO EM CONTA)',
         skipAdjustDate: true,
       });
     }
@@ -28967,228 +29026,1057 @@ async function createConciliacaoAnaliticaXlsxBuffer(opts: {
 }
 
 
-async function createConciliacaoPdfBuffer(opts: any): Promise<Buffer> {
-  const sanitizeText = (v: unknown) =>
-    String(v ?? '')
-      .replace(/[\u0000-\u001F\u007F]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  const formatMoneyBr = (cents: number) => {
-    const n = Number.isFinite(cents) ? cents / 100 : 0;
-    return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+async function createConciliacaoPdfBuffer(opts: {
+  monthKey: string;
+  orgao: string;
+  vencimento: string | null;
+  evidencePng: Buffer | null;
+  fechamento: {
+    mode: 'aberta' | 'total' | 'parcial';
+    vencimentoFechado: string | null;
+    vencimentosPendentes: string[];
   };
-  const totalExtratos = Number((opts as any)?.totals?.extratosCents ?? 0) || 0;
-  const totalRecurso = Number((opts as any)?.totals?.recursoCents ?? 0) || 0;
-  const totalTarifaLinha = Number((opts as any)?.totals?.tarifaLinhaCents ?? 0) || 0;
-  const totalTarifaTed = Number((opts as any)?.totals?.tarifaTedCents ?? 0) || 0;
-  const totalRecursoLiq = totalRecurso - (totalTarifaLinha + totalTarifaTed);
-  const totalRecursoRecebidoMaiorEstornoCents =
-    Number((opts as any)?.totals?.recursoRecebidoMaiorEstornoCents ?? 0) ||
-    Number((opts as any)?.totals?.recursoRecebidoMaiorEstorno?.cents ?? 0) ||
-    0;
-  const totalSaldo = totalExtratos - totalRecursoLiq - totalRecursoRecebidoMaiorEstornoCents;
-  const fechamentoMode = String((opts.fechamento as any)?.mode ?? 'aberta').trim() || 'aberta';
-  const closedByRaw = typeof opts.closedBy === 'string' ? opts.closedBy : null;
-  const closedAtRaw = typeof opts.closedAt === 'string' ? opts.closedAt : null;
+  consolidadoPorVencimento: Array<{
+    vencimento: string;
+    recursoCents: number;
+    relatorioCents: number;
+    extratosCents: number;
+    saldoCents: number;
+    event?: string;
+    skipAdjustDate?: boolean;
+  }>;
+  totals: {
+    extratosCents: number;
+    recursoCents: number;
+    tarifaLinhaCents: number;
+    tarifaTedCents: number;
+    recursoRecebidoMaiorEstornoCents?: number;
+  };
+  closedBy: string | null;
+  closedAt: string | null;
+  ocorrencias: Array<{
+    cpf: string;
+    nome: string;
+    contrato?: string;
+    value: string;
+    action: string;
+    justification: string;
+    devolucaoDate?: string;
+    devolucaoValue?: string;
+    judicialEditedValue?: string;
+    relatedOccurrenceLabel?: string;
+    estornoLiquidationDate?: string;
+    estornoDate?: string;
+    estornoValue?: string;
+    liquidationDate?: string;
+    correctValue?: string;
+    createdAt: string;
+  }>;
+}): Promise<Buffer> {
+  const formatCurrency = (cents: number) => `R$ ${centsToPtBr(Math.abs(cents))}`;
+  const formatCurrencySigned = (cents: number) =>
+    cents < 0 ? `- ${formatCurrency(cents)}` : formatCurrency(cents);
+  const adjustToNextBusinessDayPtBr = (input: string) => {
+    const raw = String(input ?? '').trim();
+    if (!raw) return raw;
+    return raw.replace(/\b(\d{2})\/(\d{2})\/(\d{4})\b/g, (m, dd, mm, yyyy) => {
+      const d = Number(dd);
+      const mo = Number(mm);
+      const y = Number(yyyy);
+      if (!Number.isFinite(d) || !Number.isFinite(mo) || !Number.isFinite(y)) return m;
+      const date = new Date(y, mo - 1, d);
+      if (!Number.isFinite(date.getTime())) return m;
+      const dow = date.getDay();
+      const addDays = dow === 6 ? 2 : dow === 0 ? 1 : 0;
+      if (addDays === 0) return m;
+      const next = new Date(date);
+      next.setDate(next.getDate() + addDays);
+      const ndd = String(next.getDate()).padStart(2, '0');
+      const nmm = String(next.getMonth() + 1).padStart(2, '0');
+      const nyyyy = String(next.getFullYear());
+      return `${ndd}/${nmm}/${nyyyy}`;
+    });
+  };
+  const vencimentoListText = String(opts.vencimento ?? '').trim();
+  const evidencePng = opts.evidencePng;
+  const debitLabel = 'DÉBITO FOLHA DE PAGAMENTO';
 
-  const pageWidthPt = 595.28;
-  const pageHeightPt = 841.89;
-  const marginPt = 32;
-  const innerWidthPt = pageWidthPt - marginPt * 2;
+  const consolidado = Array.isArray(opts.consolidadoPorVencimento)
+    ? opts.consolidadoPorVencimento.filter((x) => Boolean(x?.vencimento))
+    : [];
+  const mainRows =
+    consolidado.length > 0
+      ? consolidado
+      : [
+          {
+            vencimento: vencimentoListText,
+            recursoCents: opts.totals.recursoCents,
+            relatorioCents: 0,
+            extratosCents: opts.totals.extratosCents,
+            saldoCents: opts.totals.extratosCents - opts.totals.recursoCents,
+          },
+        ];
+  const naoPossuiRecursoEvent = 'NÃO POSSUI RECURSO';
+  const mainRowsForTable = mainRows.filter(
+    (r: any) => String(r?.event ?? '').trim() !== naoPossuiRecursoEvent,
+  );
+  const compactMode = mainRowsForTable.length > 1;
 
-  const doc = new (PDFDocument as any)({ size: [pageWidthPt, pageHeightPt], margin: marginPt, bufferPages: true });
-  const chunks: Uint8Array[] = [];
-  doc.on('data', (c: Uint8Array) => chunks.push(c));
-  const donePromise = new Promise<Buffer>((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+  const doc = new PDFDocument({ size: 'A4', layout: 'portrait', margin: 36 });
+  const chunks: Buffer[] = [];
+  const out = new Promise<Buffer>((resolve, reject) => {
+    doc.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
 
-  doc.registerFont && (() => {})();
+  const footerText = `© 2026 Sicoob Juriscred • Consignados\nDesenvolvido Por: Tecnologia da Informação Jusriscred\nEsse relatório foi gerado automático por agentes de IA, pode cometer erros.`;
+  const getFooterLayout = () => {
+    const pageWidth = doc.page.width;
+    const marginLeft = doc.page.margins.left;
+    const marginRight = doc.page.margins.right;
+    const contentWidth = pageWidth - marginLeft - marginRight;
+    doc.fillColor('#444444').fontSize(8.5).font('Helvetica');
+    const h = doc.heightOfString(footerText, { width: contentWidth, align: 'center' });
+    const y = doc.page.height - doc.page.margins.bottom - h;
+    return { y, h, marginLeft, contentWidth };
+  };
+  const getContentBottomY = () => {
+    const { y: footerY } = getFooterLayout();
+    return footerY - 8;
+  };
 
-  const renderHeader = () => {
+  const headerH = 58;
+  let logoBuf: Buffer | null = null;
+  try {
+    const candidates = [
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
+    ];
+    const logoPath = candidates.find((p) => fs.existsSync(p));
+    logoBuf = logoPath ? fs.readFileSync(logoPath) : null;
+  } catch {
+    logoBuf = null;
+  }
+
+  const vencHeader = (() => {
+    const raw = String(opts.vencimento ?? '').trim();
+    if (!raw) return 'Vencimento: TOTAL';
+    const parts = raw
+      .split(/[;\n,]+/g)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (parts.length === 0) return 'Vencimento: TOTAL';
+    const first = parts[0];
+    const rest = parts.length - 1;
+    return rest > 0 ? `Vencimentos: ${first} (+${rest})` : `Vencimento: ${first}`;
+  })();
+  const showClosedMeta = opts.fechamento.mode !== 'aberta';
+  const headerClosedBy = showClosedMeta ? String(opts.closedBy ?? '').trim() : '';
+  const headerClosedAt = showClosedMeta && opts.closedAt ? formatIsoToPtBrDateTime(opts.closedAt) : '';
+  // #region debug-point B:pdf-buffer-header-meta
+  ;(() => {
+    let u = 'http://127.0.0.1:7777/event';
+    let s = 'pdf-closed-header';
     try {
-      const candidates = [
-        path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-        path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-        path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
-      ];
-      const logoPath = candidates.find((p) => fs.existsSync(p));
-      if (logoPath) doc.image(logoPath, marginPt, marginPt - 6, { width: 160 });
+      const e = fs.readFileSync('.dbg/pdf-closed-header.env', 'utf8');
+      u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+      s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
     } catch {
       void 0;
     }
-    doc.fontSize(14).font('Helvetica-Bold');
-    doc.fillColor('#0f172a').text('CONCILIAÇÃO - RECURSO x RELATÓRIO SISBR', marginPt, marginPt + 8, {
-      width: innerWidthPt,
-      align: 'right',
+    fetch(u, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: s,
+        runId: 'pre',
+        hypothesisId: 'B',
+        location: 'import-consignado.ts:createConciliacaoPdfBuffer',
+        msg: '[DEBUG] pdf_buffer_header_meta',
+        data: {
+          orgao: opts.orgao,
+          vencimento: opts.vencimento,
+          fechamentoMode: opts.fechamento.mode,
+          rawClosedBy: String(opts.closedBy ?? '').trim() || null,
+          rawClosedAt: String(opts.closedAt ?? '').trim() || null,
+          showClosedMeta,
+          headerClosedBy: headerClosedBy || null,
+          headerClosedAt: headerClosedAt || null,
+        },
+        ts: Date.now(),
+      }),
+    }).catch(() => {
+      void 0;
     });
-    doc.moveDown(0.6);
-    doc.fontSize(10).font('Helvetica').fillColor('#475569');
-    doc.text(`Competência: ${sanitizeText(opts.monthKey)}`, marginPt, doc.y, { continued: true });
-    doc.text(`Órgão: ${sanitizeText(opts.orgao)}`, { align: 'right' });
-    if (opts.vencimento) {
-      doc.text(`Vencimento: ${sanitizeText(opts.vencimento)}`, marginPt, doc.y, { continued: true });
+  })();
+  // #endregion
+
+  const headerRight = [
+    vencHeader,
+    headerClosedBy ? `Fechado por: ${headerClosedBy}` : '',
+    headerClosedAt ? `Data/Hora: ${headerClosedAt}` : '',
+  ]
+    .filter(Boolean)
+    .join(' • ');
+  const drawHeader = () => {
+    const pageWidth = doc.page.width;
+    const marginLeft = doc.page.margins.left;
+    const marginRight = doc.page.margins.right;
+    const contentWidth = pageWidth - marginLeft - marginRight;
+    doc.save().rect(0, 0, pageWidth, headerH).fill('#003641').restore();
+    const reserveLeftForLogo = logoBuf ? Math.min(180, Math.max(120, Math.round(contentWidth * 0.28))) : 0;
+    if (logoBuf) {
+      const logoH = 36;
+      const logoY = (headerH - logoH) / 2;
+      doc.image(logoBuf, marginLeft, logoY, { height: logoH });
     }
-    doc.font('Helvetica-Bold').fillColor(fechamentoMode === 'aberta' ? '#b45309' : '#065f46');
-    doc.text(`Situação: ${fechamentoMode === 'aberta' ? 'Em aberto' : fechamentoMode === 'total' ? 'Fechada (total)' : 'Fechada (parcial)'}`, { align: 'right' });
-    doc.font('Helvetica').fillColor('#475569');
-    if (closedByRaw || closedAtRaw) {
-      doc.text(
-        `Fechado por: ${sanitizeText(closedByRaw || '—')}  em  ${closedAtRaw ? sanitizeText(closedAtRaw) : '—'}`,
-        marginPt,
-        doc.y,
-        { align: 'right' },
+    doc.fillColor('#FFFFFF').font('Helvetica');
+    const headerX = marginLeft + reserveLeftForLogo;
+    const headerW = Math.max(10, contentWidth - reserveLeftForLogo);
+    let headerFontSize = 10;
+    while (headerFontSize > 6.5) {
+      doc.fontSize(headerFontSize);
+      const w = doc.widthOfString(headerRight);
+      if (w <= headerW) break;
+      headerFontSize -= 0.5;
+    }
+    doc.text(headerRight, headerX, 18, { width: headerW, align: 'right', lineBreak: false });
+    return { marginLeft, marginRight, contentWidth };
+  };
+  const { marginLeft, marginRight, contentWidth } = drawHeader();
+
+  let y = headerH + 14;
+  const title = `CONSIGNADOS  CONFERÊNCIA - ${monthKeyToPtBrUpper(opts.monthKey)}`;
+  doc.fillColor('#000000').fontSize(16).font('Helvetica-Bold').text(title, marginLeft, y, {
+    width: contentWidth,
+    align: 'center',
+  });
+  y += 26;
+
+  doc
+    .fillColor('#003641')
+    .fontSize(12)
+    .font('Helvetica-Bold')
+    .text(`RECURSO: ${opts.orgao}`, marginLeft, y, { width: contentWidth, align: 'left' });
+  y += 18;
+
+  const fechamentoModeLabel =
+    opts.fechamento.mode === 'parcial'
+      ? 'Fechamento: PARCIAL'
+      : opts.fechamento.mode === 'total'
+        ? 'Fechamento: TOTAL'
+        : 'Conciliação: ABERTA';
+  const fechamentoDetail =
+    opts.fechamento.mode === 'parcial' && opts.fechamento.vencimentoFechado
+      ? ` • Vencimento fechado: ${opts.fechamento.vencimentoFechado}`
+      : '';
+  const pendentes = Array.isArray(opts.fechamento.vencimentosPendentes)
+    ? opts.fechamento.vencimentosPendentes
+    : [];
+  const pendentesText =
+    pendentes.length > 0 ? pendentes.join(' | ') : 'Nenhum';
+
+  doc.fillColor('#000000').fontSize(9.5).font('Helvetica-Bold');
+  doc.text(`${fechamentoModeLabel}${fechamentoDetail}`, marginLeft, y, { width: contentWidth, align: 'left' });
+  y += doc.heightOfString(`${fechamentoModeLabel}${fechamentoDetail}`, { width: contentWidth, align: 'left' }) + 2;
+  doc.fillColor('#000000').fontSize(8.5).font('Helvetica');
+  doc.text(`Vencimentos pendentes: ${pendentesText}`, marginLeft, y, { width: contentWidth, align: 'left' });
+  y += doc.heightOfString(`Vencimentos pendentes: ${pendentesText}`, { width: contentWidth, align: 'left' }) + 10;
+
+  let colDate = Math.max(56, Math.round(contentWidth * 0.14));
+  let colMoney = Math.max(62, Math.round(contentWidth * 0.17));
+  let colEvent = contentWidth - (colDate + colMoney * 3);
+  if (colEvent < 120) {
+    const need = 120 - colEvent;
+    const reducePer = Math.ceil(need / 3);
+    colMoney = Math.max(55, colMoney - reducePer);
+    colEvent = contentWidth - (colDate + colMoney * 3);
+  }
+  if (colEvent < 120) {
+    const need = 120 - colEvent;
+    colDate = Math.max(50, colDate - need);
+    colEvent = contentWidth - (colDate + colMoney * 3);
+  }
+  const colDebit = colMoney;
+  const colCredit = colMoney;
+  const colSaldo = colMoney;
+  const x0 = marginLeft;
+
+  const rowH = compactMode ? 20 : 22;
+  const bodyFontSize = compactMode ? 8.5 : 9;
+  const drawRow = (
+    cells: { date?: string; event: string; debit?: string; credit?: string; saldo?: string },
+    optsRow?: { fill?: string; bold?: boolean; saldoColor?: string; debitColor?: string },
+  ) => {
+    const fill = optsRow?.fill;
+    if (fill) {
+      doc.save().rect(x0, y, colDate + colEvent + colDebit + colCredit + colSaldo, rowH).fill(fill).restore();
+    }
+    doc.lineWidth(0.8).strokeColor('#000000');
+    doc.rect(x0, y, colDate, rowH).stroke();
+    doc.rect(x0 + colDate, y, colEvent, rowH).stroke();
+    doc.rect(x0 + colDate + colEvent, y, colDebit, rowH).stroke();
+    doc.rect(x0 + colDate + colEvent + colDebit, y, colCredit, rowH).stroke();
+    doc.rect(x0 + colDate + colEvent + colDebit + colCredit, y, colSaldo, rowH).stroke();
+
+    doc
+      .fillColor('#000000')
+      .fontSize(bodyFontSize)
+      .font(optsRow?.bold ? 'Helvetica-Bold' : 'Helvetica');
+    const padY = 6;
+    const dateText = cells.date ?? '';
+    const dateFontSize = dateText.length > 12 ? 7.5 : 9;
+    doc.fontSize(dateFontSize);
+    doc.text(cells.date ?? '', x0 + 6, y + padY, { width: colDate - 12, align: 'center' });
+    doc.fontSize(bodyFontSize);
+    const eventText = String(cells.event ?? '');
+    let eventFontSize = bodyFontSize;
+    while (eventFontSize > 6.5) {
+      doc.fontSize(eventFontSize);
+      const w = doc.widthOfString(eventText);
+      if (w <= colEvent - 12) break;
+      eventFontSize -= 0.5;
+    }
+    doc.text(eventText, x0 + colDate + 6, y + padY, {
+      width: colEvent - 12,
+      align: 'left',
+      lineBreak: false,
+    });
+    doc.fontSize(bodyFontSize);
+    doc.fillColor(optsRow?.debitColor ?? '#000000');
+    doc.text(cells.debit ?? '', x0 + colDate + colEvent + 6, y + padY, { width: colDebit - 12, align: 'right' });
+    doc.fillColor('#000000');
+    doc.text(cells.credit ?? '', x0 + colDate + colEvent + colDebit + 6, y + padY, { width: colCredit - 12, align: 'right' });
+    const saldoText = String(cells.saldo ?? '').trim();
+    const autoSaldoColor =
+      saldoText.startsWith('-') || saldoText.startsWith('−') ? '#C00000' : '#000000';
+    doc.fillColor(optsRow?.saldoColor ?? autoSaldoColor);
+    doc.text(cells.saldo ?? '', x0 + colDate + colEvent + colDebit + colCredit + 6, y + padY, { width: colSaldo - 12, align: 'right' });
+    y += rowH;
+  };
+
+  const drawResumoHeaderRow = () => {
+    drawRow(
+      { date: 'DATA', event: 'EVENTO/ HISTÓRICO', debit: 'DÉBITO', credit: 'CRÉDITO', saldo: 'SALDO R$' },
+      { fill: '#E6E6E6', bold: true },
+    );
+  };
+  const addResumoPage = () => {
+    doc.addPage({ size: 'A4', layout: 'portrait', margin: 36 });
+    drawHeader();
+    y = headerH + 14;
+    drawResumoHeaderRow();
+  };
+  const drawRowPaged = (
+    cells: { date?: string; event: string; debit?: string; credit?: string; saldo?: string },
+    optsRow?: { fill?: string; bold?: boolean; saldoColor?: string; debitColor?: string },
+  ) => {
+    if (y + rowH > getContentBottomY()) addResumoPage();
+    drawRow(cells, optsRow);
+  };
+
+  drawResumoHeaderRow();
+  const rowDebitCentsForTotals = (r: any) => {
+    const overrideEvent = typeof r?.event === 'string' ? String(r.event).trim() : '';
+    const relatorioCents = Number(r?.relatorioCents ?? 0) || 0;
+    const recursoCents = Number(r?.recursoCents ?? 0) || 0;
+    if (overrideEvent.startsWith('REPACTUAÇÃO EM ANDAMENTO')) {
+      return 0;
+    }
+    if (overrideEvent === 'RECURSO RECEBIDO A MENOR (SEM DÉBITO)') {
+      return 0;
+    }
+    if (
+      overrideEvent === 'DEVOLUÇÃO (QUITADO)' ||
+      overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)'
+    ) {
+      return recursoCents;
+    }
+    return relatorioCents !== 0 ? relatorioCents : recursoCents;
+  };
+  const totalMainDebit = mainRowsForTable.reduce((acc, r) => acc + rowDebitCentsForTotals(r), 0);
+  const totalMainCredit = mainRowsForTable.reduce(
+    (acc, r) => acc + (Number(r.extratosCents ?? 0) || 0),
+    0,
+  );
+  const totalMainSaldo = totalMainCredit - totalMainDebit;
+  for (const r of mainRowsForTable) {
+    const relatorioCents = Number((r as any).relatorioCents ?? 0) || 0;
+    const recursoCents = Number((r as any).recursoCents ?? 0) || 0;
+    const extratosCents = Number(r.extratosCents ?? 0) || 0;
+    const overrideEvent = typeof (r as any)?.event === 'string' ? String((r as any).event).trim() : '';
+    const debitCents =
+      overrideEvent === 'DEVOLUÇÃO (QUITADO)' || overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)'
+        ? recursoCents
+        : relatorioCents;
+    const computedEvent =
+      extratosCents > 0 && debitCents > 0
+        ? `RECEBIMENTO DE RECURSO • ${debitLabel}`
+        : extratosCents > 0
+          ? 'RECEBIMENTO DE RECURSO'
+          : debitLabel;
+    const event = overrideEvent || computedEvent;
+    const rawDate = String(r.vencimento ?? '').trim();
+    const skipAdjustDate = Boolean((r as any)?.skipAdjustDate);
+    drawRowPaged(
+      {
+        date: skipAdjustDate ? rawDate : adjustToNextBusinessDayPtBr(rawDate),
+        event,
+        debit: debitCents > 0 ? `- ${formatCurrency(debitCents)}` : '',
+        credit: extratosCents > 0 ? formatCurrency(extratosCents) : '',
+        saldo: formatCurrencySigned(Number(r.saldoCents ?? 0) || 0),
+      },
+      { bold: true, debitColor: '#C00000' },
+    );
+  }
+  drawRowPaged(
+    {
+      date: '',
+      event: 'TOTAL (DÉBITO / CRÉDITO)',
+      debit: `- ${formatCurrency(totalMainDebit)}`,
+      credit: formatCurrency(totalMainCredit),
+      saldo: formatCurrencySigned(totalMainSaldo),
+    },
+    {
+      fill: '#F2F2F2',
+      bold: true,
+      debitColor: '#C00000',
+      saldoColor: totalMainSaldo < 0 ? '#C00000' : '#000000',
+    },
+  );
+  if (opts.totals.tarifaLinhaCents > 0) {
+    drawRowPaged(
+      {
+        date: '',
+        event: 'Tarifa Linha',
+        debit: `- ${formatCurrency(opts.totals.tarifaLinhaCents)}`,
+        credit: '',
+        saldo: `- ${formatCurrency(opts.totals.tarifaLinhaCents)}`,
+      },
+      { saldoColor: '#C00000', debitColor: '#C00000' },
+    );
+  }
+  if (opts.totals.tarifaTedCents > 0) {
+    drawRowPaged(
+      {
+        date: '',
+        event: 'Tarifa TED',
+        debit: `- ${formatCurrency(opts.totals.tarifaTedCents)}`,
+        credit: '',
+        saldo: `- ${formatCurrency(opts.totals.tarifaTedCents)}`,
+      },
+      { saldoColor: '#C00000', debitColor: '#C00000' },
+    );
+  }
+  const totalTarifas = (Number(opts.totals.tarifaLinhaCents ?? 0) || 0) + (Number(opts.totals.tarifaTedCents ?? 0) || 0);
+  const totalTarifasSaldo = -totalTarifas;
+  drawRowPaged(
+    {
+      date: '',
+      event: 'TOTAL GERAL (APÓS TARIFAS)',
+      debit: totalTarifas > 0 ? `- ${formatCurrency(totalTarifas)}` : '',
+      credit: '',
+      saldo: totalTarifas > 0 ? formatCurrencySigned(totalTarifasSaldo) : formatCurrencySigned(0),
+    },
+    {
+      fill: '#E6E6E6',
+      bold: true,
+      debitColor: totalTarifas > 0 ? '#C00000' : undefined,
+      saldoColor: totalTarifas > 0 ? '#C00000' : '#000000',
+    },
+  );
+  const saldoGeralSomado = totalMainSaldo - totalTarifasSaldo;
+  const drawOuterOnlyRow = (cells: { label: string; saldo: string }, optsRow?: { fill?: string; bold?: boolean; saldoColor?: string }) => {
+    const fill = optsRow?.fill;
+    const totalW = colDate + colEvent + colDebit + colCredit + colSaldo;
+    if (y + rowH > getContentBottomY()) addResumoPage();
+    if (fill) {
+      doc.save().rect(x0, y, totalW, rowH).fill(fill).restore();
+    }
+    doc.lineWidth(0.8).strokeColor('#000000');
+    doc.rect(x0, y, totalW, rowH).stroke();
+    doc.fillColor('#000000').fontSize(bodyFontSize).font(optsRow?.bold ? 'Helvetica-Bold' : 'Helvetica');
+    const padY = 6;
+    doc.text(cells.label, x0 + 6, y + padY, { width: totalW - 12, align: 'left' });
+    doc.fillColor(optsRow?.saldoColor ?? '#000000');
+    doc.text(cells.saldo, x0 + 6, y + padY, { width: totalW - 12, align: 'right' });
+    y += rowH;
+  };
+  drawOuterOnlyRow(
+    {
+      label: 'TOTALIZADOR GERAL (SALDOS)',
+      saldo: formatCurrencySigned(saldoGeralSomado),
+    },
+    { fill: '#D9D9D9', bold: true, saldoColor: saldoGeralSomado < 0 ? '#C00000' : '#000000' },
+  );
+
+  y += compactMode ? 10 : 14;
+
+  const occs = Array.isArray(opts.ocorrencias) ? opts.ocorrencias : [];
+  const naoPossuiRecursoOcorrencias = occs.filter((o: any) =>
+    String(o?.action ?? '')
+      .trim()
+      .startsWith('nao_possui_recurso'),
+  );
+  const drawFooter = () => {
+    const { y: footerY, marginLeft, contentWidth } = getFooterLayout();
+    doc
+      .fillColor('#444444')
+      .fontSize(8.5)
+      .font('Helvetica')
+      .text(footerText, marginLeft, footerY, {
+        width: contentWidth,
+        align: 'center',
+      });
+  };
+  const addPortraitPage = () => {
+    doc.addPage({ size: 'A4', layout: 'portrait', margin: 36 });
+    drawHeader();
+    y = headerH + 14;
+  };
+  const drawNaoPossuiRecursoSection = () => {
+    if (naoPossuiRecursoOcorrencias.length === 0) return;
+
+    const sectionTitle = 'OCORRÊNCIAS FORA DA TABELA: NÃO POSSUI O RECURSO';
+    const titleHeight = doc
+      .fillColor('#003641')
+      .fontSize(11)
+      .font('Helvetica-Bold')
+      .heightOfString(sectionTitle, { width: contentWidth, align: 'left' });
+
+    const colDate = 88;
+    const colCpf = 88;
+    const colContrato = 74;
+    const colValor = 78;
+    const colTipo = 110;
+    const colNome = contentWidth - (colDate + colCpf + colContrato + colValor + colTipo);
+    const cols = [
+      { key: 'date', title: 'DATA/HORA', width: colDate, align: 'left' as const },
+      { key: 'cpf', title: 'CPF', width: colCpf, align: 'left' as const },
+      { key: 'contrato', title: 'Nº CONTRATO', width: colContrato, align: 'left' as const },
+      { key: 'nome', title: 'NOME', width: colNome, align: 'left' as const },
+      { key: 'valor', title: 'VALOR', width: colValor, align: 'right' as const },
+      { key: 'tipo', title: 'TIPO', width: colTipo, align: 'left' as const },
+    ];
+    const rowPadX = 5;
+    const rowPadY = 5;
+    const headerRowH = 20;
+    const minRowH = 20;
+
+    const contentBottomY = () => getContentBottomY();
+    const totalTableWidth = cols.reduce((acc, c) => acc + c.width, 0);
+    const drawTableHeader = () => {
+      doc.save().rect(marginLeft, y, totalTableWidth, headerRowH).fill('#E6E6E6').restore();
+      doc.lineWidth(0.8).strokeColor('#000000');
+      let cursorX = marginLeft;
+      for (const col of cols) {
+        doc.rect(cursorX, y, col.width, headerRowH).stroke();
+        cursorX += col.width;
+      }
+      cursorX = marginLeft;
+      doc.fillColor('#000000').fontSize(8.5).font('Helvetica-Bold');
+      for (const col of cols) {
+        doc.text(col.title, cursorX + rowPadX, y + rowPadY, {
+          width: col.width - rowPadX * 2,
+          align: col.align,
+        });
+        cursorX += col.width;
+      }
+      y += headerRowH;
+    };
+
+    if (contentBottomY() - y < titleHeight + headerRowH + 24) addPortraitPage();
+    doc.fillColor('#003641').fontSize(11).font('Helvetica-Bold');
+    doc.text(sectionTitle, marginLeft, y, { width: contentWidth, align: 'left' });
+    y += titleHeight + 6;
+    drawTableHeader();
+
+    for (const occ of naoPossuiRecursoOcorrencias) {
+      const row = {
+        date: occ?.createdAt ? formatIsoToPtBrDateTime(String(occ.createdAt)) : '—',
+        cpf: String(occ?.cpf ?? '').trim() || '—',
+        contrato: String(occ?.contrato ?? '').trim() || '—',
+        nome: String(occ?.nome ?? '').trim() || '—',
+        valor: String(occ?.value ?? '').trim() ? `R$ ${String(occ.value).trim()}` : '—',
+        tipo: 'Não possui o recurso',
+      };
+      const rowHeight = Math.max(
+        minRowH,
+        ...cols.map((col) =>
+          doc.heightOfString(String((row as any)[col.key] ?? ''), {
+            width: col.width - rowPadX * 2,
+            align: col.align,
+          }) +
+            rowPadY * 2,
+        ),
       );
+      if (y + rowHeight > contentBottomY()) {
+        drawFooter();
+        addPortraitPage();
+        doc.fillColor('#003641').fontSize(11).font('Helvetica-Bold');
+        doc.text(sectionTitle, marginLeft, y, { width: contentWidth, align: 'left' });
+        y += titleHeight + 6;
+        drawTableHeader();
+      }
+
+      doc.lineWidth(0.8).strokeColor('#000000');
+      let cursorX = marginLeft;
+      for (const col of cols) {
+        doc.rect(cursorX, y, col.width, rowHeight).stroke();
+        cursorX += col.width;
+      }
+      cursorX = marginLeft;
+      doc.fillColor('#000000').fontSize(8.5).font('Helvetica');
+      for (const col of cols) {
+        doc.text(String((row as any)[col.key] ?? ''), cursorX + rowPadX, y + rowPadY, {
+          width: col.width - rowPadX * 2,
+          align: col.align,
+        });
+        cursorX += col.width;
+      }
+      y += rowHeight;
     }
-    doc.moveDown(0.4);
-    const topY = doc.y;
-    doc.strokeColor('#cbd5e1').lineWidth(0.6).moveTo(marginPt, topY).lineTo(marginPt + innerWidthPt, topY).stroke();
-    doc.moveDown(0.4);
+    y += compactMode ? 10 : 12;
+  };
+  drawNaoPossuiRecursoSection();
+  const estornoObsLines = occs
+    .filter((o: any) => String(o?.action ?? '').trim().startsWith('estorno_valores'))
+    .map((o: any, index: number) => {
+      const nome = String(o?.nome ?? '').trim() || '-';
+      const cpf = String(o?.cpf ?? '').trim() || '-';
+      const occurrenceLabel = String(o?.relatedOccurrenceLabel ?? '').trim();
+      const estornoLiquidationDate = String(o?.estornoLiquidationDate ?? '').trim() || '-';
+      const estornoDate = String(o?.estornoDate ?? '').trim() || '-';
+      const estornoValue =
+        String(o?.estornoValue ?? '').trim() || String(o?.nextValue ?? '').trim() || '-';
+      const liquidationDate = String(o?.liquidationDate ?? '').trim() || '-';
+      const correctValue =
+        String(o?.judicialEditedValue ?? '').trim() ||
+        String(o?.correctValue ?? '').trim() ||
+        String(o?.value ?? '').trim() ||
+        '-';
+      const occurrenceSuffix = occurrenceLabel ? ` (${occurrenceLabel})` : '';
+      return `${index + 1}- ${nome} (${cpf}) • Estorno da liquidação do dia ${estornoLiquidationDate} foi em ${estornoDate} no valor de R$ ${estornoValue}. Realizada uma nova liquidação no dia ${liquidationDate} no valor de R$ ${correctValue}${occurrenceSuffix}.`;
+    });
+  if (estornoObsLines.length > 0) {
+    const title = 'OBSERVAÇÃO PARA ESTORNO';
+    doc.fillColor('#000000').fontSize(9.5).font('Helvetica-Bold');
+    const titleH = doc.heightOfString(title, { width: contentWidth, align: 'left' });
+    doc.fillColor('#000000').fontSize(8.8).font('Helvetica');
+    const bodyText = estornoObsLines.join('\n');
+    const bodyH = doc.heightOfString(bodyText, { width: contentWidth, align: 'left' });
+    const needed = titleH + 4 + bodyH + 10;
+    if (getContentBottomY() - y < needed) {
+      drawFooter();
+      doc.addPage({ size: 'A4', layout: 'portrait', margin: 36 });
+      drawHeader();
+      y = headerH + 14;
+    }
+    doc.fillColor('#000000').fontSize(9.5).font('Helvetica-Bold');
+    doc.text(title, marginLeft, y, { width: contentWidth, align: 'left' });
+    y += titleH + 4;
+    doc.fillColor('#000000').fontSize(8.8).font('Helvetica');
+    doc.text(bodyText, marginLeft, y, { width: contentWidth, align: 'left' });
+    y += bodyH + (compactMode ? 10 : 12);
+  }
+
+  const actionLabel = (raw: string) => {
+    const key = String(raw ?? '').trim();
+    if (!key) return '';
+    const map: Record<string, string> = {
+      nao_possui_recurso_relatorio_sisbr: 'Não possui o recurso',
+      liquidacao_recurso_judicial_relatorio_sisbr: 'Liquidação de Recurso Judical',
+      recurso_recebido_a_maior_relatorio_sisbr: 'Recurso Recebido a Maior',
+      devolucao_parcial_averbacao_relatorio_sisbr: 'Devolução Parcial (Averbação)',
+      recurso_recebido_a_menor_relatorio_sisbr: 'Recurso Recebido a Menor',
+      recurso_judicial_valor_a_menor_relatorio_sisbr: 'Recurso Judicial - Valor a Menor',
+      estorno_valores_relatorio_sisbr: 'Estorno de Valores',
+      repactuacao_relatorio_sisbr: 'Repactuação',
+      liquidacao_ccs_relatorio_sisbr: 'Liquidação CCS',
+      liquidacao_fora_vencimento_relatorio_sisbr: 'Liquidação Fora do Vencimento',
+      alterar_orgao_relatorio_sisbr: 'Alterar Órgão (SISBR)',
+      excluir_do_relatorio_sisbr: 'Excluir do Relatório SISBR',
+      antecipado_devolvido_relatorio_sisbr: 'Antecipado Devolvido',
+    };
+    return map[key] ?? key.replace(/_/g, ' ');
+  };
+  const occCountByAction = new Map<string, number>();
+  for (const o of occs) {
+    const rawAction = typeof o?.action === 'string' ? o.action : '';
+    const label = actionLabel(rawAction) || 'Sem tipo';
+    occCountByAction.set(label, (occCountByAction.get(label) ?? 0) + 1);
+  }
+  const occLinesAll = Array.from(occCountByAction.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR'))
+    .map(([label, count]) => `${label}: ${count}`);
+
+  const isValidCentsNumber = (n: unknown): n is number =>
+    typeof n === 'number' && Number.isFinite(n) && n > 0;
+  const recursoRecebidoMenorNoDebitSumCents = occs
+    .filter((o: any) => String(o?.action ?? '').trim().startsWith('recurso_recebido_a_menor'))
+    .filter((o: any) => Boolean(o?.noDebitInAccount))
+    .map((o: any) => parseMoneyToCents(String(o?.differenceValue ?? '').trim()))
+    .filter(isValidCentsNumber)
+    .reduce((acc: number, n: number) => acc + n, 0);
+  const recursoRecebidoMenorDebitSumCents = occs
+    .filter((o: any) => String(o?.action ?? '').trim().startsWith('recurso_recebido_a_menor'))
+    .filter((o: any) => !Boolean(o?.noDebitInAccount))
+    .map((o: any) => parseMoneyToCents(String(o?.debitAccountValue ?? '').trim()))
+    .filter(isValidCentsNumber)
+    .reduce((acc: number, n: number) => acc + n, 0);
+  const occTitleBase = 'Ocorrências (sintético)';
+  const occBoxW = colDate + colEvent + colDebit + colCredit + colSaldo;
+  const occInnerW = occBoxW - 20;
+  const occInnerPadTop = compactMode ? 8 : 10;
+  const occInnerPadBottom = compactMode ? 8 : 10;
+  const occGap = compactMode ? 4 : 6;
+  const totalOcc = occs.length;
+  const occBodyLinesAll = [
+    `Ocorrências abertas para este vencimento: ${totalOcc}`,
+    ...(recursoRecebidoMenorDebitSumCents > 0
+      ? [`Recurso Recebido a Menor (débito): R$ ${centsToPtBr(recursoRecebidoMenorDebitSumCents)}`]
+      : []),
+    ...(recursoRecebidoMenorNoDebitSumCents > 0
+      ? [`Recurso Recebido a Menor (sem débito): R$ ${centsToPtBr(recursoRecebidoMenorNoDebitSumCents)}`]
+      : []),
+    ...occLinesAll,
+  ]
+    .filter((v) => Boolean(String(v ?? '').trim()))
+    .map((v) => String(v));
+
+  const addOccPageIfNeeded = () => {
+    const minNeeded = 70;
+    if (getContentBottomY() - y >= minNeeded) return;
+    drawFooter();
+    doc.addPage({ size: 'A4', layout: 'portrait', margin: 36 });
+    drawHeader();
+    y = headerH + 14;
   };
 
-  const tableHeaderFill = '#e2e8f0';
-  const renderTableHeaderRow = (cells: Array<{ label: string; widthPt: number; align?: 'left' | 'right' | 'center' }>) => {
-    const baseY = doc.y;
-    doc.save();
-    doc.rect(marginPt, baseY - 2, innerWidthPt, 14).fill(tableHeaderFill);
-    doc.restore();
-    doc.font('Helvetica-Bold').fontSize(9).fillColor('#0f172a');
-    let cx = marginPt;
-    for (const c of cells) {
-      doc.text(c.label, cx, baseY, { width: c.widthPt - 8, align: c.align ?? 'left' });
-      cx += c.widthPt;
-    }
-    doc.y = baseY + 13;
-    doc.strokeColor('#94a3b8').lineWidth(0.4).moveTo(marginPt, doc.y).lineTo(marginPt + innerWidthPt, doc.y).stroke();
-  };
-  const renderTableRow = (cells: Array<{ value: string; widthPt: number; align?: 'left' | 'right' | 'center'; bold?: boolean }>) => {
-    const baseY = doc.y;
-    const height = 14;
-    doc.font(cells.some((c) => c.bold) ? 'Helvetica-Bold' : 'Helvetica').fontSize(9).fillColor('#0f172a');
-    let cx = marginPt;
-    for (const c of cells) {
-      doc.text(c.value, cx, baseY + 1, { width: c.widthPt - 8, align: c.align ?? 'left' });
-      cx += c.widthPt;
-    }
-    doc.y = baseY + height;
-    doc.strokeColor('#e2e8f0').lineWidth(0.3).moveTo(marginPt, doc.y).lineTo(marginPt + innerWidthPt, doc.y).stroke();
+  const drawOccBoxPage = (title: string, bodyLines: string[]) => {
+    doc.fillColor('#003641').fontSize(11).font('Helvetica-Bold');
+    const titleH = doc.heightOfString(title, { width: occInnerW });
+
+    doc.fillColor('#000000').fontSize(9).font('Helvetica');
+    const bodyText = (bodyLines.join('\n') || 'Sem ocorrências.').trim();
+    const bodyH = doc.heightOfString(bodyText, { width: occInnerW });
+
+    const avail = Math.max(0, getContentBottomY() - y);
+    const desired = occInnerPadTop + titleH + occGap + bodyH + occInnerPadBottom;
+    const boxH = Math.min(desired, avail);
+
+    doc
+      .save()
+      .rect(x0, y, occBoxW, boxH)
+      .strokeColor('#000000')
+      .lineWidth(0.8)
+      .stroke()
+      .restore();
+
+    doc
+      .fillColor('#003641')
+      .fontSize(11)
+      .font('Helvetica-Bold')
+      .text(title, x0 + 10, y + occInnerPadTop, { width: occInnerW });
+
+    doc.fillColor('#000000').fontSize(9).font('Helvetica');
+    const bodyY = y + occInnerPadTop + titleH + occGap;
+    const maxBodyH = Math.max(12, boxH - (bodyY - y) - occInnerPadBottom);
+    doc.text(bodyText || 'Sem ocorrências.', x0 + 10, bodyY, { width: occInnerW, height: maxBodyH });
+
+    y += boxH + (compactMode ? 10 : 14);
   };
 
-  const renderFooter = () => {
-    const pages = doc.bufferedPageRange ? doc.bufferedPageRange() : { count: 1, start: 0 };
-    const total = (pages as any).count || 1;
-    for (let i = 0; i < total; i++) {
-      doc.switchToPage(i);
-      doc.fontSize(8).font('Helvetica').fillColor('#64748b');
-      doc.text(
-        `Gerado em ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}  •  Página ${i + 1} de ${total}`,
-        marginPt,
-        pageHeightPt - 22,
-        { width: innerWidthPt, align: 'center' },
+  const linesToRender = occBodyLinesAll.length > 0 ? occBodyLinesAll : ['Sem ocorrências.'];
+  let remaining = [...linesToRender];
+  let pageIndex = 0;
+  while (remaining.length > 0) {
+    addOccPageIfNeeded();
+    const title = pageIndex === 0 ? occTitleBase : `${occTitleBase} (continuação)`;
+
+    doc.fillColor('#003641').fontSize(11).font('Helvetica-Bold');
+    const titleH = doc.heightOfString(title, { width: occInnerW });
+    const bodyY = y + occInnerPadTop + titleH + occGap;
+    const maxBodyH = Math.max(12, getContentBottomY() - bodyY - occInnerPadBottom);
+
+    doc.fillColor('#000000').fontSize(9).font('Helvetica');
+    let fitCount = 0;
+    let accText = '';
+    for (let i = 0; i < remaining.length; i += 1) {
+      const next = accText ? `${accText}\n${remaining[i]}` : remaining[i];
+      if (doc.heightOfString(next, { width: occInnerW }) <= maxBodyH) {
+        accText = next;
+        fitCount = i + 1;
+      } else {
+        break;
+      }
+    }
+
+    if (fitCount <= 0) {
+      drawFooter();
+      doc.addPage({ size: 'A4', layout: 'portrait', margin: 36 });
+      drawHeader();
+      y = headerH + 14;
+      pageIndex += 1;
+      continue;
+    }
+
+    drawOccBoxPage(title, remaining.slice(0, fitCount));
+    remaining = remaining.slice(fitCount);
+    pageIndex += 1;
+    if (remaining.length > 0 && getContentBottomY() - y < 30) {
+      drawFooter();
+      doc.addPage({ size: 'A4', layout: 'portrait', margin: 36 });
+      drawHeader();
+      y = headerH + 14;
+    }
+  }
+
+  drawFooter();
+
+  const drawOcorrenciasAnaliticoPages = () => {
+    if (!occs || occs.length === 0) return;
+
+    const sorted = [...occs].sort((a: any, b: any) => {
+      const aa = actionLabel(typeof a?.action === 'string' ? a.action : '');
+      const bb = actionLabel(typeof b?.action === 'string' ? b.action : '');
+      const ac = aa.localeCompare(bb, 'pt-BR');
+      if (ac !== 0) return ac;
+      const cpfA = String(a?.cpf ?? '').trim();
+      const cpfB = String(b?.cpf ?? '').trim();
+      const cc = cpfA.localeCompare(cpfB);
+      if (cc !== 0) return cc;
+      const na = String(a?.nome ?? '').trim();
+      const nb = String(b?.nome ?? '').trim();
+      const nc = na.localeCompare(nb, 'pt-BR');
+      if (nc !== 0) return nc;
+      const va = String(a?.value ?? '').trim();
+      const vb = String(b?.value ?? '').trim();
+      return va.localeCompare(vb);
+    });
+
+    const addPage = () => {
+      doc.addPage({ size: 'A4', layout: 'landscape', margin: 36 });
+      const { marginLeft: ml, contentWidth: cw } = drawHeader();
+      let yy = headerH + 14;
+      doc.fillColor('#000000').fontSize(13).font('Helvetica-Bold').text(
+        `OCORRÊNCIAS (ANALÍTICO) • ${monthKeyToPtBrUpper(opts.monthKey)}`,
+        ml,
+        yy,
+        { width: cw, align: 'left' },
       );
+      yy += 18;
+      doc.fillColor('#003641').fontSize(12).font('Helvetica-Bold').text(`RECURSO: ${opts.orgao}`, ml, yy, {
+        width: cw,
+        align: 'left',
+      });
+      yy += 18;
+      return { ml, cw, yy };
+    };
+
+    const drawTableHeader = (ml: number, yy: number, cols: { x: number; w: number }[]) => {
+      const rowH = 20;
+      const titles = ['DATA/HORA', 'CPF', 'Nº CONTRATO', 'NOME', 'VALOR', 'TIPO', 'JUSTIFICATIVA'];
+      doc.save().rect(ml, yy, cols.reduce((acc, c) => acc + c.w, 0), rowH).fill('#E6E6E6').restore();
+      doc.lineWidth(0.8).strokeColor('#000000');
+      for (let i = 0; i < cols.length; i += 1) {
+        const c = cols[i];
+        doc.rect(ml + c.x, yy, c.w, rowH).stroke();
+      }
+      doc.fillColor('#000000').fontSize(9).font('Helvetica-Bold');
+      const padX = 6;
+      const padY = 6;
+      for (let i = 0; i < cols.length; i += 1) {
+        const c = cols[i];
+        doc.text(titles[i] ?? '', ml + c.x + padX, yy + padY, { width: c.w - padX * 2, align: 'left' });
+      }
+      return yy + rowH;
+    };
+
+    const layoutCols = (cw: number) => {
+      let wDate = 96;
+      let wCpf = 96;
+      let wContrato = 110;
+      let wNome = 170;
+      let wValor = 80;
+      let wTipo = 150;
+      let wJust = cw - (wDate + wCpf + wContrato + wNome + wValor + wTipo);
+
+      const minJust = 160;
+      const minTipo = 110;
+      const minNome = 140;
+      const minContrato = 90;
+      const minDate = 80;
+
+      if (wJust < minJust) {
+        let deficit = minJust - wJust;
+        const takeTipo = Math.min(deficit, Math.max(0, wTipo - minTipo));
+        wTipo -= takeTipo;
+        deficit -= takeTipo;
+        const takeNome = Math.min(deficit, Math.max(0, wNome - minNome));
+        wNome -= takeNome;
+        deficit -= takeNome;
+        const takeContrato = Math.min(deficit, Math.max(0, wContrato - minContrato));
+        wContrato -= takeContrato;
+        deficit -= takeContrato;
+        const takeDate = Math.min(deficit, Math.max(0, wDate - minDate));
+        wDate -= takeDate;
+        deficit -= takeDate;
+        wJust = cw - (wDate + wCpf + wContrato + wNome + wValor + wTipo);
+      }
+
+      if (wJust < 90) {
+        wJust = Math.max(90, wJust);
+        const total = wDate + wCpf + wContrato + wNome + wValor + wTipo + wJust;
+        const extra = total - cw;
+        if (extra > 0) {
+          const takeNome = Math.min(extra, Math.max(0, wNome - 110));
+          wNome -= takeNome;
+          const rest = extra - takeNome;
+          if (rest > 0) {
+            const takeTipo = Math.min(rest, Math.max(0, wTipo - 90));
+            wTipo -= takeTipo;
+            const rest2 = rest - takeTipo;
+            if (rest2 > 0) wContrato = Math.max(70, wContrato - rest2);
+          }
+          wJust = cw - (wDate + wCpf + wContrato + wNome + wValor + wTipo);
+        }
+      }
+
+      const cols = [
+        { x: 0, w: wDate },
+        { x: wDate, w: wCpf },
+        { x: wDate + wCpf, w: wContrato },
+        { x: wDate + wCpf + wContrato, w: wNome },
+        { x: wDate + wCpf + wContrato + wNome, w: wValor },
+        { x: wDate + wCpf + wContrato + wNome + wValor, w: wTipo },
+        { x: wDate + wCpf + wContrato + wNome + wValor + wTipo, w: wJust },
+      ];
+      return { cols, totalW: wDate + wCpf + wContrato + wNome + wValor + wTipo + wJust };
+    };
+
+    let page = addPage();
+    const { cols } = layoutCols(page.cw);
+    let yy = drawTableHeader(page.ml, page.yy, cols);
+    const contentBottomY = () => getContentBottomY();
+
+    doc.fillColor('#000000').fontSize(9).font('Helvetica');
+    const padX = 6;
+    const padY = 6;
+    for (const o of sorted) {
+      const when = o?.createdAt ? formatIsoToPtBrDateTime(String(o.createdAt)) : '';
+      const cpf = String(o?.cpf ?? '').trim();
+      const contrato = String(o?.contrato ?? '').trim();
+      const nome = String(o?.nome ?? '').trim();
+      const valor = String(o?.value ?? '').trim() ? `R$ ${String(o.value).trim()}` : '';
+      const tipo = actionLabel(typeof o?.action === 'string' ? o.action : '') || 'Sem tipo';
+      const action = typeof o?.action === 'string' ? o.action.trim() : '';
+      let just = String(o?.justification ?? '').trim();
+      const devolucaoDate = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
+      if (
+        devolucaoDate &&
+        /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate) &&
+        action.startsWith('recurso_recebido_a_maior') &&
+        !just.includes(devolucaoDate)
+      ) {
+        just = [just, `Data de devolução: ${devolucaoDate}`].filter(Boolean).join('\n');
+      }
+
+      const cellHeights = [
+        doc.heightOfString(when, { width: cols[0].w - padX * 2 }),
+        doc.heightOfString(cpf, { width: cols[1].w - padX * 2 }),
+        doc.heightOfString(contrato || '—', { width: cols[2].w - padX * 2 }),
+        doc.heightOfString(nome, { width: cols[3].w - padX * 2 }),
+        doc.heightOfString(valor, { width: cols[4].w - padX * 2 }),
+        doc.heightOfString(tipo, { width: cols[5].w - padX * 2 }),
+        doc.heightOfString(just || '—', { width: cols[6].w - padX * 2 }),
+      ];
+      const rowH = Math.max(20, ...cellHeights.map((h) => h + padY * 2));
+
+      if (yy + rowH > contentBottomY()) {
+        drawFooter();
+        page = addPage();
+        yy = drawTableHeader(page.ml, page.yy, cols);
+      }
+
+      doc.lineWidth(0.8).strokeColor('#000000');
+      for (let i = 0; i < cols.length; i += 1) {
+        const c = cols[i];
+        doc.rect(page.ml + c.x, yy, c.w, rowH).stroke();
+      }
+
+      doc.fillColor('#000000').fontSize(9).font('Helvetica');
+      doc.text(when, page.ml + cols[0].x + padX, yy + padY, { width: cols[0].w - padX * 2, align: 'left' });
+      doc.text(cpf, page.ml + cols[1].x + padX, yy + padY, { width: cols[1].w - padX * 2, align: 'left' });
+      doc.text(contrato || '—', page.ml + cols[2].x + padX, yy + padY, { width: cols[2].w - padX * 2, align: 'left' });
+      doc.text(nome, page.ml + cols[3].x + padX, yy + padY, { width: cols[3].w - padX * 2, align: 'left' });
+      doc.text(valor, page.ml + cols[4].x + padX, yy + padY, { width: cols[4].w - padX * 2, align: 'right' });
+      doc.text(tipo, page.ml + cols[5].x + padX, yy + padY, { width: cols[5].w - padX * 2, align: 'left' });
+      doc.text(just || '—', page.ml + cols[6].x + padX, yy + padY, { width: cols[6].w - padX * 2, align: 'left' });
+      yy += rowH;
     }
+    drawFooter();
   };
 
-  const ensurePage = (heightNeededPt: number) => {
-    if (doc.y + heightNeededPt > pageHeightPt - 44) doc.addPage();
-  };
+  drawOcorrenciasAnaliticoPages();
 
-  renderHeader();
+  if (evidencePng && evidencePng.length > 0) {
+    const img = (() => {
+      try {
+        return (doc as any).openImage(evidencePng as any) as { width: number; height: number };
+      } catch {
+        return null;
+      }
+    })();
 
-  doc.moveDown(0.4);
-  ensurePage(120);
-  doc.fontSize(11).font('Helvetica-Bold').fillColor('#0f172a');
-  doc.text('Totais', marginPt, doc.y);
-  doc.moveDown(0.2);
-  const totalsCells: Array<Array<{ label: string; widthPt: number; align?: 'left' | 'right' | 'center'; bold?: boolean; value?: string }>> = [
-    [
-      { label: 'Item', widthPt: 300 },
-      { label: 'Valor', widthPt: innerWidthPt - 300, align: 'right' },
-    ],
-    [
-      { label: 'Extrato SISBR (débito / recebido pela JURISCRED)', widthPt: 300, bold: false, value: formatMoneyBr(totalExtratos) },
-      { label: formatMoneyBr(totalExtratos), widthPt: innerWidthPt - 300, align: 'right' },
-    ],
-    [
-      { label: '(-) Recurso (crédito / a pagar ao servidor, já líquido de Tarifa Linha + TED)', widthPt: 300, value: formatMoneyBr(totalRecursoLiq) },
-      { label: formatMoneyBr(totalRecursoLiq), widthPt: innerWidthPt - 300, align: 'right' },
-    ],
-    [
-      { label: '   • Recurso bruto', widthPt: 300, value: formatMoneyBr(totalRecurso) },
-      { label: formatMoneyBr(totalRecurso), widthPt: innerWidthPt - 300, align: 'right' },
-    ],
-    [
-      { label: '   • Tarifa Linha (desconto do recurso)', widthPt: 300, value: formatMoneyBr(-totalTarifaLinha) },
-      { label: formatMoneyBr(-totalTarifaLinha), widthPt: innerWidthPt - 300, align: 'right' },
-    ],
-    [
-      { label: '   • Tarifa TED (desconto do recurso)', widthPt: 300, value: formatMoneyBr(-totalTarifaTed) },
-      { label: formatMoneyBr(-totalTarifaTed), widthPt: innerWidthPt - 300, align: 'right' },
-    ],
-    [
-      { label: '(-) Valor Recebido a Maior (Estorno na conta)', widthPt: 300, value: formatMoneyBr(-totalRecursoRecebidoMaiorEstornoCents) },
-      { label: formatMoneyBr(-totalRecursoRecebidoMaiorEstornoCents), widthPt: innerWidthPt - 300, align: 'right' },
-    ],
-    [
-      { label: 'Diferença (Extrato - Recurso líquido - Estorno Recebido a Maior)', widthPt: 300, bold: true, value: formatMoneyBr(totalSaldo) },
-      { label: formatMoneyBr(totalSaldo), widthPt: innerWidthPt - 300, align: 'right', bold: true },
-    ],
-  ];
-  renderTableHeaderRow(totalsCells[0] as any);
-  for (let r = 1; r < totalsCells.length; r++) {
-    const row = totalsCells[r] as any;
-    ensurePage(16);
-    renderTableRow(row);
-  }
+    const addEvidencePage = (title: string) => {
+      doc.addPage({ size: 'A4', layout: 'portrait', margin: 18 });
+      const pageW = doc.page.width;
+      const { marginLeft: mL, contentWidth: cW } = drawHeader();
+      const titleY = headerH + 12;
+      doc.fillColor('#003641').fontSize(14).font('Helvetica-Bold').text(title, mL, titleY, {
+        width: cW,
+        align: 'left',
+      });
+      const imgY = titleY + 24;
+      const footerLayout = getFooterLayout();
+      const availH = Math.max(60, footerLayout.y - imgY - 8);
+      return { pageW, imgY, availH };
+    };
 
-  doc.moveDown(0.6);
-  ensurePage(40);
-  doc.fontSize(11).font('Helvetica-Bold').fillColor('#0f172a');
-  doc.text('Consolidado por Vencimento', marginPt, doc.y);
-  doc.moveDown(0.2);
-  const colsWidth = [110, 110, 110, 110, innerWidthPt - 4 * 110];
-  ensurePage(30);
-  renderTableHeaderRow([
-    { label: 'Vencimento', widthPt: colsWidth[0] },
-    { label: 'Extrato', widthPt: colsWidth[1], align: 'right' },
-    { label: 'Recurso', widthPt: colsWidth[2], align: 'right' },
-    { label: 'Relatório', widthPt: colsWidth[3], align: 'right' },
-    { label: 'Saldo', widthPt: colsWidth[4], align: 'right' },
-  ]);
-  const cons = Array.isArray(opts.consolidadoPorVencimento) ? opts.consolidadoPorVencimento : [];
-  for (const v of cons) {
-    ensurePage(16);
-    const e = Number(v?.extratosCents ?? 0) || 0;
-    const r = Number(v?.recursoCents ?? 0) || 0;
-    const rl = Number(v?.relatorioCents ?? 0) || 0;
-    const s = Number(v?.saldoCents ?? 0) || 0;
-    renderTableRow([
-      { value: sanitizeText(v?.vencimento || ''), widthPt: colsWidth[0] },
-      { value: formatMoneyBr(e), widthPt: colsWidth[1], align: 'right' },
-      { value: formatMoneyBr(r), widthPt: colsWidth[2], align: 'right' },
-      { value: formatMoneyBr(rl), widthPt: colsWidth[3], align: 'right' },
-      { value: formatMoneyBr(s), widthPt: colsWidth[4], align: 'right', bold: Math.abs(s) >= 1 },
-    ]);
-  }
+    if (img && img.width > 0 && img.height > 0) {
+      const firstPage = addEvidencePage(`Print Recurso x Relatório SISBR • ${opts.orgao}`);
+      const scale = firstPage.pageW / img.width;
+      const drawH = img.height * scale;
+      const pages = Math.max(1, Math.ceil(drawH / firstPage.availH));
 
-  if (opts.evidencePng && Buffer.isBuffer(opts.evidencePng) && opts.evidencePng.length > 100) {
-    doc.addPage();
-    renderHeader();
-    doc.moveDown(0.4);
-    doc.fontSize(11).font('Helvetica-Bold').fillColor('#0f172a');
-    doc.text('Evidência da tela', marginPt, doc.y);
-    doc.moveDown(0.2);
-    try {
-      const maxW = innerWidthPt;
-      const maxH = pageHeightPt - doc.y - 80;
-      doc.image(opts.evidencePng, marginPt, doc.y, { width: maxW, height: maxH, fit: [maxW, maxH], align: 'left', valign: 'top' });
-    } catch {
-      doc.font('Helvetica').fontSize(9).fillColor('#b91c1c');
-      doc.text('(Não foi possível renderizar a evidência da tela em anexo)');
+      const drawSlice = (sliceIndex: number, total: number) => {
+        const title =
+          total > 1
+            ? `Print Recurso x Relatório SISBR • ${opts.orgao} (parte ${sliceIndex + 1}/${total})`
+            : `Print Recurso x Relatório SISBR • ${opts.orgao}`;
+        const layout = sliceIndex === 0 ? firstPage : addEvidencePage(title);
+        const yOffset = layout.imgY - sliceIndex * layout.availH;
+        doc.save().rect(0, layout.imgY, layout.pageW, layout.availH).clip();
+        doc.image(evidencePng, 0, yOffset, { width: layout.pageW });
+        doc.restore();
+        drawFooter();
+      };
+
+      for (let i = 0; i < pages; i += 1) {
+        drawSlice(i, pages);
+      }
+    } else {
+      const { pageW, imgY, availH } = addEvidencePage(`Print Recurso x Relatório SISBR • ${opts.orgao}`);
+      doc.image(evidencePng, 0, imgY, { fit: [pageW, availH] });
+      drawFooter();
     }
   }
 
-  renderFooter();
   doc.end();
-  return donePromise;
+  return out;
 }
 
 export async function getTeamsDelegatedLoginStatus(): Promise<{

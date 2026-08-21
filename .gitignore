@@ -33,6 +33,20 @@ check_*.js
 create_extratos_table.js
 run_import_extratos_direto.js
 
+# Scripts locais de deploy (contêm credenciais hardcodadas - NÃO COMMITAR)
+deploy_*.js
+deploy_*.sh
+run_*.js
+valida_*.js
+validate_*.js
+ajuste_*.sh
+ajuste_*.js
+restaura_*.sh
+restaura_*.js
+
+# Pacotes tar.gz de deploy (arquivos buildados temporários)
+*.tar.gz
+
 # PDFs gerados em Modelos (arquivo de referência pode ficar, mas os TESTEs de comparação gerados:
 Modelos/TESTE_*.pdf
 Modelos/TESTE_V*.pdf
