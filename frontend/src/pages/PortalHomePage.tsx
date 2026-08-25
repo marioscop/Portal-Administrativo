@@ -1,4 +1,4 @@
-import { BadgeDollarSign, ShoppingCart, Wrench, Workflow } from 'lucide-react'
+import { BadgeDollarSign, ShoppingCart, Wrench } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 export default function PortalHomePage() {
@@ -227,17 +227,6 @@ export default function PortalHomePage() {
             <div className="module-title">Recuperação de Crédito</div>
             <div className="module-desc">
               Consiliação de Empréstimos Consignados.
-            </div>
-            <div className="module-status active">Disponível</div>
-          </Link>
-
-          <Link to="/automacao" className="module-card">
-            <div className="module-icon">
-              <Workflow />
-            </div>
-            <div className="module-title">Automação de Importações</div>
-            <div className="module-desc">
-              Painel assíncrono com jobs, SSE em tempo real, health check e agendamentos.
             </div>
             <div className="module-status active">Disponível</div>
           </Link>

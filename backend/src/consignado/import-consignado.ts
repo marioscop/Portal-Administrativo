@@ -16855,6 +16855,145 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
     throw new Error('Tabela relatorio_consignado não encontrada.');
   }
 
+  {
+    const allTables: string[] = [];
+    if (tableExists(db, 'extratos')) allTables.push('extratos');
+    try {
+      const res = db.exec(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Recurso %' ORDER BY name;`,
+      );
+      const idx = res[0]?.columns?.indexOf('name') ?? -1;
+      if (idx >= 0) {
+        for (const r of res[0]?.values ?? []) {
+          const n = String(r[idx] ?? '').trim();
+          if (n) allTables.push(n);
+        }
+      }
+    } catch {
+      void 0;
+    }
+
+    const nomeMatch = normalizeNameForMatch(nome);
+    let blockedReason: {
+      table: string;
+      valueCents: number;
+      foundCpf?: boolean;
+      foundNome?: boolean;
+      competencia?: string | null;
+    } | null = null;
+
+    for (const tableName of allTables) {
+      const cols = getTableColumns(db, tableName);
+      if (cols.length === 0) continue;
+
+      const cpfCol =
+        pickFirstExistingColumn(cols, ['CPF', 'Cpf']) ??
+        pickFirstColumnContaining(cols, ['cpf']);
+      const nomeCol =
+        pickFirstExistingColumn(cols, ['NOME', 'Nome']) ??
+        pickFirstColumnContaining(cols, ['nome']);
+      const valorCol =
+        pickFirstExistingColumn(cols, ['VALOR', 'Valor']) ??
+        pickFirstColumnContaining(cols, ['valor']);
+      const copCol =
+        pickFirstExistingColumn(cols, [
+          'Copetencia',
+          'Competencia',
+          'COMPETENCIA',
+          'Competência',
+        ]) ?? pickFirstColumnContaining(cols, ['compet', 'copet']);
+
+      if (!valorCol || (!cpfCol && !nomeCol)) continue;
+
+      const safeCols: string[] = [];
+      if (cpfCol) safeCols.push(cpfCol);
+      if (nomeCol) safeCols.push(nomeCol);
+      if (valorCol) safeCols.push(valorCol);
+      if (copCol) safeCols.push(copCol);
+      if (safeCols.length === 0) continue;
+      const selectCols = safeCols.map(escapeSqlIdentifier).join(', ');
+
+      let stmt: any = null;
+      try {
+        try {
+          stmt = db.prepare(`SELECT ${selectCols} FROM ${escapeSqlIdentifier(tableName)};`);
+        } catch {
+          continue;
+        }
+        while (stmt.step()) {
+          const row = stmt.getAsObject() as Record<string, unknown>;
+
+          let cpfMatch = false;
+          if (cpfCol) {
+            const raw = typeof (row as any)[cpfCol] === 'string' ? String((row as any)[cpfCol]) : '';
+            const digits = raw.replace(/\D/g, '');
+            if (digits.length === 11 && digits === cpf) cpfMatch = true;
+          }
+          let nomeMatchRow = false;
+          if (nomeCol && nomeMatch) {
+            const raw =
+              typeof (row as any)[nomeCol] === 'string' ? String((row as any)[nomeCol]) : '';
+            if (normalizeNameForMatch(raw) === nomeMatch && nomeMatch.length >= 3) {
+              nomeMatchRow = true;
+            }
+          }
+          if (!cpfMatch && !nomeMatchRow) continue;
+
+          if (copCol && wantedMonthKey) {
+            const raw =
+              typeof (row as any)[copCol] === 'string' ? String((row as any)[copCol]) : '';
+            const mk = parseCopetenciaToMonthKey(raw);
+            if (mk && mk !== wantedMonthKey) continue;
+          }
+
+          const valCents = parseMoneyToCents((row as any)[valorCol]);
+          if (valCents === null) continue;
+
+          if (valCents > 0) {
+            let comp: string | null = null;
+            if (copCol) {
+              const raw =
+                typeof (row as any)[copCol] === 'string' ? String((row as any)[copCol]) : '';
+              comp = raw || null;
+            }
+            blockedReason = {
+              table: tableName,
+              valueCents: valCents,
+              foundCpf: cpfMatch,
+              foundNome: nomeMatchRow,
+              competencia: comp,
+            };
+            break;
+          }
+        }
+      } finally {
+        try {
+          if (stmt) stmt.free();
+        } catch {
+          void 0;
+        }
+      }
+      if (blockedReason) break;
+    }
+
+    if (blockedReason) {
+      const cpfFmt = `${cpf.slice(0, 3)}.${cpf.slice(3, 6)}.${cpf.slice(6, 9)}-${cpf.slice(9)}`;
+      const detalhe: Array<'CPF' | 'Nome'> = [];
+      if (blockedReason.foundCpf) detalhe.push('CPF');
+      if (blockedReason.foundNome) detalhe.push('Nome');
+      const identificadores = detalhe.length ? detalhe.join(' + ') : 'Identificador';
+      const compInfo = blockedReason.competencia ? ` (competência ${blockedReason.competencia})` : '';
+      throw new Error(
+        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real nos recursos/extratos com valor > R$ 0,00 para este servidor.\n` +
+          `- Tabela de origem: ${blockedReason.table}\n` +
+          `- Match por: ${identificadores}${compInfo}\n` +
+          `- CPF: ${cpfFmt} / Nome: ${nome}\n` +
+          `- Valor encontrado: R$ ${centsToPtBr(blockedReason.valueCents)}\n` +
+          `Ação bloqueada para não gerar divergências. Use outra ação (ex.: Liquidação, Repactuação, Estorno, etc.) de acordo com o caso.`,
+      );
+    }
+  }
+
   const fromEmpresa = String(opts.fromEmpresa ?? '').trim() || null;
   const resolveEmpresaFromOrgao = (): string => {
     if (fromEmpresa) return fromEmpresa;
