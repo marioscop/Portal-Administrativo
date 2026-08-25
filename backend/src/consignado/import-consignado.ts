@@ -6938,11 +6938,185 @@ function insertRowsWithBatchTracking(opts: {
   return { batchId: batch?.batchId ?? null, insertedRows, skippedRows };
 }
 
+// ============================================================================
+// #region CUSTOM FILE RULES — TRE-GO (e quaisquer outros órgãos prefixo-mês-ano)
+// ----------------------------------------------------------------------------
+// Funções utilitárias PURAS (sem DB, sem efeitos colaterais) para DETECTAR regras
+// customizadas de importação — independente do caller:
+//   - insertExtratosRows()
+//   - learning profile factory
+//   - insertRowsWithBatchTracking()
+//
+// 3 SINAIS DE MATCH (qualquer um deles ativa as regras; temos 3 para garantir
+// 100% de acerto mesmo se um dos canais falhar — ex.: nome arquivo vira UUID):
+//   (A) Nome do arquivo   -> padrão <ORGAO>-<MES_PT>-<ANO>.xlsx   (ex.: TRE-JULHO-2026.xlsx)
+//   (B) Coluna InfoCompl  -> contém "INFORMAÇÕES COMPLEMENTARES" e linha 1 começa com
+//                            "TRIBUNAL REGIONAL ELEITORAL DE GOIAS" (detectado no sample de linhas)
+//   (C) Órgão escolhido UI -> forceOrgaoFromUI contém "TRIBUNAL REGIONAL ELEITORAL"
+// ============================================================================
+type CustomFileRules = null | {
+  orgaoHint: string;
+  tokenCompetencia?: string | null;
+  competenciaFixa?: string | null;
+  historico1KeepFirstLine: boolean;
+  extraColumns: Record<string, unknown>;
+};
+
+const __MESES_PT_UPPERCASE: Record<string, number> = {
+  JANEIRO:1,JAN:1,FEVEREIRO:2,FEV:2,MARCO:3,MAR:3,ABRIL:4,ABR:4,MAIO:5,MAI:5,
+  JUNHO:6,JUN:6,JULHO:7,JUL:7,AGOSTO:8,AGO:8,SETEMBRO:9,SET:9,OUTUBRO:10,OUT:10,
+  NOVEMBRO:11,NOV:11,DEZEMBRO:12,DEZ:12,
+};
+
+function __parsePrefixoMesAnoFileName(sourceFile: string): null | {
+  orgaoPrefixoRaw: string; competenciaFixa: string; tokenCompetencia: string;
+} {
+  try {
+    const baseName = String(sourceFile ?? '')
+      .replace(/\\/g, '/').split('/').pop() ?? '';
+    const noExt = baseName.replace(/\.(xlsx|xlsm|xls)$/i, '').trim().toUpperCase();
+    const m = noExt.match(/^([A-Z\u00c0-\u00dc0-9]+(?:[_ -][A-Z\u00c0-\u00dc0-9]+)*)-([A-Z\u00c0-\u00dc]{3,})-(\d{4})$/);
+    if (!m) return null;
+    const orgaoPrefixoRaw = m[1].replace(/_/g, ' ').trim();
+    const mesExtensoRaw = m[2].normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+    const anoRaw = Number(m[3]);
+    if (!Number.isFinite(anoRaw) || anoRaw < 1990 || anoRaw > 2100) return null;
+    const mmNum = __MESES_PT_UPPERCASE[mesExtensoRaw] ?? null;
+    if (mmNum === null) return null;
+    // REGRA NEGÓCIO: mês do arquivo + 1 (ex.: JULHO -> 08/2026)
+    const d = new Date(anoRaw, mmNum - 1, 1, 0, 0, 0, 0);
+    d.setMonth(d.getMonth() + 1);
+    const mmNext = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyyNext = String(d.getFullYear());
+    return {
+      orgaoPrefixoRaw,
+      tokenCompetencia: noExt,
+      competenciaFixa: `${mmNext}/${yyyyNext}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function detectCustomFileRules(opts: {
+  sourceFile: string;
+  fileColumns?: string[];
+  firstRowsSample?: Array<Record<string, unknown>>;
+  forceOrgaoFromUI?: string | null;
+}): CustomFileRules {
+  const sf = String(opts.sourceFile ?? '').trim();
+  const colunas = Array.isArray(opts.fileColumns) ? opts.fileColumns : [];
+  const sampleRows = Array.isArray(opts.firstRowsSample) ? opts.firstRowsSample : [];
+  const orgaoUI = String(opts.forceOrgaoFromUI ?? '').trim();
+
+  // -------------- SINAL (A): Nome do arquivo padrão ORGAO-MES-ANO ------------
+  const parsedByFileName = __parsePrefixoMesAnoFileName(sf);
+
+  // -------------- SINAL (B): Colunas + conteúdo Info Complementares linha 1 --
+  const infoCompColRaw = colunas.find((c) => {
+    const k = normalizeHeaderKey(c).replace(/\s/g, '');
+    return k === 'INFORMACOESCOMPLEMENTARES' || k.startsWith('INFORMACOESCOMPLEMENTARES');
+  }) ?? null;
+  let infoCompTemTRE_GO = false;
+  let orgaoHintByInfoComp = '';
+  if (infoCompColRaw && sampleRows.length > 0) {
+    const firstRowVal = sampleRows[0]?.[infoCompColRaw];
+    const linha1 = extractFirstUsefulLineFromMultilineHistorico(
+      toStableValue(firstRowVal)
+    ).trim().toUpperCase();
+    if (linha1.includes('TRIBUNAL REGIONAL ELEITORAL DE GOIAS') ||
+        linha1.includes('TRIBUNAL REGIONAL ELEITORAL') ||
+        linha1.startsWith('TRE ')) {
+      infoCompTemTRE_GO = true;
+      orgaoHintByInfoComp = 'TRE';
+    }
+  }
+
+  // -------------- SINAL (C): Órgão selecionado pelo usuário na UI ------------
+  const orgaoUIKey = orgaoUI
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  const orgaoUI_E_TRE = Boolean(orgaoUIKey) && (
+    orgaoUIKey.includes('TRIBUNAL REGIONAL ELEITORAL') ||
+    orgaoUIKey.startsWith('TRE') ||
+    /\bTRE\b/.test(orgaoUIKey.replace(/[^\w]/g, ' '))
+  );
+
+  // Nome do arquivo dá um hint forte do órgão
+  const orgaoHintByFileName = parsedByFileName?.orgaoPrefixoRaw ?? '';
+  const orgaoTemPrefixoTRE =
+    orgaoHintByFileName.toUpperCase() === 'TRE' ||
+    orgaoHintByFileName.toUpperCase().startsWith('TRE ') ||
+    infoCompTemTRE_GO ||
+    orgaoUI_E_TRE;
+
+  if (!parsedByFileName && !orgaoTemPrefixoTRE) return null;
+
+  const extraColumns: Record<string, unknown> = {};
+  let historico1KeepFirstLineOnly = false;
+
+  if (orgaoTemPrefixoTRE) {
+    historico1KeepFirstLineOnly = true;
+  }
+
+  // Se temos tokenCompetencia (por nome de arquivo) -> CompetenciaArquivo sempre.
+  // Se não temos (mas temos sinal (B) ou (C)) -> ainda assim tentamos descobrir token
+  // a partir da info complementar linha 1 + mês da primeira coluna DATA.
+  let tokenCompetencia = parsedByFileName?.tokenCompetencia ?? null;
+  let competenciaFixa = parsedByFileName?.competenciaFixa ?? null;
+
+  if (!competenciaFixa && orgaoTemPrefixoTRE) {
+    const dataColRaw = colunas.find((c) => normalizeHeaderKey(c).replace(/\s/g, '') === 'DATA') ?? null;
+    const firstDataRaw = dataColRaw && sampleRows.length > 0 ? sampleRows[0]?.[dataColRaw] : null;
+    const d = firstDataRaw ? parseDateValue(firstDataRaw) : null;
+    if (d) {
+      const next = new Date(d.getTime());
+      next.setMonth(next.getMonth() + 1);
+      const mm = String(next.getMonth() + 1).padStart(2, '0');
+      const yyyy = String(next.getFullYear());
+      competenciaFixa = `${mm}/${yyyy}`;
+    }
+  }
+
+  if (parsedByFileName && parsedByFileName.tokenCompetencia) {
+    extraColumns['CompetenciaArquivo'] = parsedByFileName.tokenCompetencia;
+  } else if (!tokenCompetencia && orgaoTemPrefixoTRE && competenciaFixa) {
+    // Fallback: monta token como "TRE-MES_EXTENSO-ANO" se conseguirmos mês por extenso
+    // a partir da competenciaFixa mm/aaaa
+    const p = competenciaFixa.match(/^(\d{2})\/(\d{4})$/);
+    if (p) {
+      const mm = Number(p[1]);
+      const yyyy = p[2];
+      const meses: Record<number, string> = {
+        1:'JANEIRO',2:'FEVEREIRO',3:'MARCO',4:'ABRIL',5:'MAIO',6:'JUNHO',
+        7:'JULHO',8:'AGOSTO',9:'SETEMBRO',10:'OUTUBRO',11:'NOVEMBRO',12:'DEZEMBRO',
+      };
+      if (meses[mm]) {
+        tokenCompetencia = `TRE-${meses[mm]}-${yyyy}`;
+        extraColumns['CompetenciaArquivo'] = tokenCompetencia;
+      }
+    }
+  }
+
+  const orgaoHintFinal =
+    (orgaoHintByFileName && orgaoHintByFileName.toUpperCase() !== 'TRE' ? orgaoHintByFileName : 'TRE') +
+    (orgaoUI ? ` (ui: ${orgaoUI.slice(0, 48)})` : '');
+
+  return {
+    orgaoHint: orgaoHintFinal,
+    tokenCompetencia,
+    competenciaFixa,
+    historico1KeepFirstLine: historico1KeepFirstLineOnly,
+    extraColumns,
+  };
+}
+// #endregion
+
 function insertExtratosRows(opts: {
   db: Database;
   sourceFile: string;
   fileColumns: string[];
   rows: Array<Record<string, unknown>>;
+  forceOrgaoFromUI?: string | null;
 }): { batchId: string | null; insertedRows: number; skippedRows: number } {
   if (tableExists(opts.db, 'imported_row_hashes') && tableExists(opts.db, 'extratos')) {
     const targetCount = countTableRows(opts.db, 'extratos');
@@ -6974,72 +7148,43 @@ function insertExtratosRows(opts: {
   const headerMap = buildExtratoHeaderMapping(opts.fileColumns);
   const mappedColumns = headerMap.mappedColumns.slice();
 
-  // ===== REGRA CUSTOM TRE-GO + (TRE-MES-ANO.xlsx / PREFIXO-MES-ANO.xlsx) =====
-  // Detecta padrão no nome do arquivo: <PREFIXO>-<MES_PT>-<ANO>.xlsx / .xlsm / .xls
-  // Ex.: "TRE-AGOSTO-2026.xlsx" => orgaoPrefixo=TRE, mesExtenso=AGOSTO, ano=2026, mm="08"
-  // Resultado:
-  //   - CompetenciaArquivo = "TRE-AGOSTO-2026" (NOVA COLUNA, opção A do usuário)
-  //   - Copetencia        = "08/2026"            (coluna padrão, fixa independente da DATA da linha)
-  //   - HISTÓRICO_1       = somente a LINHA 1 da célula Info Complementares (via extractFirstUseful)
-  const FILE_ARQ_PARSED: null | {
-    tokenCompetencia: string;
-    competenciaFixa: string;
-    orgaoPrefixo: string;
-  } = (() => {
-    try {
-      const baseName = String(opts.sourceFile ?? '')
-        .replace(/\\/g, '/')
-        .split('/')
-        .pop() ?? '';
-      const noExt = baseName.replace(/\.(xlsx|xlsm|xls)$/i, '').trim().toUpperCase();
-      const m = noExt.match(/^([A-Z\u00c0-\u00dc0-9]+(?:[_ -][A-Z\u00c0-\u00dc0-9]+)*)-([A-Z\u00c0-\u00dc]{3,})-(\d{4})$/);
-      if (!m) return null;
-      const orgaoPrefixoRaw = m[1].replace(/_/g, ' ').trim();
-      const mesExtensoRaw = m[2].normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-      const anoRaw = Number(m[3]);
-      if (!Number.isFinite(anoRaw) || anoRaw < 1990 || anoRaw > 2100) return null;
-      const MESES: Record<string, number> = {
-        JANEIRO: 1, JAN: 1,
-        FEVEREIRO: 2, FEV: 2,
-        MARCO: 3, MAR: 3,
-        ABRIL: 4, ABR: 4,
-        MAIO: 5, MAI: 5,
-        JUNHO: 6, JUN: 6,
-        JULHO: 7, JUL: 7,
-        AGOSTO: 8, AGO: 8,
-        SETEMBRO: 9, SET: 9,
-        OUTUBRO: 10, OUT: 10,
-        NOVEMBRO: 11, NOV: 11,
-        DEZEMBRO: 12, DEZ: 12,
-      };
-      const mmNum = MESES[mesExtensoRaw] ?? null;
-      if (mmNum === null) return null;
-      const mm = String(mmNum).padStart(2, '0');
-      const yyyy = String(anoRaw);
-      // REGRA DE NEGÓCIO CONFIRMADA PELO USUÁRIO 2026-08-25:
-      //   Arquivo   = TRE-JULHO-2026.xlsx  ->  Copetencia = 08/2026
-      //   Arquivo   = TRE-AGOSTO-2026.xlsx  ->  Copetencia = 09/2026
-      //   Arquivo   = TRE-DEZEMBRO-2026.xlsx ->  Copetencia = 01/2027
-      // Ou seja: mês do arquivo + 1 MÊS (com rollover seguro para janeiro/ano seguinte).
-      const nextBase = new Date(anoRaw, mmNum - 1, 1, 0, 0, 0, 0);
-      nextBase.setMonth(nextBase.getMonth() + 1);
-      const mmNext = String(nextBase.getMonth() + 1).padStart(2, '0');
-      const yyyyNext = String(nextBase.getFullYear());
-      void mm; void yyyy;
-      return {
-        tokenCompetencia: noExt,
-        competenciaFixa: `${mmNext}/${yyyyNext}`,
-        orgaoPrefixo: orgaoPrefixoRaw,
-      };
-    } catch {
-      return null;
+  // ===== REGRA CUSTOM TRE-GO (DRY): 3 sinais de match (nome arquivo / InfoComp linha 1 / órgão UI) =====
+  const SAMPLE_ROWS = opts.rows.length > 20 ? opts.rows.slice(0, 20) : opts.rows.slice();
+  const CUSTOM_RULES: CustomFileRules = detectCustomFileRules({
+    sourceFile: opts.sourceFile,
+    fileColumns: opts.fileColumns,
+    firstRowsSample: SAMPLE_ROWS,
+    forceOrgaoFromUI: typeof opts.forceOrgaoFromUI === 'string' ? opts.forceOrgaoFromUI : null,
+  });
+  // Injeta CompetenciaArquivo se custom rules mandar
+  if (CUSTOM_RULES && CUSTOM_RULES.extraColumns && Object.keys(CUSTOM_RULES.extraColumns).length > 0) {
+    for (const colName of Object.keys(CUSTOM_RULES.extraColumns)) {
+      const kNorm = normalizeHeaderKey(colName).replace(/\s/g, '');
+      const already = mappedColumns.some((c) => normalizeHeaderKey(c).replace(/\s/g, '') === kNorm);
+      if (!already) mappedColumns.push(colName);
     }
-  })();
-  if (FILE_ARQ_PARSED) {
-    const kToken = normalizeHeaderKey('CompetenciaArquivo').replace(/\s/g, '');
-    const needsTokenCol = !mappedColumns.some((c) => normalizeHeaderKey(c).replace(/\s/g, '') === kToken);
-    if (needsTokenCol) mappedColumns.push('CompetenciaArquivo');
   }
+  // Cache SET de hashes já importados (O(1) lookup). Reduz O(N·M) para O(N+M) na dedup.
+  const __existingHashesCache: Set<string> | null =
+    (tableExists(opts.db, 'imported_row_hashes') && tableExists(opts.db, 'extratos'))
+      ? (() => {
+          try {
+            const s = new Set<string>();
+            const stmt = opts.db.prepare(
+              `SELECT row_hash FROM imported_row_hashes WHERE kind=?;`,
+            );
+            stmt.bind(['extratos'] as unknown as any[]);
+            try {
+              while (stmt.step()) {
+                const r = stmt.getAsObject() as { row_hash?: unknown };
+                const v = String(r?.row_hash ?? '').trim();
+                if (v) s.add(v);
+              }
+            } finally { stmt.free(); }
+            return s;
+          } catch { return null; }
+        })()
+      : null;
 
   const existingCols = tableExists(opts.db, 'extratos') ? getTableColumns(opts.db, 'extratos') : [];
   const existingNorm = new Map<string, string>();
@@ -7270,9 +7415,9 @@ function insertExtratosRows(opts: {
       for (const t of targetColumns) {
         const tKey = normalizeHeaderKey(t).replace(/\s/g, '');
         if (copetenciaColTarget && tKey === 'COPETENCIA') {
-          // Regra TRE custom fixa por prefixo do nome do arquivo
-          if (FILE_ARQ_PARSED) {
-            buildRowForHash[t] = FILE_ARQ_PARSED.competenciaFixa;
+          // Regra TRE custom fixa por prefixo do nome do arquivo OU por InfoComp OU por órgão UI (CUSTOM_RULES)
+          if (CUSTOM_RULES && CUSTOM_RULES.competenciaFixa) {
+            buildRowForHash[t] = CUSTOM_RULES.competenciaFixa;
             continue;
           }
           const fromRef = computeRefAnomes.refCol ? computeRefAnomes.compute?.(row[computeRefAnomes.refCol]) ?? '' : '';
@@ -7290,7 +7435,13 @@ function insertExtratosRows(opts: {
           continue;
         }
         if (tKey === normalizeHeaderKey('CompetenciaArquivo').replace(/\s/g, '')) {
-          buildRowForHash[t] = FILE_ARQ_PARSED ? FILE_ARQ_PARSED.tokenCompetencia : '';
+          if (CUSTOM_RULES && Object.prototype.hasOwnProperty.call(CUSTOM_RULES.extraColumns, t)) {
+            buildRowForHash[t] = (CUSTOM_RULES.extraColumns as any)[t] ?? '';
+          } else if (CUSTOM_RULES && CUSTOM_RULES.tokenCompetencia) {
+            buildRowForHash[t] = CUSTOM_RULES.tokenCompetencia;
+          } else {
+            buildRowForHash[t] = '';
+          }
           continue;
         }
         if (tKey === normalizeHeaderKey('HISTÓRICO').replace(/\s/g, '')) {
@@ -7302,15 +7453,32 @@ function insertExtratosRows(opts: {
         if (tKey === normalizeHeaderKey('HISTÓRICO_1').replace(/\s/g, '')) {
           const src = sourceForTarget('HISTÓRICO_1');
           const raw = src in row ? toStableValue(row[src]) : '';
-          buildRowForHash[t] = extractFirstUsefulLineFromMultilineHistorico(raw);
+          // Se CUSTOM_RULES (TRE) -> sempre extrai somente a LINHA 1
+          // (Info Complementares = "TRIBUNAL REGIONAL ELEITORAL DE GOIAS" na linha 1)
+          if (CUSTOM_RULES && CUSTOM_RULES.historico1KeepFirstLine) {
+            buildRowForHash[t] = extractFirstUsefulLineFromMultilineHistorico(raw);
+          } else {
+            buildRowForHash[t] = toStableValue(raw);
+          }
+          continue;
+        }
+        // Extra columns from CUSTOM_RULES (ex.: CompetenciaArquivo já foi tratado acima; mas outros futuros também)
+        if (CUSTOM_RULES && Object.prototype.hasOwnProperty.call(CUSTOM_RULES.extraColumns, t)) {
+          buildRowForHash[t] = (CUSTOM_RULES.extraColumns as any)[t] ?? '';
           continue;
         }
         const src = sourceForTarget(t);
         buildRowForHash[t] = src in row ? toStableValue(row[src]) : '';
       }
       const rowHash = hashRow('extratos', targetColumns, buildRowForHash);
+      // Cache SET O(1) lookup (evita 2ª query de dedup se já sabemos que hash existe)
+      if (__existingHashesCache && __existingHashesCache.has(rowHash)) {
+        skippedRows += 1;
+        continue;
+      }
       hashStmt.run(['extratos', rowHash, importedAt]);
       if (opts.db.getRowsModified() === 0) {
+        // Fallback: confirmar por valores exatos (garantia, cache pode ter sido populado no início do job)
         const rowAlreadyExists = tableHasExactRowValues({
           db: opts.db,
           tableName: 'extratos',
@@ -7328,6 +7496,7 @@ function insertExtratosRows(opts: {
           continue;
         }
       }
+      if (__existingHashesCache) __existingHashesCache.add(rowHash);
       const values = targetColumns.map((c) =>
         c in buildRowForHash ? buildRowForHash[c] : null,
       );
@@ -28237,15 +28406,37 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'extratos' || kindLower === 'relatorio') {
         if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
       }
-      const res = addMissingColumnsAndImportRows(
-        db,
-        tableName,
-        headersToImport,
-        rowsToImport,
-        checkDup,
-        modeOverride,
-        Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
-      );
+
+      const forceKindRaw = String(opts.forceKind ?? '').trim();
+      const kindOrgaoToOrgaoLabel: Record<string, string> = {
+        recurso_tre: 'TRIBUNAL REGIONAL ELEITORAL DE GOIAS',
+      };
+      const forceOrgaoFromUIFromKind: string | null =
+        forceKindRaw && Object.prototype.hasOwnProperty.call(kindOrgaoToOrgaoLabel, forceKindRaw)
+          ? kindOrgaoToOrgaoLabel[forceKindRaw]
+          : null;
+
+      let res: { insertedRows: number; skippedRows: number };
+      if (kindLower === 'extratos') {
+        const ir = insertExtratosRows({
+          db,
+          sourceFile: sourceFileFull,
+          fileColumns: headersToImport.slice(),
+          rows: rowsToImport.slice(),
+          forceOrgaoFromUI: forceOrgaoFromUIFromKind,
+        });
+        res = { insertedRows: ir.insertedRows, skippedRows: ir.skippedRows };
+      } else {
+        res = addMissingColumnsAndImportRows(
+          db,
+          tableName,
+          headersToImport,
+          rowsToImport,
+          checkDup,
+          modeOverride,
+          Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
+        );
+      }
 
       // Mover arquivo para subpasta Importados (Graph API), se perfil pedir e arquivo teve alguma interação OK (inserida ou duplicada pulada)
       let moveResult: { ok: boolean; status?: number; error?: string; destFolder?: string; parentIdUsed?: string; parentIdResolvedFromFolderPath?: boolean; folderPath?: string; driveIdPrefix?: string } = { ok: false };
