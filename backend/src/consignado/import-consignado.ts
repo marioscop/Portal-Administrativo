@@ -7016,9 +7016,19 @@ function insertExtratosRows(opts: {
       if (mmNum === null) return null;
       const mm = String(mmNum).padStart(2, '0');
       const yyyy = String(anoRaw);
+      // REGRA DE NEGÓCIO CONFIRMADA PELO USUÁRIO 2026-08-25:
+      //   Arquivo   = TRE-JULHO-2026.xlsx  ->  Copetencia = 08/2026
+      //   Arquivo   = TRE-AGOSTO-2026.xlsx  ->  Copetencia = 09/2026
+      //   Arquivo   = TRE-DEZEMBRO-2026.xlsx ->  Copetencia = 01/2027
+      // Ou seja: mês do arquivo + 1 MÊS (com rollover seguro para janeiro/ano seguinte).
+      const nextBase = new Date(anoRaw, mmNum - 1, 1, 0, 0, 0, 0);
+      nextBase.setMonth(nextBase.getMonth() + 1);
+      const mmNext = String(nextBase.getMonth() + 1).padStart(2, '0');
+      const yyyyNext = String(nextBase.getFullYear());
+      void mm; void yyyy;
       return {
         tokenCompetencia: noExt,
-        competenciaFixa: `${mm}/${yyyy}`,
+        competenciaFixa: `${mmNext}/${yyyyNext}`,
         orgaoPrefixo: orgaoPrefixoRaw,
       };
     } catch {
