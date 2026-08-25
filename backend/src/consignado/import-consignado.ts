@@ -6642,6 +6642,7 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
   sourceColumnByTarget: Map<string, string>;
   targetColumnBySource: Map<string, string>;
   historicoTarget: string | null;
+  historico1SourceColumn: string | null;
   credTedFilterColumn: string | null;
 } {
   const STANDARD_TARGETS = ['DATA', 'DOCUMENTO', 'HISTÓRICO', 'VALOR'];
@@ -6660,10 +6661,6 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
     'N DOCUMENTO': 'DOCUMENTO',
     HISTORICO: 'HISTÓRICO',
     HISTORIC: 'HISTÓRICO',
-    'INFORMACOES COMPLEMENTARES': 'HISTÓRICO',
-    'INFORMACOES COMPL': 'HISTÓRICO',
-    'INFO COMPLEMENTARES': 'HISTÓRICO',
-    'HISTORICO COMPLEMENTAR': 'HISTÓRICO',
     VALOR: 'VALOR',
     VL: 'VALOR',
     'VL.': 'VALOR',
@@ -6675,8 +6672,16 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
   const reservedTargets = new Set<string>();
   const mapped: string[] = [];
   let historicoTarget: string | null = null;
+  let historico1SourceCol: string | null = null;
 
-  const looksLikeHistoricoNorm = (n: string): boolean => n === 'HISTORICO' || n.startsWith('HISTORICO') || n === 'HISTÓRICO';
+  const looksLikeHistoricoNorm = (n: string): boolean =>
+    (n === 'HISTORICO' || n.startsWith('HISTORICO') || n === 'HISTÓRICO') &&
+    !n.includes('HISTORICO 1') && !n.includes('HISTORICO_1');
+  const looksLikeHistorico1Norm = (n: string): boolean =>
+    n === 'HISTORICO 1' ||
+    n === 'HISTORICO_1' ||
+    n === 'HISTÓRICO 1' ||
+    n === 'HISTÓRICO_1';
   const looksLikeInfoComplementaresNorm = (n: string): boolean =>
     n.includes('INFORMACOES COMPL') ||
     n.includes('INFO COMPL') ||
@@ -6694,20 +6699,27 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
   const resolveStandard = (col: string): string | null => {
     const n = normalizeExtratoHeaderNameForMap(col);
     if (!n) return null;
+    // Regra TRE / Info Complementares: se EXISTIR uma coluna "HISTÓRICO" separada
+    // e vier uma coluna "INFORMAÇÕES COMPLEMENTARES", mapeamos Info Complementares
+    // para HISTÓRICO_1 (em vez de sobrescrever HISTÓRICO como era antes).
+    if (looksLikeHistorico1Norm(n)) return 'HISTÓRICO_1';
+    if (looksLikeInfoComplementaresNorm(n)) {
+      if (rawHistoricoColumn || reservedTargets.has('HISTÓRICO')) return 'HISTÓRICO_1';
+      return 'HISTÓRICO';
+    }
     if (HEADER_ALIASES[n]) {
       const target = HEADER_ALIASES[n];
       if (target === 'HISTÓRICO') {
-        if (looksLikeInfoComplementaresNorm(n)) return 'HISTÓRICO';
-        if (hasInfoComplementaresColumn) return null;
+        if (hasInfoComplementaresColumn && !reservedTargets.has('HISTÓRICO')) return 'HISTÓRICO';
+        if (hasInfoComplementaresColumn && reservedTargets.has('HISTÓRICO')) return null;
         return 'HISTÓRICO';
       }
       return target;
     }
     if (STANDARD_TARGETS.includes(n)) {
-      if (n === 'HISTÓRICO' && hasInfoComplementaresColumn) return null;
+      if (n === 'HISTÓRICO' && hasInfoComplementaresColumn && reservedTargets.has('HISTÓRICO')) return null;
       return n;
     }
-    if (looksLikeInfoComplementaresNorm(n)) return 'HISTÓRICO';
     if (n.includes('HISTORICO') && !hasInfoComplementaresColumn) return 'HISTÓRICO';
     return null;
   };
@@ -6720,6 +6732,7 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
       bySource.set(col, standard);
       mapped.push(standard);
       if (standard === 'HISTÓRICO') historicoTarget = standard;
+      if (standard === 'HISTÓRICO_1') historico1SourceCol = col;
       continue;
     }
     const colNorm = normalizeExtratoHeaderNameForMap(col);
@@ -6735,6 +6748,7 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
     sourceColumnByTarget: byTarget,
     targetColumnBySource: bySource,
     historicoTarget,
+    historico1SourceColumn: historico1SourceCol,
     credTedFilterColumn: rawHistoricoColumn ?? byTarget.get('HISTÓRICO') ?? null,
   };
 }
@@ -6959,6 +6973,64 @@ function insertExtratosRows(opts: {
 
   const headerMap = buildExtratoHeaderMapping(opts.fileColumns);
   const mappedColumns = headerMap.mappedColumns.slice();
+
+  // ===== REGRA CUSTOM TRE-GO + (TRE-MES-ANO.xlsx / PREFIXO-MES-ANO.xlsx) =====
+  // Detecta padrão no nome do arquivo: <PREFIXO>-<MES_PT>-<ANO>.xlsx / .xlsm / .xls
+  // Ex.: "TRE-AGOSTO-2026.xlsx" => orgaoPrefixo=TRE, mesExtenso=AGOSTO, ano=2026, mm="08"
+  // Resultado:
+  //   - CompetenciaArquivo = "TRE-AGOSTO-2026" (NOVA COLUNA, opção A do usuário)
+  //   - Copetencia        = "08/2026"            (coluna padrão, fixa independente da DATA da linha)
+  //   - HISTÓRICO_1       = somente a LINHA 1 da célula Info Complementares (via extractFirstUseful)
+  const FILE_ARQ_PARSED: null | {
+    tokenCompetencia: string;
+    competenciaFixa: string;
+    orgaoPrefixo: string;
+  } = (() => {
+    try {
+      const baseName = String(opts.sourceFile ?? '')
+        .replace(/\\/g, '/')
+        .split('/')
+        .pop() ?? '';
+      const noExt = baseName.replace(/\.(xlsx|xlsm|xls)$/i, '').trim().toUpperCase();
+      const m = noExt.match(/^([A-Z\u00c0-\u00dc0-9]+(?:[_ -][A-Z\u00c0-\u00dc0-9]+)*)-([A-Z\u00c0-\u00dc]{3,})-(\d{4})$/);
+      if (!m) return null;
+      const orgaoPrefixoRaw = m[1].replace(/_/g, ' ').trim();
+      const mesExtensoRaw = m[2].normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+      const anoRaw = Number(m[3]);
+      if (!Number.isFinite(anoRaw) || anoRaw < 1990 || anoRaw > 2100) return null;
+      const MESES: Record<string, number> = {
+        JANEIRO: 1, JAN: 1,
+        FEVEREIRO: 2, FEV: 2,
+        MARCO: 3, MAR: 3,
+        ABRIL: 4, ABR: 4,
+        MAIO: 5, MAI: 5,
+        JUNHO: 6, JUN: 6,
+        JULHO: 7, JUL: 7,
+        AGOSTO: 8, AGO: 8,
+        SETEMBRO: 9, SET: 9,
+        OUTUBRO: 10, OUT: 10,
+        NOVEMBRO: 11, NOV: 11,
+        DEZEMBRO: 12, DEZ: 12,
+      };
+      const mmNum = MESES[mesExtensoRaw] ?? null;
+      if (mmNum === null) return null;
+      const mm = String(mmNum).padStart(2, '0');
+      const yyyy = String(anoRaw);
+      return {
+        tokenCompetencia: noExt,
+        competenciaFixa: `${mm}/${yyyy}`,
+        orgaoPrefixo: orgaoPrefixoRaw,
+      };
+    } catch {
+      return null;
+    }
+  })();
+  if (FILE_ARQ_PARSED) {
+    const kToken = normalizeHeaderKey('CompetenciaArquivo').replace(/\s/g, '');
+    const needsTokenCol = !mappedColumns.some((c) => normalizeHeaderKey(c).replace(/\s/g, '') === kToken);
+    if (needsTokenCol) mappedColumns.push('CompetenciaArquivo');
+  }
+
   const existingCols = tableExists(opts.db, 'extratos') ? getTableColumns(opts.db, 'extratos') : [];
   const existingNorm = new Map<string, string>();
   for (const c of existingCols) existingNorm.set(normalizeHeaderKey(c).replace(/\s/g, ''), c);
@@ -7188,6 +7260,11 @@ function insertExtratosRows(opts: {
       for (const t of targetColumns) {
         const tKey = normalizeHeaderKey(t).replace(/\s/g, '');
         if (copetenciaColTarget && tKey === 'COPETENCIA') {
+          // Regra TRE custom fixa por prefixo do nome do arquivo
+          if (FILE_ARQ_PARSED) {
+            buildRowForHash[t] = FILE_ARQ_PARSED.competenciaFixa;
+            continue;
+          }
           const fromRef = computeRefAnomes.refCol ? computeRefAnomes.compute?.(row[computeRefAnomes.refCol]) ?? '' : '';
           if (fromRef) {
             buildRowForHash[t] = fromRef;
@@ -7202,8 +7279,18 @@ function insertExtratosRows(opts: {
           buildRowForHash[t] = fromData;
           continue;
         }
+        if (tKey === normalizeHeaderKey('CompetenciaArquivo').replace(/\s/g, '')) {
+          buildRowForHash[t] = FILE_ARQ_PARSED ? FILE_ARQ_PARSED.tokenCompetencia : '';
+          continue;
+        }
         if (tKey === normalizeHeaderKey('HISTÓRICO').replace(/\s/g, '')) {
           const src = sourceForTarget('HISTÓRICO');
+          const raw = src in row ? toStableValue(row[src]) : '';
+          buildRowForHash[t] = extractFirstUsefulLineFromMultilineHistorico(raw);
+          continue;
+        }
+        if (tKey === normalizeHeaderKey('HISTÓRICO_1').replace(/\s/g, '')) {
+          const src = sourceForTarget('HISTÓRICO_1');
           const raw = src in row ? toStableValue(row[src]) : '';
           buildRowForHash[t] = extractFirstUsefulLineFromMultilineHistorico(raw);
           continue;
