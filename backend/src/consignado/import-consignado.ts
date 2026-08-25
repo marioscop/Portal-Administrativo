@@ -6229,29 +6229,34 @@ function ensureDefaultLearningProfiles(db: Database) {
       checkDuplicateContent: true,
     },
   });
-  // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — EXTRATO RECURSO TRE-GO (PERFIL ESPECÍFICO PRIORIDADE ALTA) =========
+  // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — EXTRATO RECURSO TRE-GO + TRT-GO (Justiça Eleitoral + Trabalho, PERFIL ESPECÍFICO PRIORIDADE ALTA) =========
   // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
-  // Requisitos confirmados pelo usuário em 25/08/2026 15:26 BRT:
-  //   [T1] Match: Nome do arquivo contenha "TRE" (case insensitive) + extensão .xlsx/.xlsm/.xls.
-  //   [T2] Pipeline mapeamento (DEVE ser diferente do genérico):
+  // Requisitos confirmados pelo usuário em 25/08/2026 15:26 BRT + 15:40 BRT (expandido para TRT também):
+  //   [TT1] Match: Nome do arquivo contenha "TRE" OU "TRT" (case insensitive) + extensão .xlsx/.xlsm/.xls.
+  //   [TT2] Pipeline mapeamento (DEVE ser diferente do genérico):
   //        DATA                → DATA           (Excel col 1)
   //        DOCUMENTO           → DOCUMENTO      (Excel col 2)
   //        HISTÓRICO Excel     → IGNORAR        (Excel col 3, usada só p/ credTedFilterColumn)
   //        INFORMAÇÕES COMPL.  → HISTÓRICO BD   (Excel col 4, SOMENTE a 1ª linha útil da célula)
   //        VALOR               → VALOR          (Excel col 5)
   //        HISTÓRICO_1 BD      → VAZIO          (não preencher)
-  //        Copetencia          → Mês arquivo + 1 (ex: TRE-JULHO-2026 → 08/2026)
-  //        CompetenciaArquivo  → prefixo-mês-ano (ex: TRE-JULHO-2026)
-  //   [T3] Outros: checkDuplicateContent=true. BFS mesma lógica do extratos_recurso genérico
-  //               (sempre pasta mês anterior vigente).
+  //        Copetencia          → Mês arquivo + 1 (ex: TRE-JULHO-2026 → 08/2026, TRT-JULHO-2026 → 08/2026)
+  //        CompetenciaArquivo  → prefixo-mês-ano (ex: TRE-JULHO-2026 / TRT-JULHO-2026)
+  //   [TT3] Outros: checkDuplicateContent=true. BFS mesma lógica do extratos_recurso genérico
+  //                (sempre pasta mês anterior vigente).
+  // Cleanup: remove o perfil antigo extratos_tre_go (substituído por este)
+  try {
+    db.run(`DELETE FROM import_learning_profiles WHERE id='extratos_tre_go';`);
+  } catch { /* ignore */ }
   upsertLearningProfile(db, {
-    id: 'extratos_tre_go',
+    id: 'extratos_tre_trt_go',
     kind: 'extratos',
     matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
-    fileNameRegex: '.*TRE.*\\.(xlsx|xlsm|xls)$',
+    fileNameRegex: '.*(TRE|TRT).*\\.(xlsx|xlsm|xls)$',
     targetTable: 'extratos',
     options: {
       isTreExtratoProfile: true,
+      isJusticaEleitoralTrabalhoProfile: true,
       mode: 'append',
       folderCandidates: [
         'Extratos de Recurso',
@@ -7347,6 +7352,7 @@ function detectCustomFileRules(opts: {
     return k === 'INFORMACOESCOMPLEMENTARES' || k.startsWith('INFORMACOESCOMPLEMENTARES');
   }) ?? null;
   let infoCompTemTRE_GO = false;
+  let infoCompTemTRT_GO = false;
   let orgaoHintByInfoComp = '';
   if (infoCompColRaw && sampleRows.length > 0) {
     const firstRowVal = sampleRows[0]?.[infoCompColRaw];
@@ -7358,6 +7364,12 @@ function detectCustomFileRules(opts: {
         linha1.startsWith('TRE ')) {
       infoCompTemTRE_GO = true;
       orgaoHintByInfoComp = 'TRE';
+    } else if (linha1.includes('TRIBUNAL REGIONAL DO TRABALHO') ||
+               linha1.includes('TRIBUNAL REGIONAL DO TRABALHO DE GOIAS') ||
+               linha1.includes('TRT ') ||
+               linha1.startsWith('TRT')) {
+      infoCompTemTRT_GO = true;
+      orgaoHintByInfoComp = 'TRT';
     }
   }
 
@@ -7369,21 +7381,30 @@ function detectCustomFileRules(opts: {
     orgaoUIKey.startsWith('TRE') ||
     /\bTRE\b/.test(orgaoUIKey.replace(/[^\w]/g, ' '))
   );
+  const orgaoUI_E_TRT = Boolean(orgaoUIKey) && (
+    orgaoUIKey.includes('TRIBUNAL REGIONAL DO TRABALHO') ||
+    orgaoUIKey.startsWith('TRT') ||
+    /\bTRT\b/.test(orgaoUIKey.replace(/[^\w]/g, ' '))
+  );
 
   // Nome do arquivo dá um hint forte do órgão
   const orgaoHintByFileName = parsedByFileName?.orgaoPrefixoRaw ?? '';
-  const orgaoTemPrefixoTRE =
+  const orgaoTemPrefixoTREouTRT =
     orgaoHintByFileName.toUpperCase() === 'TRE' ||
     orgaoHintByFileName.toUpperCase().startsWith('TRE ') ||
+    orgaoHintByFileName.toUpperCase() === 'TRT' ||
+    orgaoHintByFileName.toUpperCase().startsWith('TRT ') ||
     infoCompTemTRE_GO ||
-    orgaoUI_E_TRE;
+    infoCompTemTRT_GO ||
+    orgaoUI_E_TRE ||
+    orgaoUI_E_TRT;
 
-  if (!parsedByFileName && !orgaoTemPrefixoTRE) return null;
+  if (!parsedByFileName && !orgaoTemPrefixoTREouTRT) return null;
 
   const extraColumns: Record<string, unknown> = {};
   let historico1KeepFirstLineOnly = false;
 
-  if (orgaoTemPrefixoTRE) {
+  if (orgaoTemPrefixoTREouTRT) {
     historico1KeepFirstLineOnly = true;
   }
 
@@ -7393,7 +7414,7 @@ function detectCustomFileRules(opts: {
   let tokenCompetencia = parsedByFileName?.tokenCompetencia ?? null;
   let competenciaFixa = parsedByFileName?.competenciaFixa ?? null;
 
-  if (!competenciaFixa && orgaoTemPrefixoTRE) {
+  if (!competenciaFixa && orgaoTemPrefixoTREouTRT) {
     const dataColRaw = colunas.find((c) => normalizeHeaderKey(c).replace(/\s/g, '') === 'DATA') ?? null;
     const firstDataRaw = dataColRaw && sampleRows.length > 0 ? sampleRows[0]?.[dataColRaw] : null;
     const d = firstDataRaw ? parseDateValue(firstDataRaw) : null;
@@ -7406,11 +7427,14 @@ function detectCustomFileRules(opts: {
     }
   }
 
+  const qualOrgaoPrefixo =
+    (parsedByFileName && parsedByFileName.orgaoPrefixoRaw && String(parsedByFileName.orgaoPrefixoRaw).trim().toUpperCase()) ||
+    (infoCompTemTRE_GO ? 'TRE' : infoCompTemTRT_GO ? 'TRT' : orgaoUI_E_TRE ? 'TRE' : orgaoUI_E_TRT ? 'TRT' : 'TRE');
+  const isTrt = qualOrgaoPrefixo === 'TRT';
+
   if (parsedByFileName && parsedByFileName.tokenCompetencia) {
     extraColumns['CompetenciaArquivo'] = parsedByFileName.tokenCompetencia;
-  } else if (!tokenCompetencia && orgaoTemPrefixoTRE && competenciaFixa) {
-    // Fallback: monta token como "TRE-MES_EXTENSO-ANO" se conseguirmos mês por extenso
-    // a partir da competenciaFixa mm/aaaa
+  } else if (!tokenCompetencia && orgaoTemPrefixoTREouTRT && competenciaFixa) {
     const p = competenciaFixa.match(/^(\d{2})\/(\d{4})$/);
     if (p) {
       const mm = Number(p[1]);
@@ -7420,14 +7444,15 @@ function detectCustomFileRules(opts: {
         7:'JULHO',8:'AGOSTO',9:'SETEMBRO',10:'OUTUBRO',11:'NOVEMBRO',12:'DEZEMBRO',
       };
       if (meses[mm]) {
-        tokenCompetencia = `TRE-${meses[mm]}-${yyyy}`;
+        const prefixo = isTrt ? 'TRT' : 'TRE';
+        tokenCompetencia = `${prefixo}-${meses[mm]}-${yyyy}`;
         extraColumns['CompetenciaArquivo'] = tokenCompetencia;
       }
     }
   }
 
-  const orgaoHintFinal =
-    (orgaoHintByFileName && orgaoHintByFileName.toUpperCase() !== 'TRE' ? orgaoHintByFileName : 'TRE') +
+  const orgaoHintRaw = (orgaoHintByFileName || qualOrgaoPrefixo).toUpperCase();
+  const orgaoHintFinal = orgaoHintRaw +
     (orgaoUI ? ` (ui: ${orgaoUI.slice(0, 48)})` : '');
 
   return {
@@ -7435,7 +7460,7 @@ function detectCustomFileRules(opts: {
     tokenCompetencia,
     competenciaFixa,
     historico1KeepFirstLine: historico1KeepFirstLineOnly,
-    isTreExtrato: orgaoTemPrefixoTRE,
+    isTreExtrato: orgaoTemPrefixoTREouTRT,
     extraColumns,
   };
 }
@@ -7491,10 +7516,16 @@ function insertExtratosRows(opts: {
     opts.learningProfileOptions &&
       typeof opts.learningProfileOptions === 'object' &&
       opts.learningProfileOptions !== null &&
-      (opts.learningProfileOptions as Record<string, unknown>).isTreExtratoProfile === true,
+      ((opts.learningProfileOptions as Record<string, unknown>).isTreExtratoProfile === true ||
+       (opts.learningProfileOptions as Record<string, unknown>).isJusticaEleitoralTrabalhoProfile === true),
   );
+  const isTreTrtById =
+    profileIdNorm.startsWith('extratos_tre_trt') ||
+    profileIdNorm.startsWith('extratos_tre') ||
+    profileIdNorm.startsWith('extratos_trt');
+  const isTreTrtProfile = isTreTrtById || profileOptionsIsTre;
   const forceOrgaoFromUIForProfile =
-    (profileIdNorm.startsWith('extratos_tre') || profileOptionsIsTre) ? 'TRIBUNAL REGIONAL ELEITORAL DE GOIAS' :
+    isTreTrtProfile ? null :
     (typeof opts.forceOrgaoFromUI === 'string' ? opts.forceOrgaoFromUI : null);
   const CUSTOM_RULES: CustomFileRules = detectCustomFileRules({
     sourceFile: opts.sourceFile,
@@ -7502,7 +7533,7 @@ function insertExtratosRows(opts: {
     firstRowsSample: SAMPLE_ROWS,
     forceOrgaoFromUI: forceOrgaoFromUIForProfile,
   });
-  if ((profileIdNorm.startsWith('extratos_tre') || profileOptionsIsTre) && CUSTOM_RULES) {
+  if (isTreTrtProfile && CUSTOM_RULES) {
     CUSTOM_RULES.isTreExtrato = true;
     if (!CUSTOM_RULES.historico1KeepFirstLine) CUSTOM_RULES.historico1KeepFirstLine = true;
   }
@@ -27415,9 +27446,12 @@ function findLearningProfilesFor(db: Database, url: string, forceKind?: string):
       };
       const scoreId = (r: string): number => {
         const i = String(r || '').trim().toLowerCase();
+        if (i.startsWith('extratos_tre_trt')) return 30;
         if (i.startsWith('extratos_tre')) return 20;
+        if (i.startsWith('extratos_trt')) return 20;
         if (i.startsWith('extratos_recurso')) return 10;
         if (i.startsWith('recurso_tre')) return 5;
+        if (i.startsWith('recurso_trt')) return 5;
         return 0;
       };
       const aTotal = scoreRegex(a.file_name_regex) + scoreId(a.id);
@@ -29401,8 +29435,8 @@ export async function debugOneshotTreImportSync(opts: { folderUrl?: string; forc
       fileColumns: [...parsedSheet.headers],
       rows: [...parsedSheet.rows],
       forceOrgaoFromUI: forceOrgaoFromUIFromKind,
-      learningProfileId: 'extratos_tre_go',
-      learningProfileOptions: { isTreExtratoProfile: true },
+      learningProfileId: 'extratos_tre_trt_go',
+      learningProfileOptions: { isTreExtratoProfile: true, isJusticaEleitoralTrabalhoProfile: true },
     });
     out.insertResult = { insertedRows: ir.insertedRows, skippedRows: ir.skippedRows, batchId: ir.batchId || null };
     out.persistDbPost = null;
