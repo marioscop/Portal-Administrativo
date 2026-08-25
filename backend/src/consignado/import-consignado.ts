@@ -7149,6 +7149,10 @@ function insertExtratosRows(opts: {
   const mappedColumns = headerMap.mappedColumns.slice();
 
   // ===== REGRA CUSTOM TRE-GO (DRY): 3 sinais de match (nome arquivo / InfoComp linha 1 / órgão UI) =====
+  // ===== Ensure columns obrigatórias do layout Extrato Recurso antes de tudo =====
+  ['DATA', 'DOCUMENTO', 'HISTÓRICO', 'VALOR', 'Copetencia', 'HISTÓRICO_1', 'CompetenciaArquivo', '__source_file']
+    .forEach((c) => ensureExtratosColumn(opts.db, c));
+
   const SAMPLE_ROWS = opts.rows.length > 20 ? opts.rows.slice(0, 20) : opts.rows.slice();
   const CUSTOM_RULES: CustomFileRules = detectCustomFileRules({
     sourceFile: opts.sourceFile,
