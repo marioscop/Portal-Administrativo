@@ -233,6 +233,37 @@ export class ConsignadoService {
     'cleanupOldJobsTtl',
   );
 
+  readonly debugExpandRecursoExtratos = resolveModuleFn(
+    (ns as { debugExpandRecursoExtratos?: unknown }).debugExpandRecursoExtratos as unknown,
+    _mod,
+    'debugExpandRecursoExtratos',
+  ) as unknown as (opts: {
+    folderUrl?: string;
+    forceKind?: string;
+  }) => Promise<{
+    ok: boolean;
+    folderUrl: string;
+    len: number;
+    candidates: Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>;
+    trace: Array<{ step: string; ts: number; data: Record<string, unknown> }>;
+    setup: {
+      driveId: string;
+      baseFolderId: string;
+      basePath: string;
+      resolvedDirect: boolean;
+      tokenOk: boolean;
+      parsedUrlOk: boolean;
+      driveDiscoveryOk: boolean;
+    };
+    error?: string;
+  }>;
+
+  readonly debugOneshotTreImportSync = resolveModuleFn(
+    (ns as { debugOneshotTreImportSync?: unknown }).debugOneshotTreImportSync as unknown,
+    _mod,
+    'debugOneshotTreImportSync',
+  ) as unknown as (opts: { folderUrl?: string; forceKind?: string }) => Promise<Record<string, unknown>>;
+
   readonly isTeamsMeetingUrl = (value: string): boolean => {
     try {
       const u = new URL(value);

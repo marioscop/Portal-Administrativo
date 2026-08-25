@@ -91,6 +91,34 @@ export class ConsignadoController {
   async searchUsers(@Query('q') q?: string, @Query('limit') limit?: string) {
     return await this.service.searchGraphUsers({ q: String(q ?? ''), limit: Number(limit) || 10 });}
 
+  @Post('debug-expand-extratos')
+  async debugExpandExtratos(
+    @Body()
+    body: {
+      folderUrl?: string;
+      forceKind?: string;
+    },
+  ) {
+    return await this.service.debugExpandRecursoExtratos({
+      folderUrl: body.folderUrl,
+      forceKind: body.forceKind,
+    });
+  }
+
+  @Post('debug-oneshot-tre-import')
+  async debugOneshotTre(
+    @Body()
+    body: {
+      folderUrl?: string;
+      forceKind?: string;
+    },
+  ) {
+    return await this.service.debugOneshotTreImportSync({
+      folderUrl: body.folderUrl,
+      forceKind: body.forceKind,
+    });
+  }
+
   @Post('import')
   @Header('X-Content-Type-Options', 'nosniff')
   async importNow(

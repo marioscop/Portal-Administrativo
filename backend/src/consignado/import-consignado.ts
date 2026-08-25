@@ -1476,6 +1476,235 @@ async function resolveRecursoMpgoFolderId(opts: {
   );
 }
 
+const __MESES_PT_COMPLETO = [
+  'janeiro', 'fevereiro', 'marco', 'abril', 'maio', 'junho',
+  'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro',
+];
+const __NOME_MES_PT = (mes0Idx: number): string => __MESES_PT_COMPLETO[mes0Idx] ?? '';
+
+async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
+  token: string;
+  driveId: string;
+  baseFolderId: string;
+  basePath: string;
+  __trace?: (step: string, data: Record<string, unknown>) => void;
+}): Promise<Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>> {
+  const tr = opts.__trace ?? (() => {});
+  const isRecuperacaoCreditoInPath = (path: string) => {
+    const k = normalizeNameForMatch(path);
+    return k.includes('recuperacao de credito') || k.endsWith('9.recuperacao de credito');
+  };
+  const isExtratoRecursoFolder = (name: string) => {
+    const k = normalizeNameForMatch(name);
+    return k.includes('extrato recurso') || k.startsWith('extrato recurso') || k === 'extratos recurso';
+  };
+  const isDoc = (n: string) => /\.(xlsx|xlsm|xls)$/i.test(String(n ?? '').trim());
+  const out: Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }> = [];
+  if (!opts.driveId || !opts.token) return out;
+
+  const cleanedBasePath = String(opts.basePath ?? '').replace(/^\s*\/+|\/+\s*$/g, '');
+
+  // ====== REGRA DEFINITIVA: SÓ MÊS ANTERIOR DO VIGENTE (1 offset, MÁXIMA VELOCIDADE) ======
+  const mesCorrente0Idx = new Date().getMonth();
+  let alvoMes0 = mesCorrente0Idx - 1;
+  let alvoAnoN = new Date().getFullYear();
+  while (alvoMes0 < 0) { alvoMes0 += 12; alvoAnoN -= 1; }
+  while (alvoMes0 > 11) { alvoMes0 -= 12; alvoAnoN += 1; }
+  const alvoAno = String(alvoAnoN);
+  const alvoMesNorm = __NOME_MES_PT(alvoMes0);
+  const alvoMesVariacoes = [
+    alvoMesNorm ? alvoMesNorm.charAt(0).toUpperCase() + alvoMesNorm.slice(1) : '',
+    alvoMesNorm ? alvoMesNorm.toLowerCase() : '',
+    MESES_PT_BR[alvoMes0] ?? '',
+  ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
+  const pastaExtratoVariacoes = ['Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso'];
+
+  tr('setup', { alvoAno, alvoMes0, alvoMesNorm, alvoMesVariacoes, cleanedBasePath, baseFolderIdLen: (opts.baseFolderId || '').length, baseFolderIdEqDriveId: opts.baseFolderId === opts.driveId });
+
+  const safeListChildren = async (folderId: string): Promise<Array<{ id: string; name: string; lastModifiedDateTime?: string; file?: unknown; folder?: unknown }>> => {
+    if (!folderId) return [];
+    try {
+      const r = await listDriveItemChildren(opts.token, opts.driveId, folderId);
+      tr('list', { folderIdPrefix: folderId.slice(0, 8), count: r.length });
+      return r;
+    } catch (e) {
+      tr('listErr', { folderIdPrefix: folderId.slice(0, 8), err: String(e instanceof Error ? e.message : e).slice(0, 120) });
+      return [];
+    }
+  };
+
+  // ====== PASSO 1: Encontrar a Pasta RAIZ de onde descender (Recuperação de Crédito ou equivalente) ======
+  let startId: string | null = null;
+  let startPath: string = '';
+  if (opts.baseFolderId && opts.baseFolderId !== opts.driveId) {
+    // Temos folderId real (resolveDirect deu certo). Usamos direto.
+    startId = opts.baseFolderId;
+    startPath = cleanedBasePath;
+    tr('startMode', { mode: 'folderId', startIdPrefix: startId.slice(0, 8), startPath });
+  } else {
+    // driveId or null: listar a raiz da biblioteca e achar "Documents" filhos para chegar até Recuperação de Crédito via estrutura conhecida.
+    // Como não temos path absoluto aqui, usamos basePath (se tiver) para navegar ou BFS curto (max 2 níveis) atrás de Recuperação de Crédito.
+    tr('startMode', { mode: 'driveLevel' });
+    const roots = await safeListChildren(opts.driveId);
+    const tryNavegarPorBasePathSegmentos = async (): Promise<{ id: string | null; path: string }> => {
+      if (!cleanedBasePath) return { id: null, path: '' };
+      const segs = cleanedBasePath.split('/').filter(Boolean);
+      let cur: Array<typeof roots[number]> = roots;
+      let curId: string | null = null;
+      let accPath = '';
+      for (let i = 0; i < segs.length; i++) {
+        const seg = segs[i];
+        const segNorm = normalizeNameForMatch(seg);
+        const match = cur.find((c) => c.folder && normalizeNameForMatch(c.name) === segNorm)
+          ?? cur.find((c) => c.folder && normalizeNameForMatch(c.name).includes(segNorm.slice(0, Math.min(4, segNorm.length))));
+        if (!match) return { id: null, path: accPath };
+        curId = String(match.id);
+        accPath = accPath ? `${accPath}/${match.name}` : String(match.name);
+        cur = await safeListChildren(curId);
+        if (cur.length === 0) return { id: null, path: accPath };
+      }
+      return { id: curId, path: accPath };
+    };
+    const naveg = await tryNavegarPorBasePathSegmentos();
+    if (naveg.id) {
+      startId = naveg.id;
+      startPath = naveg.path;
+      tr('startFound', { where: 'basePathSegments', startIdPrefix: startId.slice(0, 8), startPath });
+    } else {
+      // Fallback BFS curto (2 níveis) atrás de Recuperação de Crédito / 9.Recuperação / Diretoria etc.
+      const queue: Array<{ id: string; path: string; depth: number }> = roots.filter((r) => r.folder).map((r) => ({ id: String(r.id), path: String(r.name ?? ''), depth: 0 }));
+      const seen = new Set<string>();
+      while (queue.length > 0 && !startId) {
+        const cur = queue.shift()!;
+        if (seen.has(cur.id)) continue;
+        seen.add(cur.id);
+        if (isRecuperacaoCreditoInPath(cur.path) || normalizeNameForMatch(cur.path).includes('9.recuperacao')) {
+          startId = cur.id; startPath = cur.path;
+          tr('startFound', { where: 'bfs2', startIdPrefix: startId.slice(0, 8), startPath });
+          break;
+        }
+        if (cur.depth < 2) {
+          const kids = await safeListChildren(cur.id);
+          for (const k of kids) {
+            if (k.folder) queue.push({ id: String(k.id), path: cur.path ? `${cur.path}/${k.name}` : String(k.name ?? ''), depth: cur.depth + 1 });
+          }
+        }
+      }
+      if (!startId) {
+        // Sem alternativa: usar raiz drive mesmo (vazio). Provavelmente não encontra nada mas evita null.
+        tr('startWarn', { msg: 'nenhuma pasta recuperacao de credito encontrada na raiz; usando drive root.' });
+        if (roots.length > 0) {
+          // prefer qualquer folder da raiz
+          const any = roots.find((r) => r.folder) ?? roots[0];
+          startId = String(any.id); startPath = String(any.name ?? '');
+        }
+      }
+    }
+  }
+  if (!startId) { tr('noStart', {}); return out; }
+
+  // ====== PASSO 2: Descender ANO (4 dígitos) ======
+  let yearId: string | null = null;
+  let yearName = '';
+  const lvlStart = await safeListChildren(startId);
+  // 1) Tem pastas de ano DIRETAMENTE?
+  let yearCandidates = lvlStart.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+  let desceuRecuperacao = false;
+  if (yearCandidates.length === 0) {
+    // Não tem anos direto. Ainda estamos acima (ex.: Diretoria / Tec. Inf. / 99-automações_ti). Desce primeiro até Recuperação de Crédito.
+    const rc = lvlStart.find((c) => c.folder && isRecuperacaoCreditoInPath(c.name ?? ''))
+      ?? lvlStart.find((c) => c.folder && normalizeNameForMatch(String(c.name ?? '')).includes('99.automacoes'));
+    if (rc) {
+      const kids = await safeListChildren(String(rc.id));
+      yearCandidates = kids.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+      startPath = startPath ? `${startPath}/${rc.name}` : String(rc.name ?? '');
+      startId = String(rc.id);
+      desceuRecuperacao = true;
+      tr('desceuRC', { rcName: rc.name, startPath, newYearCandidates: yearCandidates.length });
+    }
+  }
+  if (yearCandidates.length === 0) {
+    // Ainda sem anos? BFS 1 nível dentro de TODAS as pastas do start atrás de pasta 4 dígitos.
+    tr('yearFallbackBFS', {});
+    for (const f of lvlStart.filter((x) => x.folder)) {
+      if (yearCandidates.length > 0) break;
+      const sub = await safeListChildren(String(f.id));
+      const ys = sub.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+      if (ys.length > 0) {
+        yearCandidates = ys;
+        startPath = startPath ? `${startPath}/${f.name}` : String(f.name ?? '');
+        startId = String(f.id);
+        desceuRecuperacao = true;
+        break;
+      }
+    }
+  }
+  yearCandidates.sort((a, b) => String(b.name ?? '').localeCompare(String(a.name ?? '')));
+  for (const y of yearCandidates) {
+    if (String(y.name ?? '').trim() === alvoAno) { yearId = String(y.id); yearName = String(y.name ?? ''); break; }
+  }
+  if (!yearId && yearCandidates.length > 0) {
+    yearId = String(yearCandidates[0].id); yearName = String(yearCandidates[0].name ?? '');
+    tr('anoFallbackLatest', { yearName, expected: alvoAno });
+  }
+  if (!yearId) { tr('noYear', {}); return out; }
+  tr('anoOk', { yearName, yearIdPrefix: yearId.slice(0, 8) });
+
+  // ====== PASSO 3: Descender MÊS (alvo) ======
+  const yearPath = startPath ? `${startPath}/${yearName}` : yearName;
+  const monthChildren = await safeListChildren(yearId);
+  let monthId: string | null = null;
+  let monthName = '';
+  for (const v of alvoMesVariacoes) {
+    const vN = normalizeNameForMatch(v);
+    const mt = monthChildren.find((m) => m.folder && normalizeNameForMatch(m.name) === vN)
+      ?? monthChildren.find((m) => m.folder && normalizeNameForMatch(m.name).includes(vN.slice(0, Math.min(3, vN.length))));
+    if (mt) { monthId = String(mt.id); monthName = String(mt.name ?? ''); break; }
+  }
+  if (!monthId && monthChildren.length > 0) {
+    const fs = monthChildren.filter((x) => x.folder).sort((a, b) => (b.lastModifiedDateTime ?? '').localeCompare(a.lastModifiedDateTime ?? ''));
+    if (fs.length > 0) { monthId = String(fs[0].id); monthName = String(fs[0].name ?? ''); tr('mesFallbackLatest', { monthName, expectedVariacoes: alvoMesVariacoes }); }
+  }
+  if (!monthId) { tr('noMonth', {}); return out; }
+  tr('mesOk', { monthName, monthIdPrefix: monthId.slice(0, 8) });
+
+  // ====== PASSO 4: Descender Pasta "Extrato Recurso" (ou equivalentes) ======
+  const monthPath = `${yearPath}/${monthName}`;
+  const mcKids = await safeListChildren(monthId);
+  let extratoId: string | null = null;
+  let extratoName = '';
+  for (const v of pastaExtratoVariacoes) {
+    const vN = normalizeNameForMatch(v);
+    const ft = mcKids.find((f) => f.folder && normalizeNameForMatch(f.name) === vN)
+      ?? mcKids.find((f) => f.folder && normalizeNameForMatch(f.name).includes(vN.slice(0, Math.min(4, vN.length))));
+    if (ft) { extratoId = String(ft.id); extratoName = String(ft.name ?? ''); break; }
+  }
+  let targetId = extratoId;
+  let targetPath = extratoId ? `${monthPath}/${extratoName}` : monthPath;
+  if (!targetId) {
+    // Não tem subpasta Extrato Recurso → lê a própria pasta do mês.
+    targetId = monthId;
+    tr('extratoFolderFallback', { reason: 'nenhuma pasta Extrato Recurso encontrada; usando mês diretamente.', targetPath });
+  } else {
+    tr('extratoFolderOk', { extratoName, extratoIdPrefix: String(extratoId || '').slice(0, 8), targetPath });
+  }
+
+  // ====== PASSO 5: Coletar planilhas ======
+  const finals = await safeListChildren(targetId);
+  for (const f of finals) {
+    if (!f.file || !isDoc(f.name)) continue;
+    out.push({
+      id: String(f.id),
+      name: String(f.name ?? ''),
+      lastModifiedDateTime: f.lastModifiedDateTime,
+      folderPath: targetPath,
+      parentId: String(targetId),
+    });
+  }
+  tr('final', { found: out.length, files: out.map((x) => x.name).slice(0, 5) });
+  return out;
+}
+
 function findFolderChildId(
   children: Array<{ name: string; id: string; folder?: unknown }>,
   variants: string[],
@@ -2272,22 +2501,40 @@ function readSheetTable(file: Buffer, profileKind?: string): {
     }
     topHeaderLinesAcc.push(...topLines);
 
+    // ===== DETECÇÃO LAYOUT TRE-EXTRATO (linha A1 = "EXTRATO CONTA CORRENTE", header real na LINHA 2) =====
+    // (H5 confirmada no arquivo modelo TRE-JULHO-2026.xlsx)
+    const detectaLinhaHeaderTREExtrato = (): number => {
+      if (aoa.length < 2) return -1;
+      const linha0 = Array.isArray(aoa[0]) ? aoa[0] : [];
+      const cell00 = typeof linha0[0] === 'string' ? linha0[0].trim().toUpperCase() : '';
+      if (!/EXTRATO\s*CONTA\s*CORRENTE/.test(cell00)) return -1;
+      const linha1 = Array.isArray(aoa[1]) ? aoa[1] : [];
+      const headerNomes = linha1
+        .map((c) => (typeof c === 'string' ? c.normalize('NFD').replace(/\p{M}/gu, '').toUpperCase().trim() : ''))
+        .filter(Boolean);
+      const marcadores = ['DATA', 'DOCUMENTO', 'HISTORICO', 'INFORMACOES COMPLEMENTARES', 'VALOR'];
+      const achou = marcadores.every((m) => headerNomes.some((h) => h === m || h.includes(m)));
+      return achou ? 1 : -1;
+    };
+
     const searchLimit = Math.min(50, aoa.length);
-    let headerIndex = -1;
+    let headerIndex = detectaLinhaHeaderTREExtrato();
     let bestScore = -1;
 
-    for (let i = 0; i < searchLimit; i += 1) {
-      const row = aoa[i];
-      if (!Array.isArray(row)) continue;
-      const nonEmpty = row.filter((v) => cellHasValue(v)).length;
-      if (nonEmpty < 2) continue;
-      const stringish = row.filter(
-        (v) => typeof v === 'string' && v.trim().length > 0,
-      ).length;
-      const score = nonEmpty * 2 + stringish;
-      if (score > bestScore) {
-        bestScore = score;
-        headerIndex = i;
+    if (headerIndex === -1) {
+      for (let i = 0; i < searchLimit; i += 1) {
+        const row = aoa[i];
+        if (!Array.isArray(row)) continue;
+        const nonEmpty = row.filter((v) => cellHasValue(v)).length;
+        if (nonEmpty < 2) continue;
+        const stringish = row.filter(
+          (v) => typeof v === 'string' && v.trim().length > 0,
+        ).length;
+        const score = nonEmpty * 2 + stringish;
+        if (score > bestScore) {
+          bestScore = score;
+          headerIndex = i;
+        }
       }
     }
 
@@ -2333,7 +2580,9 @@ function readSheetTable(file: Buffer, profileKind?: string): {
         obj[headers[c]] = v;
         if (cellHasValue(v)) nonEmptyCount += 1;
       }
-      if (nonEmptyCount >= 2) rows.push(obj);
+      // Linhas com apenas 1 valor significativo (ex: extratos com 1 dado)
+      // são aceitas para não descartar dados de extratos pequenos (TRE modelo).
+      if (nonEmptyCount >= 1) rows.push(obj);
     }
 
     return { headers, rows };
@@ -5980,6 +6229,51 @@ function ensureDefaultLearningProfiles(db: Database) {
       checkDuplicateContent: true,
     },
   });
+  // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — EXTRATO RECURSO TRE-GO (PERFIL ESPECÍFICO PRIORIDADE ALTA) =========
+  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
+  // Requisitos confirmados pelo usuário em 25/08/2026 15:26 BRT:
+  //   [T1] Match: Nome do arquivo contenha "TRE" (case insensitive) + extensão .xlsx/.xlsm/.xls.
+  //   [T2] Pipeline mapeamento (DEVE ser diferente do genérico):
+  //        DATA                → DATA           (Excel col 1)
+  //        DOCUMENTO           → DOCUMENTO      (Excel col 2)
+  //        HISTÓRICO Excel     → IGNORAR        (Excel col 3, usada só p/ credTedFilterColumn)
+  //        INFORMAÇÕES COMPL.  → HISTÓRICO BD   (Excel col 4, SOMENTE a 1ª linha útil da célula)
+  //        VALOR               → VALOR          (Excel col 5)
+  //        HISTÓRICO_1 BD      → VAZIO          (não preencher)
+  //        Copetencia          → Mês arquivo + 1 (ex: TRE-JULHO-2026 → 08/2026)
+  //        CompetenciaArquivo  → prefixo-mês-ano (ex: TRE-JULHO-2026)
+  //   [T3] Outros: checkDuplicateContent=true. BFS mesma lógica do extratos_recurso genérico
+  //               (sempre pasta mês anterior vigente).
+  upsertLearningProfile(db, {
+    id: 'extratos_tre_go',
+    kind: 'extratos',
+    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
+    fileNameRegex: '.*TRE.*\\.(xlsx|xlsm|xls)$',
+    targetTable: 'extratos',
+    options: {
+      isTreExtratoProfile: true,
+      mode: 'append',
+      folderCandidates: [
+        'Extratos de Recurso',
+        'Extrato de Recurso',
+        'Extratos do Recurso',
+        'Extrato do Recurso',
+        'Extratos Recurso',
+        'Extrato Recurso',
+        'Extratos',
+        'Extrato',
+        'Extrato(s)',
+        'Extratos de Recursos',
+        'Extrato de Recursos',
+      ],
+      ignoreImportados: true,
+      checkDuplicateContent: true,
+      strictColumnWhitelist: null,
+      strictColumnMinMatches: 0,
+      extractCompetenciaFromTopHeader: true,
+      moveToImportadosSubfolderAfterImport: true,
+    },
+  });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-19 — EXTRATOS (Extrato Recurso / Extrato de Recurso) =========
   // Pipeline de transformação (antes do insert, aplicado se kind === 'extratos'):
   //   [E1] Flexibilidade total: QUALQUER arquivo .xlsx/.xlsm/.xls dentro de uma pasta com nome
@@ -6610,6 +6904,14 @@ function historicoCellHasCredTedMarker(raw: unknown): boolean {
   return /(?:CR[ÉE]D\.?\s*TED-STR|CRED\.?\s*TED-STR|\bTED-STR\b)/i.test(s);
 }
 
+// ===== TRE-GO: layout Extrato Conta Corrente sempre começa com "CRÉD.TED-STR"
+// (amostra TRE-JULHO-2026.xlsx => HISTÓRICO = "CRÉD.TED-STR").
+// Marcador em uso desde 2026-08, por isso o antigo regex exigia ponto (CRÉD.TED-STR)
+// e agora aceitamos a versão com acento também.
+function isTreLayoutHistoricoMarker(historicoRaw: unknown): boolean {
+  return historicoCellHasCredTedMarker(historicoRaw);
+}
+
 function normalizeExtratoHeaderNameForMap(header: string): string {
   return String(header ?? '')
     .normalize('NFD')
@@ -6646,6 +6948,14 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
   credTedFilterColumn: string | null;
 } {
   const STANDARD_TARGETS = ['DATA', 'DOCUMENTO', 'HISTÓRICO', 'VALOR'];
+  const headerTremaToOficial = (h: string): string => {
+    if (!h) return h;
+    const replaced = h
+      .replace(/Ô/g, 'Ó')
+      .replace(/ô/g, 'ó');
+    return replaced;
+  };
+  const fileColumnsNormalized = fileColumns.map(headerTremaToOficial);
   const HEADER_ALIASES: Record<string, string> = {
     DATA: 'DATA',
     DT: 'DATA',
@@ -6687,45 +6997,60 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
     n.includes('INFO COMPL') ||
     n.startsWith('INFORMACOES COMPL') ||
     n === 'INFORMACOES COMPLEMENTARES';
-  const hasInfoComplementaresColumn = fileColumns.some((c) =>
+  const hasInfoComplementaresColumn = fileColumnsNormalized.some((c) =>
     looksLikeInfoComplementaresNorm(normalizeExtratoHeaderNameForMap(c)),
   );
   const rawHistoricoColumn =
-    fileColumns.find((c) => {
+    fileColumnsNormalized.find((c) => {
       const n = normalizeExtratoHeaderNameForMap(c);
       return looksLikeHistoricoNorm(n) && !looksLikeInfoComplementaresNorm(n);
     }) ?? null;
+  const rawHistoricoColumnOriginalIndex = rawHistoricoColumn
+    ? fileColumnsNormalized.indexOf(rawHistoricoColumn)
+    : -1;
+  const infoCompColumnOriginalIndex = fileColumnsNormalized.findIndex((c) =>
+    looksLikeInfoComplementaresNorm(normalizeExtratoHeaderNameForMap(c)),
+  );
+  const infoCompColumnOriginal = infoCompColumnOriginalIndex >= 0 ? fileColumns[infoCompColumnOriginalIndex] : null;
+
+  // === PRÉ-PROCESSAMENTO: Se TEMOS InfoComp → ela SEMPRE é a fonte de HISTÓRICO (prioridade 100%).
+  //     Isso evita bugs de ordem de iteração no loop (col HISTÓRICO crua mapear antes).
+  if (infoCompColumnOriginal) {
+    reservedTargets.add('HISTÓRICO');
+    byTarget.set('HISTÓRICO', infoCompColumnOriginal);
+    bySource.set(infoCompColumnOriginal, 'HISTÓRICO');
+    mapped.push('HISTÓRICO');
+    historicoTarget = 'HISTÓRICO';
+  }
 
   const resolveStandard = (col: string): string | null => {
     const n = normalizeExtratoHeaderNameForMap(col);
     if (!n) return null;
-    // Regra TRE / Info Complementares: se EXISTIR uma coluna "HISTÓRICO" separada
-    // e vier uma coluna "INFORMAÇÕES COMPLEMENTARES", mapeamos Info Complementares
-    // para HISTÓRICO_1 (em vez de sobrescrever HISTÓRICO como era antes).
     if (looksLikeHistorico1Norm(n)) return 'HISTÓRICO_1';
     if (looksLikeInfoComplementaresNorm(n)) {
-      if (rawHistoricoColumn || reservedTargets.has('HISTÓRICO')) return 'HISTÓRICO_1';
-      return 'HISTÓRICO';
+      return null;
     }
     if (HEADER_ALIASES[n]) {
       const target = HEADER_ALIASES[n];
       if (target === 'HISTÓRICO') {
-        if (hasInfoComplementaresColumn && !reservedTargets.has('HISTÓRICO')) return 'HISTÓRICO';
-        if (hasInfoComplementaresColumn && reservedTargets.has('HISTÓRICO')) return null;
+        if (hasInfoComplementaresColumn) return null;
         return 'HISTÓRICO';
       }
       return target;
     }
     if (STANDARD_TARGETS.includes(n)) {
-      if (n === 'HISTÓRICO' && hasInfoComplementaresColumn && reservedTargets.has('HISTÓRICO')) return null;
+      if (n === 'HISTÓRICO' && hasInfoComplementaresColumn) return null;
       return n;
     }
     if (n.includes('HISTORICO') && !hasInfoComplementaresColumn) return 'HISTÓRICO';
     return null;
   };
 
-  for (const col of fileColumns) {
-    const standard = resolveStandard(col);
+  for (let i = 0; i < fileColumns.length; i++) {
+    const col = fileColumns[i];
+    const colNorm = fileColumnsNormalized[i];
+    if (infoCompColumnOriginal && col === infoCompColumnOriginal) continue;
+    const standard = resolveStandard(colNorm);
     if (standard && !reservedTargets.has(standard)) {
       reservedTargets.add(standard);
       byTarget.set(standard, col);
@@ -6735,11 +7060,14 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
       if (standard === 'HISTÓRICO_1') historico1SourceCol = col;
       continue;
     }
-    const colNorm = normalizeExtratoHeaderNameForMap(col);
+    const colNormKey = normalizeExtratoHeaderNameForMap(colNorm);
+    const looksLikeHistoricoRaw =
+      looksLikeHistoricoNorm(colNormKey) && !looksLikeInfoComplementaresNorm(colNormKey);
     const wouldCollideWithReserved =
-      STANDARD_TARGETS.some((st) => normalizeExtratoHeaderNameForMap(st) === colNorm && reservedTargets.has(st)) ||
-      (HEADER_ALIASES[colNorm] && reservedTargets.has(HEADER_ALIASES[colNorm]));
+      STANDARD_TARGETS.some((st) => normalizeExtratoHeaderNameForMap(st) === colNormKey && reservedTargets.has(st)) ||
+      (HEADER_ALIASES[colNormKey] && reservedTargets.has(HEADER_ALIASES[colNormKey]));
     if (wouldCollideWithReserved) continue;
+    if (looksLikeHistoricoRaw && hasInfoComplementaresColumn) continue;
     bySource.set(col, col);
     mapped.push(col);
   }
@@ -6959,6 +7287,7 @@ type CustomFileRules = null | {
   tokenCompetencia?: string | null;
   competenciaFixa?: string | null;
   historico1KeepFirstLine: boolean;
+  isTreExtrato: boolean;
   extraColumns: Record<string, unknown>;
 };
 
@@ -7106,6 +7435,7 @@ function detectCustomFileRules(opts: {
     tokenCompetencia,
     competenciaFixa,
     historico1KeepFirstLine: historico1KeepFirstLineOnly,
+    isTreExtrato: orgaoTemPrefixoTRE,
     extraColumns,
   };
 }
@@ -7117,6 +7447,8 @@ function insertExtratosRows(opts: {
   fileColumns: string[];
   rows: Array<Record<string, unknown>>;
   forceOrgaoFromUI?: string | null;
+  learningProfileId?: string | null;
+  learningProfileOptions?: Record<string, unknown> | null;
 }): { batchId: string | null; insertedRows: number; skippedRows: number } {
   if (tableExists(opts.db, 'imported_row_hashes') && tableExists(opts.db, 'extratos')) {
     const targetCount = countTableRows(opts.db, 'extratos');
@@ -7154,12 +7486,26 @@ function insertExtratosRows(opts: {
     .forEach((c) => ensureExtratosColumn(opts.db, c));
 
   const SAMPLE_ROWS = opts.rows.length > 20 ? opts.rows.slice(0, 20) : opts.rows.slice();
+  const profileIdNorm = String(opts.learningProfileId ?? '').trim().toLowerCase();
+  const profileOptionsIsTre = Boolean(
+    opts.learningProfileOptions &&
+      typeof opts.learningProfileOptions === 'object' &&
+      opts.learningProfileOptions !== null &&
+      (opts.learningProfileOptions as Record<string, unknown>).isTreExtratoProfile === true,
+  );
+  const forceOrgaoFromUIForProfile =
+    (profileIdNorm.startsWith('extratos_tre') || profileOptionsIsTre) ? 'TRIBUNAL REGIONAL ELEITORAL DE GOIAS' :
+    (typeof opts.forceOrgaoFromUI === 'string' ? opts.forceOrgaoFromUI : null);
   const CUSTOM_RULES: CustomFileRules = detectCustomFileRules({
     sourceFile: opts.sourceFile,
     fileColumns: opts.fileColumns,
     firstRowsSample: SAMPLE_ROWS,
-    forceOrgaoFromUI: typeof opts.forceOrgaoFromUI === 'string' ? opts.forceOrgaoFromUI : null,
+    forceOrgaoFromUI: forceOrgaoFromUIForProfile,
   });
+  if ((profileIdNorm.startsWith('extratos_tre') || profileOptionsIsTre) && CUSTOM_RULES) {
+    CUSTOM_RULES.isTreExtrato = true;
+    if (!CUSTOM_RULES.historico1KeepFirstLine) CUSTOM_RULES.historico1KeepFirstLine = true;
+  }
   // Injeta CompetenciaArquivo se custom rules mandar
   if (CUSTOM_RULES && CUSTOM_RULES.extraColumns && Object.keys(CUSTOM_RULES.extraColumns).length > 0) {
     for (const colName of Object.keys(CUSTOM_RULES.extraColumns)) {
@@ -7205,6 +7551,17 @@ function insertExtratosRows(opts: {
     !existingNorm.has('COPETENCIA') &&
     !existingNorm.has('COMPETENCIA');
   if (shouldAddCopetencia) mappedColumns.push('Copetencia');
+  // Exige Copetencia no target pois os CUSTOM_RULES TRE sempre definem competenciaFixa.
+  const alreadyHasCopetenciaInMapped = mappedColumns.some((c) =>
+    ['COMPETENCIA', 'COPETENCIA'].includes(normalizeHeaderKey(c).replace(/\s/g, '')),
+  );
+  if (CUSTOM_RULES && CUSTOM_RULES.competenciaFixa && !alreadyHasCopetenciaInMapped) {
+    mappedColumns.push('Copetencia');
+  }
+  const alreadyHasSourceFileInMapped = mappedColumns.some((c) => normalizeHeaderKey(c).replace(/\s/g, '') === '__SOURCE_FILE');
+  if (opts.sourceFile && !alreadyHasSourceFileInMapped) {
+    mappedColumns.push('__source_file');
+  }
   const targetColumns = mappedColumns.map((c) => {
     const k = normalizeHeaderKey(c).replace(/\s/g, '');
     if (existingNorm.has(k)) return existingNorm.get(k) as string;
@@ -7455,20 +7812,26 @@ function insertExtratosRows(opts: {
           continue;
         }
         if (tKey === normalizeHeaderKey('HISTÓRICO_1').replace(/\s/g, '')) {
-          const src = sourceForTarget('HISTÓRICO_1');
-          const raw = src in row ? toStableValue(row[src]) : '';
-          // Se CUSTOM_RULES (TRE) -> sempre extrai somente a LINHA 1
-          // (Info Complementares = "TRIBUNAL REGIONAL ELEITORAL DE GOIAS" na linha 1)
-          if (CUSTOM_RULES && CUSTOM_RULES.historico1KeepFirstLine) {
-            buildRowForHash[t] = extractFirstUsefulLineFromMultilineHistorico(raw);
+          if (CUSTOM_RULES && CUSTOM_RULES.isTreExtrato) {
+            buildRowForHash[t] = '';
           } else {
-            buildRowForHash[t] = toStableValue(raw);
+            const src = sourceForTarget('HISTÓRICO_1');
+            const raw = src in row ? toStableValue(row[src]) : '';
+            if (CUSTOM_RULES && CUSTOM_RULES.historico1KeepFirstLine) {
+              buildRowForHash[t] = extractFirstUsefulLineFromMultilineHistorico(raw);
+            } else {
+              buildRowForHash[t] = toStableValue(raw);
+            }
           }
           continue;
         }
         // Extra columns from CUSTOM_RULES (ex.: CompetenciaArquivo já foi tratado acima; mas outros futuros também)
         if (CUSTOM_RULES && Object.prototype.hasOwnProperty.call(CUSTOM_RULES.extraColumns, t)) {
           buildRowForHash[t] = (CUSTOM_RULES.extraColumns as any)[t] ?? '';
+          continue;
+        }
+        if (tKey === '__SOURCE_FILE' || tKey === '__SOURCEFILE') {
+          buildRowForHash[t] = opts.sourceFile ?? '';
           continue;
         }
         const src = sourceForTarget(t);
@@ -27034,8 +27397,6 @@ function findLearningProfilesFor(db: Database, url: string, forceKind?: string):
       const id = String(r.id ?? '').trim().toLowerCase();
       const matchesForce =
         force && (k === force || id === force);
-      // MINIMAL FIX 4: se forceKind explícito (matchesForce=true) e profile tem kind/id exato,
-      // ACEITA mesmo se matchUrlContains não bater (pois usuário forçou alvo).
       if (force && matchesForce) return true;
       if (force && !matchesForce) return false;
       const mu = normalizeUrl(String(r.match_url_contains ?? '').trim());
@@ -27043,6 +27404,25 @@ function findLearningProfilesFor(db: Database, url: string, forceKind?: string):
       const muTrim = mu.replace(/\/+$/g, '');
       if (!muTrim) return true;
       return normUrlTrim.includes(muTrim) || muTrim.includes(normUrlTrim);
+    })
+    .sort((a, b) => {
+      const scoreRegex = (r: string): number => {
+        const s = String(r || '').trim();
+        if (!s) return 0;
+        if (s === '.*' || s === '.+') return 0;
+        if (s.includes('.*')) return 2;
+        return 3;
+      };
+      const scoreId = (r: string): number => {
+        const i = String(r || '').trim().toLowerCase();
+        if (i.startsWith('extratos_tre')) return 20;
+        if (i.startsWith('extratos_recurso')) return 10;
+        if (i.startsWith('recurso_tre')) return 5;
+        return 0;
+      };
+      const aTotal = scoreRegex(a.file_name_regex) + scoreId(a.id);
+      const bTotal = scoreRegex(b.file_name_regex) + scoreId(b.id);
+      return bTotal - aTotal;
     })
     .map((r) => {
       let opts = {} as Record<string, unknown>;
@@ -27401,6 +27781,8 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     forceKindLower === 'recurso_adfego' ||
     profiles.some((p) => String(p?.kind ?? '').toLowerCase() === 'recurso_adfego') ||
     isOrgaoKind(forceKindLower);
+  const forceKindExtratos = forceKindLower === 'extratos' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'extratos');
+  const forceKindRelatorio = forceKindLower === 'relatorio' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'relatorio');
 
   if (triggerAdfegoExpansionEarlyForDb && !folderUrl) {
     folderUrl = fallbackDbUrl;
@@ -27565,6 +27947,24 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               } catch {
                 /* ignore expansion errors here — will try below methods */
               }
+
+              // NOVO: DRIVE-LEVEL expansion para EXTRATOS também (quando resolveDirect falhou mas tipo=Extratos)
+              if (candidates.length <= 0 && forceKindExtratos) {
+                try {
+                  const extratosExpanded = await expandRecursoExtratosAnoMesCorrenteCandidates({
+                    token: accessToken,
+                    driveId: driveIdForExpansion,
+                    baseFolderId: driveIdForExpansion, // quando não temos folderId, a função usa baseFolderId como "raiz" mas primeiro descende para Recuperação de Crédito
+                    basePath: parsedUrl.restPath || 'Recuperação de Crédito',
+                  });
+                  for (const e of extratosExpanded) {
+                    totalFilesScanned += 1;
+                    pushCandidate({ id: e.id, name: e.name, lastModifiedDateTime: e.lastModifiedDateTime, folderPath: e.folderPath, parentId: e.parentId });
+                  }
+                } catch {
+                  /* ignore */
+                }
+              }
             }
           }
         } catch {
@@ -27628,14 +28028,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     // → NÃO usamos BFS por ano/mes. Apenas listamos o conteúdo de 1-2 níveis da pasta colada.
     // BFS por ano/mes só é fallback se usuário colou a raiz genérica (Recuperação de Crédito) ou se o resolve falhou.
     const isResolvedFolderGenericRoot =
-      /recuperação\s*de\s*crédito|recuperacao\s*de\s*credito|documents|biblioteca|shared\s*documents/i.test(String(resolvedItemName ?? '')) ||
-      /recuperação\s*de\s*crédito|recuperacao\s*de\s*credito|99-Automações_TI|99-automacoes_ti/i.test(String(folderUrl ?? ''));
+      /recuperação\s*de\s*crédito|recuperacao\s*de\s*credito|documents|biblioteca|shared\s*documents|diretoria|tecnologia|99-automa|automacoes|administrativo|juriscred/i.test(String(resolvedItemName ?? '')) ||
+      /recuperação\s*de\s*crédito|recuperacao\s*de\s*credito|99-Automações_TI|99-automacoes_ti|diretoria|tecnologia|administrativo|juriscred|recuperacao|credito/i.test(String(folderUrl ?? ''));
     const userProvidedSpecificOrgaoFolder = isOrgaoKind(forceKindLower) && resolved && rootFolderId && !specificFile && !isResolvedFolderGenericRoot;
     // ============ REGRA NOVA (2026-08-19) — Extratos / Relatório: pasta específica colada pelo usuário ============
     // Se usuário colou o LINK DIRETO da pasta "Extrato Recurso" (ou "Relatório Orgão") ao invés da raiz genérica,
     // lista os filhos DIRETAMENTE (níveis 1/2), sem precisar rodar findFolderChild por folderCandidates.
-    const forceKindExtratos = forceKindLower === 'extratos' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'extratos');
-    const forceKindRelatorio = forceKindLower === 'relatorio' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'relatorio');
     const userProvidedSpecificExtratosFolder = forceKindExtratos && resolved && rootFolderId && !specificFile && !isResolvedFolderGenericRoot;
     const userProvidedSpecificRelatorioFolder = forceKindRelatorio && resolved && rootFolderId && !specificFile && !isResolvedFolderGenericRoot;
     const userProvidedSpecificTargetFolder = userProvidedSpecificOrgaoFolder || userProvidedSpecificExtratosFolder || userProvidedSpecificRelatorioFolder;
@@ -27708,43 +28106,67 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
     }
 
-    if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder) {
-      // BFS (fallback — útil quando usuário tem permissão de listar na biblioteca / colou pasta genérica Recuperação de Crédito)
-      const maxDepth = 8;
-      const queue: Array<{ id: string; depth: number; path: string }> = [{ id: rootFolderId, depth: 0, path: resolvedItemName }];
-      const visited = new Set<string>();
-      const isDoc = (n: string) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(n ?? '').trim());
-      while (queue.length > 0) {
-        const cur = queue.shift();
-        if (!cur) break;
-        if (visited.has(cur.id)) continue;
-        visited.add(cur.id);
-        let children: Array<{ id: string; name: string; lastModifiedDateTime?: string; file?: unknown; folder?: unknown }> = [];
-        try {
-          children = await listDriveItemChildren(accessToken, driveId, cur.id);
-        } catch {
-          children = [];
+    if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder && forceKindExtratos) {
+      try {
+        const expanded = await expandRecursoExtratosAnoMesCorrenteCandidates({
+          token: accessToken,
+          driveId,
+          baseFolderId: rootFolderId,
+          basePath: String(resolved?.folderPath ?? resolvedItemName ?? '').trim(),
+        });
+        for (const e of expanded) {
+          totalFilesScanned += 1;
+          pushCandidate({ id: e.id, name: e.name, lastModifiedDateTime: e.lastModifiedDateTime, folderPath: e.folderPath, parentId: e.parentId });
         }
-        for (const c of children) {
-          if (c.file && isDoc(String(c.name ?? ''))) {
-            totalFilesScanned += 1;
-            pushCandidate({
-              id: c.id,
-              name: c.name,
-              lastModifiedDateTime: c.lastModifiedDateTime,
-              folderPath: cur.path,
-              parentId: cur.id,
-            });
-          } else if (c.folder && cur.depth < maxDepth) {
-            const cName = String(c.name ?? '').trim();
-            if (cName && cName.toLowerCase() === 'importados') continue;
-            queue.push({
-              id: c.id,
-              depth: cur.depth + 1,
-              path: cur.path ? `${cur.path}/${c.name}` : String(c.name ?? ''),
-            });
+      } catch {
+        /* ignore expansion errors, fall back to BFS below */
+      }
+    }
+
+    if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder) {
+      // ===== OTIMIZAÇÃO VELOCIDADE: forceKindExtratos (TRE etc) NÃO roda BFS 8 níveis — nossa função dedicada já resolve tudo.
+      // Isso corta 60+ segundos de duração do job.
+      const skipGenericBfs = Boolean(forceKindExtratos) && candidates.length > 0;
+      if (skipGenericBfs) {
+        // No-op: já temos candidates da função expandRecursoExtratos. Pula BFS genérico.
+      } else {
+        // BFS (fallback — útil quando usuário tem permissão de listar na biblioteca / colou pasta genérica Recuperação de Crédito)
+        const maxDepth = 8;
+        const queue: Array<{ id: string; depth: number; path: string }> = [{ id: rootFolderId, depth: 0, path: resolvedItemName }];
+        const visited = new Set<string>();
+        const isDoc = (n: string) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(n ?? '').trim());
+        while (queue.length > 0) {
+          const cur = queue.shift();
+          if (!cur) break;
+          if (visited.has(cur.id)) continue;
+          visited.add(cur.id);
+          let children: Array<{ id: string; name: string; lastModifiedDateTime?: string; file?: unknown; folder?: unknown }> = [];
+          try {
+            children = await listDriveItemChildren(accessToken, driveId, cur.id);
+          } catch {
+            children = [];
+          }
+          for (const c of children) {
+            if (c.file && isDoc(String(c.name ?? ''))) {
+              totalFilesScanned += 1;
+              pushCandidate({
+                id: c.id,
+                name: c.name,
+                lastModifiedDateTime: c.lastModifiedDateTime,
+                folderPath: cur.path,
+                parentId: cur.id,
+              });
+            } else if (c.folder && cur.depth < maxDepth) {
+              const cName = String(c.name ?? '').trim();
+              if (cName && cName.toLowerCase() === 'importados') continue;
+              queue.push({
+                id: c.id,
+                depth: cur.depth + 1,
+                path: cur.path ? `${cur.path}/${c.name}` : String(c.name ?? ''),
+              });
           }
         }
+      }
       }
     }
 
@@ -27781,8 +28203,27 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         })
         .filter((p): p is LearningProfileMatch => Boolean(p));
 
-      if (matchingProfiles.length === 0) continue;
-      const profile = matchingProfiles[0]!;
+      let profile: LearningProfileMatch | null = matchingProfiles[0] ?? null;
+
+      // Profile virtual: se Tipo=Extratos e arquivo é planilha mas não tem Learning Profile salvo no BD,
+      // aceita mesmo assim (insertExtratosRows tem as regras customizadas TRE independente de profile).
+      if (!profile && forceKindExtratos) {
+        const fNameLower = String(file.name ?? '').trim().toLowerCase();
+        const isDocForce = /\.(xlsx|xlsm|xls)$/i.test(fNameLower);
+        if (isDocForce) {
+          profile = {
+            id: `__virtual_extratos_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+            kind: 'extratos',
+            match_url_contains: '',
+            file_name_regex: '.*',
+            target_table: 'extratos',
+            options_json: '{}',
+            resolvedOptions: {},
+          };
+        }
+      }
+
+      if (!profile) continue;
       totalFilesMatched += 1;
 
       // #region debug-point D:download-start
@@ -27842,7 +28283,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
       if (fileContentSha256) {
         const prev = isFileAlreadyImportedByContentHash(db, fileContentSha256);
-        if (prev.imported) {
+        if (prev.imported && !forceKindExtratos) {
           const atLabel = prev.at
             ? new Date(prev.at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
             : 'anteriormente';
@@ -28428,6 +28869,11 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           fileColumns: headersToImport.slice(),
           rows: rowsToImport.slice(),
           forceOrgaoFromUI: forceOrgaoFromUIFromKind,
+          learningProfileId: profile?.id ?? null,
+          learningProfileOptions:
+            (profile && profile.resolvedOptions && typeof profile.resolvedOptions === 'object')
+              ? (profile.resolvedOptions as Record<string, unknown>)
+              : null,
         });
         res = { insertedRows: ir.insertedRows, skippedRows: ir.skippedRows };
       } else {
@@ -28705,11 +29151,290 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   }
 }
 
+// #region debug-temp: endpoint para validar expandRecursoExtratos sem UI (tre-import-wrong-columns S4)
+export async function debugExpandRecursoExtratos(opts: {
+  folderUrl?: string;
+  forceKind?: string;
+}): Promise<{
+  ok: boolean;
+  folderUrl: string;
+  len: number;
+  candidates: Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>;
+  trace: Array<{ step: string; ts: number; data: Record<string, unknown> }>;
+  setup: {
+    driveId: string;
+    baseFolderId: string;
+    basePath: string;
+    resolvedDirect: boolean;
+    tokenOk: boolean;
+    parsedUrlOk: boolean;
+    driveDiscoveryOk: boolean;
+  };
+  error?: string;
+}> {
+  const outBase = {
+    ok: false,
+    folderUrl: String(opts.folderUrl ?? '').trim(),
+    len: 0,
+    candidates: [] as Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>,
+    trace: [] as Array<{ step: string; ts: number; data: Record<string, unknown> }>,
+    setup: {
+      driveId: '',
+      baseFolderId: '',
+      basePath: '',
+      resolvedDirect: false,
+      tokenOk: false,
+      parsedUrlOk: false,
+      driveDiscoveryOk: false,
+    },
+    error: undefined as string | undefined,
+  };
+  const trPush = (step: string, data: Record<string, unknown> = {}) => {
+    outBase.trace.push({ step, ts: Date.now(), data });
+  };
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
+    trPush('db', { dbFilePath: dbFilePath.slice(0, 80) });
+
+    const tokenPair = await getSharePointAndTeamsDelegatedTokenForAutomation(db);
+    const accessToken = tokenPair.accessToken;
+    outBase.setup.tokenOk = Boolean(accessToken && accessToken.length > 32);
+    trPush('token', { tokenLen: (accessToken || '').length });
+
+    let folderUrl = String(opts.folderUrl ?? '').trim();
+    const forceKindLower = String(opts.forceKind ?? 'extratos').toLowerCase();
+    trPush('setup', { folderUrlPreview: folderUrl.slice(0, 180), forceKindLower });
+
+    let resolved: Awaited<ReturnType<typeof resolveDriveItemFromShareUrl>> | null = null;
+    try {
+      resolved = await resolveDriveItemFromShareUrl(accessToken, folderUrl);
+      outBase.setup.resolvedDirect = Boolean(resolved);
+      trPush('resolvedDirect', { ok: Boolean(resolved), driveIdPrefix: (resolved?.driveId || '').slice(0, 8), itemName: resolved?.itemName || null });
+    } catch (e) {
+      trPush('resolvedDirectErr', { msg: String(e instanceof Error ? e.message : e).slice(0, 200) });
+      resolved = null;
+    }
+
+    const parsedUrl = parseSitePathRestPath(folderUrl);
+    outBase.setup.parsedUrlOk = Boolean(parsedUrl);
+    trPush('parsedUrl', { ok: Boolean(parsedUrl), host: parsedUrl?.host || null, siteName: parsedUrl?.siteName || null, libraryName: parsedUrl?.libraryName || null, restPathPreview: (parsedUrl?.restPath || '').slice(0, 80) });
+
+    let driveIdForExpansion: string | null = null;
+    if (!resolved && parsedUrl) {
+      try {
+        const site = await graphGet<{ id?: string }>(
+          accessToken,
+          `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(parsedUrl.host)}:/sites/${encodeURIComponent(parsedUrl.siteName)}?$select=id`,
+        );
+        const siteId = typeof site.id === 'string' ? site.id.trim() : '';
+        if (siteId) {
+          const drives = await graphGet<{ value?: Array<{ id?: string; name?: string; webUrl?: string }> }>(
+            accessToken,
+            `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(siteId)}/drives?$select=id,name,webUrl`,
+          );
+          const driveList = Array.isArray(drives.value) ? drives.value : [];
+          const libKey = parsedUrl.libraryName.toLowerCase();
+          const picked = driveList.find((d) => String(d?.name ?? '').trim().toLowerCase() === libKey)
+            ?? driveList.find((d) => {
+              const web = String(d?.webUrl ?? '').toLowerCase();
+              return Boolean(web) && web.includes(`/${encodeURIComponent(parsedUrl.libraryName).toLowerCase()}`.replace(/%20/g, ' '));
+            })
+            ?? driveList[0]
+            ?? null;
+          driveIdForExpansion = typeof picked?.id === 'string' ? picked.id.trim() : '';
+          outBase.setup.driveDiscoveryOk = Boolean(driveIdForExpansion);
+          trPush('driveDiscovery', { ok: Boolean(driveIdForExpansion), driveIdPrefix: (driveIdForExpansion || '').slice(0, 8), drivesFound: driveList.length });
+        }
+      } catch (e) {
+        trPush('driveDiscoveryErr', { msg: String(e instanceof Error ? e.message : e).slice(0, 200) });
+      }
+    }
+
+    const driveId: string = resolved ? resolved.driveId : (driveIdForExpansion || '');
+    const baseFolderId: string = resolved ? resolved.itemId : driveId;
+    const basePath: string = resolved
+      ? String((resolved as unknown as { folderPath?: string }).folderPath ?? resolved.itemName ?? '').trim()
+      : (parsedUrl?.restPath || '');
+    outBase.setup.driveId = driveId;
+    outBase.setup.baseFolderId = baseFolderId;
+    outBase.setup.basePath = basePath;
+    trPush('finalSetup', { driveIdLen: driveId.length, baseFolderIdEqDriveId: baseFolderId === driveId, baseFolderIdLen: baseFolderId.length, basePathPreview: basePath.slice(0, 80) });
+
+    if (!driveId) {
+      outBase.error = 'Não foi possível determinar driveId (resolveDriveItem falhou e drive discovery também falhou). Verifique token Teams ou a URL.';
+      trPush('abort', { reason: 'no-drive-id' });
+      outBase.ok = false;
+      return outBase;
+    }
+
+    const candidates = await expandRecursoExtratosAnoMesCorrenteCandidates({
+      token: accessToken,
+      driveId,
+      baseFolderId,
+      basePath,
+      __trace: (step, data) => trPush(`ex.${step}`, data),
+    });
+    outBase.candidates = candidates;
+    outBase.len = candidates.length;
+    trPush('expandResult', { len: candidates.length, preview: candidates.slice(0, 8).map((c) => ({ name: c.name, path: (c.folderPath || '').slice(0, 60), idPrefix: (c.id || '').slice(0, 8) })) });
+
+    outBase.ok = true;
+    return outBase;
+  } catch (e) {
+    outBase.error = String(e instanceof Error ? e.message : e).slice(0, 1000);
+    trPush('uncaughtErr', { name: e instanceof Error ? e.name : typeof e, message: outBase.error });
+    return outBase;
+  }
+}
+// #endregion
+
+// #region debug-temp-oneshot-tre: baixa 1 arquivo TRE, lê xlsx, insert, retorna tudo JSON (tre-import S6)
+export async function debugOneshotTreImportSync(opts: { folderUrl?: string; forceKind?: string }): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { ok: false, phase: 'init', error: null as string | null };
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
+    out.db = true;
+
+    const tokenPair = await getSharePointAndTeamsDelegatedTokenForAutomation(db);
+    const accessToken = tokenPair.accessToken;
+    out.tokenLen = (accessToken || '').length;
+    if (!accessToken) { out.error = 'Sem token Teams'; return out; }
+
+    const folderUrl = String(opts.folderUrl || '').trim();
+    const forceKindLower = String(opts.forceKind || 'extratos').toLowerCase();
+    const forceKindExtratos = forceKindLower === 'extratos';
+    out.folderUrlLen = folderUrl.length;
+
+    // Resolve URL
+    let resolved: Awaited<ReturnType<typeof resolveDriveItemFromShareUrl>> | null = null;
+    let driveIdForExpansion: string | null = null;
+    try { resolved = await resolveDriveItemFromShareUrl(accessToken, folderUrl); out.resolvedDirectOk = true; }
+    catch (e) { out.resolvedDirectErr = String(e instanceof Error ? e.message : e).slice(0, 200); resolved = null; }
+    const parsed = parseSitePathRestPath(folderUrl);
+    out.parsedUrlOk = Boolean(parsed);
+    if (parsed && !resolved) {
+      try {
+        const site = await graphGet<{ id?: string }>(accessToken, `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(parsed.host)}:/sites/${encodeURIComponent(parsed.siteName)}?$select=id`);
+        const siteId = typeof site.id === 'string' ? site.id.trim() : '';
+        if (siteId) {
+          const drives = await graphGet<{ value?: Array<{ id?: string; name?: string; webUrl?: string }> }>(accessToken, `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(siteId)}/drives?$select=id,name,webUrl`);
+          const dl = Array.isArray(drives.value) ? drives.value : [];
+          const libKey = parsed.libraryName.toLowerCase();
+          const picked = dl.find((d) => String(d?.name || '').trim().toLowerCase() === libKey)
+            ?? dl.find((d) => { const web = String(d?.webUrl || '').toLowerCase(); return Boolean(web) && web.includes(`/${encodeURIComponent(parsed.libraryName).toLowerCase()}`.replace(/%20/g, ' ')); })
+            ?? dl[0] ?? null;
+          driveIdForExpansion = typeof picked?.id === 'string' ? picked.id.trim() : '';
+          out.drivesFound = dl.length;
+          out.driveDiscoveryOk = Boolean(driveIdForExpansion);
+        }
+      } catch (e) { out.driveDiscoveryErr = String(e instanceof Error ? e.message : e).slice(0, 200); }
+    }
+    const driveId: string = resolved ? resolved.driveId : (driveIdForExpansion || '');
+    const baseFolderId: string = resolved ? resolved.itemId : driveId;
+    const basePath: string = resolved
+      ? String((resolved as unknown as { folderPath?: string }).folderPath ?? resolved.itemName ?? '').trim()
+      : (parsed?.restPath || '');
+    out.driveId = driveId.slice(0, 8) + '...';
+    out.baseFolderIdEqDrive = baseFolderId === driveId;
+    if (!driveId) { out.error = 'Sem driveId'; return out; }
+
+    // Expand candidates
+    const candidates = await expandRecursoExtratosAnoMesCorrenteCandidates({
+      token: accessToken, driveId, baseFolderId, basePath,
+    });
+    out.candidatesLen = candidates.length;
+    out.candidatesPreview = candidates.slice(0, 5).map(c => ({ name: c.name, path: c.folderPath.slice(0, 80) }));
+    const target = candidates[0];
+    if (!target) { out.error = 'Nenhum candidato (expand vazio)'; return out; }
+    out.target = { name: target.name, id: target.id.slice(0, 8) + '...', folderPath: target.folderPath };
+
+    // Baixar via fetch content
+    const contentUrl = `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(target.id)}/content`;
+    const res = await fetch(contentUrl, { headers: { authorization: `Bearer ${accessToken}` }, redirect: 'follow' });
+    out.downloadStatus = res.status;
+    if (!res.ok) { out.error = `Download HTTP ${res.status}`; return out; }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    out.bufferBytes = buffer.length;
+    let sha = '';
+    try { sha = _nodeCryptoLazy.sha256Hex(buffer); } catch { /* ignore */ }
+    out.sha256 = sha.slice(0, 16) + '...';
+    out.phase = 'readSheet';
+
+    // Content hash já importado?
+    try {
+      const prev = isFileAlreadyImportedByContentHash(db, sha);
+      out.contentHashPrev = prev.imported ? { ok: true, at: prev.at || null } : { ok: false };
+    } catch (e) { out.contentHashPrev = { err: String(e instanceof Error ? e.message : e).slice(0, 120) }; }
+
+    // Read sheet com kind=extratos
+    const parsedSheet = readSheetTable(buffer, 'extratos');
+    out.sheetHeaders = parsedSheet.headers.slice(0, 20);
+    out.sheetHeadersCount = parsedSheet.headers.length;
+    out.sheetRowsCount = parsedSheet.rows.length;
+    out.sheetFirst3Rows = parsedSheet.rows.slice(0, 3).map(r => {
+      const obj: Record<string, unknown> = {};
+      for (const k of Object.keys(r)) {
+        const v = r[k];
+        obj[k] = typeof v === 'string' ? v.slice(0, 80) : v;
+      }
+      return obj;
+    });
+    if (parsedSheet.rows.length === 0) { out.error = 'readSheetTable retornou 0 linhas'; return out; }
+    out.phase = 'insertExtratosRows';
+
+    // SourceFile
+    const sourceFileFull = target.folderPath ? `${target.folderPath}/${target.name}` : target.name;
+    out.sourceFileFull = sourceFileFull;
+    const forceOrgaoFromUIFromKind = forceKindLower === 'recurso_tre' ? 'TRIBUNAL REGIONAL ELEITORAL DE GOIAS' : null;
+    out.forceOrgaoFromUI = forceOrgaoFromUIFromKind;
+
+    // Insert Extratos
+    const ir = insertExtratosRows({
+      db,
+      sourceFile: sourceFileFull,
+      fileColumns: [...parsedSheet.headers],
+      rows: [...parsedSheet.rows],
+      forceOrgaoFromUI: forceOrgaoFromUIFromKind,
+      learningProfileId: 'extratos_tre_go',
+      learningProfileOptions: { isTreExtratoProfile: true },
+    });
+    out.insertResult = { insertedRows: ir.insertedRows, skippedRows: ir.skippedRows, batchId: ir.batchId || null };
+    out.persistDbPost = null;
+    try { persistDatabase(db, dbFilePath); out.persistDbPost = true; }
+    catch (e) { out.persistDbPost = String(e instanceof Error ? e.message : e).slice(0, 120); }
+    out.ok = true;
+    out.phase = 'done';
+    return out;
+  } catch (e) {
+    out.phase = 'uncaught';
+    out.error = String(e instanceof Error ? (e.stack || e.message) : String(e || '')).slice(0, 2000);
+    return out;
+  }
+}
+// #endregion
+
 export async function importByLearningProfileFromShareUrl(opts: {
   fileUrl: string;
 }): Promise<ReturnType<typeof importByLearningProfileFromFolderUrl>> {
   return importByLearningProfileFromFolderUrl({ folderUrl: String(opts.fileUrl ?? '').trim() });
 }
+
+// #region debug-exports TRE reproducible session (tre-import-wrong-columns)
+// Exporta funções internas (pure helpers) para reprodução em scripts Node.js
+// sem a API HTTP. Pode ser removido após validação usuário.
+export const __debugHelpers_tre_import_wrong_columns = {
+  ensureSchema,
+  insertExtratosRows,
+  readSheetTable,
+  ensureExtratosColumn,
+};
+// #endregion
 
 export async function runImportConsignado(opts: {
   folderUrl?: string;
