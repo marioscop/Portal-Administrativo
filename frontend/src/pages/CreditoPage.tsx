@@ -10977,13 +10977,16 @@ export default function CreditoPage() {
                       <label>E-mail de notificação</label>
                       <input
                         className="control"
-                        type="email"
+                        type="text"
                         value={notificationEmail}
                         onChange={(e) => setNotificationEmail(e.target.value)}
                         onBlur={() => void saveNotificationsConfigToServer()}
-                        placeholder="ex.: financeiro@sicoobjuriscred.com.br"
+                        placeholder="ex.: financeiro@sicoobjuriscred.com.br; rh@sicoobjuriscred.com.br"
                         disabled={settingsLocked}
                       />
+                      <div className="help">
+                        Separe múltiplos e-mails com vírgula ou ponto-e-vírgula.
+                      </div>
                     </div>
                     <div className="field">
                       <label>E-mail contabilidade</label>
@@ -10998,6 +11001,9 @@ export default function CreditoPage() {
                         placeholder="ex.: contabilidade@sicoobjuriscred.com.br; fiscal@sicoobjuriscred.com.br"
                         disabled={settingsLocked}
                       />
+                      <div className="help">
+                        Separe múltiplos e-mails com vírgula ou ponto-e-vírgula.
+                      </div>
                     </div>
                     <div
                       style={{
@@ -11021,11 +11027,11 @@ export default function CreditoPage() {
                             setOccurrencesPanoramaDiretoriaEmail(e.target.value)
                           }
                           onBlur={() => void saveNotificationsConfigToServer()}
-                          placeholder="ex.: diretoria@sicoobjuriscred.com.br"
+                          placeholder="ex.: diretor1@sicoobjuriscred.com.br; diretor2@sicoobjuriscred.com.br"
                           disabled={settingsLocked}
                         />
                         <div className="help">
-                          Enviado no campo Para do panorama diário de ocorrências em atraso.
+                          Enviado no campo Para do panorama diário de ocorrências em atraso. Separe múltiplos e-mails com vírgula ou ponto-e-vírgula.
                         </div>
                       </div>
                       <div className="field">
@@ -11042,7 +11048,7 @@ export default function CreditoPage() {
                           disabled={settingsLocked}
                         />
                         <div className="help">
-                          Enviado em cópia para os Gerentes de CC.
+                          Enviado em cópia para os Gerentes de CC. Separe múltiplos e-mails com vírgula ou ponto-e-vírgula.
                         </div>
                       </div>
                     </div>

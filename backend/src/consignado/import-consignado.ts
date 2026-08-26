@@ -20270,32 +20270,37 @@ export async function saveConsignadoAutomationConfig(opts: {
         opts.recursoTjgoUrl ?? null,
       );
     }
+    const normalizeMultiEmail = (raw: string | null | undefined): string | null => {
+      if (raw === null || raw === undefined) return null;
+      const validos = splitEmailRecipients(raw);
+      return validos.length > 0 ? validos.join(', ') : null;
+    };
     if (opts.notificationEmail !== undefined) {
       setConsignadoAppConfigValue(
         db,
         CONFIG_KEY_NOTIFICATION_EMAIL,
-        opts.notificationEmail ?? null,
+        normalizeMultiEmail(opts.notificationEmail),
       );
     }
     if (opts.notificationEmailContabilidade !== undefined) {
       setConsignadoAppConfigValue(
         db,
         CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE,
-        opts.notificationEmailContabilidade ?? null,
+        normalizeMultiEmail(opts.notificationEmailContabilidade),
       );
     }
     if (opts.occurrencesPanoramaDiretoriaEmail !== undefined) {
       setConsignadoAppConfigValue(
         db,
         CONFIG_KEY_OCCURRENCES_PANORAMA_DIRETORIA_EMAIL,
-        opts.occurrencesPanoramaDiretoriaEmail ?? null,
+        normalizeMultiEmail(opts.occurrencesPanoramaDiretoriaEmail),
       );
     }
     if (opts.occurrencesPanoramaGerentesEmail !== undefined) {
       setConsignadoAppConfigValue(
         db,
         CONFIG_KEY_OCCURRENCES_PANORAMA_GERENTES_EMAIL,
-        opts.occurrencesPanoramaGerentesEmail ?? null,
+        normalizeMultiEmail(opts.occurrencesPanoramaGerentesEmail),
       );
     }
     db.run('COMMIT;');
@@ -26566,7 +26571,7 @@ function parseJsonObjectSafe(value: unknown): Record<string, unknown> | null {
   }
 }
 
-function splitEmailRecipients(input: string | string[] | null | undefined): string[] {
+export function splitEmailRecipients(input: string | string[] | null | undefined): string[] {
   const rawItems = Array.isArray(input)
     ? input
     : String(input ?? '')

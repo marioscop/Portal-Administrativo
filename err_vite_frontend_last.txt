@@ -1,0 +1,60 @@
+[2m13:35:07[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/access/emails[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:35:07[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/debug/event[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:35:11[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/access/emails[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:35:11[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/debug/event[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:35:40[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/access/emails[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:35:40[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/debug/event[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/access/emails[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/automation/config[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/modalidades[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/orgao-columns[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/recurso-tables[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/extratos-consolidacao-recurso[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/relatorio-consolidacao-recurso[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/extratos/historico1-values[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
+[2m13:45:22[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /api/consignado/orgao-depara[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1193:18)
+    at afterConnectMultiple (node:net:1783:7)
