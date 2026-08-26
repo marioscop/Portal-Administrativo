@@ -153,6 +153,88 @@ export class ConsignadoController {
     return await this.service.debugLocalSisbrPdfFile(resolvedPath);
   }
 
+  @Post('debug-oneshot-trt-local')
+  async debugOneshotTrtLocal(
+    @Body()
+    body: {
+      fileNameInModelos?: string;
+      filePathAbs?: string;
+      mode?: 'append' | 'replace';
+      resetHashesFirst?: boolean;
+      deleteLixoRowidsGte2?: boolean;
+    },
+  ) {
+    const rootProject = path.resolve(__dirname, '../../..');
+    let resolvedPath: string | null = null;
+    if (body && typeof body.fileNameInModelos === 'string' && body.fileNameInModelos.trim()) {
+      const name = body.fileNameInModelos.trim();
+      if (!/^[A-Za-zÀ-üÇç0-9 .()_-]+$/.test(name)) {
+        throw new InternalServerErrorException(`Caracteres inválidos no nome do arquivo: ${name}`);
+      }
+      if (!/\.(xlsx|xlsm|xls)$/i.test(name)) {
+        throw new InternalServerErrorException(`Arquivo deve ser XLSX/XLS.`);
+      }
+      resolvedPath = path.join(rootProject, 'Modelos', name);
+    } else if (body && typeof body.filePathAbs === 'string' && body.filePathAbs.trim()) {
+      const p = path.resolve(body.filePathAbs.trim());
+      const projNorm = path.normalize(rootProject).toLowerCase();
+      const pNorm = path.normalize(p).toLowerCase();
+      if (!pNorm.startsWith(projNorm)) {
+        throw new InternalServerErrorException(`filePathAbs deve estar contido dentro da pasta do projeto.`);
+      }
+      resolvedPath = p;
+    } else {
+      throw new InternalServerErrorException(`Informe fileNameInModelos ou filePathAbs.`);
+    }
+    return await this.service.debugOneshotTrtLocalImport({
+      localXlsxPath: resolvedPath,
+      mode: (body?.mode === 'replace' ? 'replace' : 'append') as 'append' | 'replace',
+      resetHashesFirst: body?.resetHashesFirst !== false,
+      deleteLixoRowidsGte2: body?.deleteLixoRowidsGte2 !== false,
+    });
+  }
+
+  @Post('debug-oneshot-tre-local')
+  async debugOneshotTreLocal(
+    @Body()
+    body: {
+      fileNameInModelos?: string;
+      filePathAbs?: string;
+      mode?: 'append' | 'replace';
+      resetHashesFirst?: boolean;
+      deleteLixoRowidsGte2?: boolean;
+    },
+  ) {
+    const rootProject = path.resolve(__dirname, '../../..');
+    let resolvedPath: string | null = null;
+    if (body && typeof body.fileNameInModelos === 'string' && body.fileNameInModelos.trim()) {
+      const name = body.fileNameInModelos.trim();
+      if (!/^[A-Za-zÀ-üÇç0-9 .()_-]+$/.test(name)) {
+        throw new InternalServerErrorException(`Caracteres inválidos no nome do arquivo: ${name}`);
+      }
+      if (!/\.(xlsx|xlsm|xls)$/i.test(name)) {
+        throw new InternalServerErrorException(`Arquivo deve ser XLSX/XLS.`);
+      }
+      resolvedPath = path.join(rootProject, 'Modelos', name);
+    } else if (body && typeof body.filePathAbs === 'string' && body.filePathAbs.trim()) {
+      const p = path.resolve(body.filePathAbs.trim());
+      const projNorm = path.normalize(rootProject).toLowerCase();
+      const pNorm = path.normalize(p).toLowerCase();
+      if (!pNorm.startsWith(projNorm)) {
+        throw new InternalServerErrorException(`filePathAbs deve estar contido dentro da pasta do projeto.`);
+      }
+      resolvedPath = p;
+    } else {
+      throw new InternalServerErrorException(`Informe fileNameInModelos ou filePathAbs.`);
+    }
+    return await this.service.debugOneshotTreLocalImport({
+      localXlsxPath: resolvedPath,
+      mode: (body?.mode === 'replace' ? 'replace' : 'append') as 'append' | 'replace',
+      resetHashesFirst: body?.resetHashesFirst !== false,
+      deleteLixoRowidsGte2: body?.deleteLixoRowidsGte2 !== false,
+    });
+  }
+
   @Post('import')
   @Header('X-Content-Type-Options', 'nosniff')
   async importNow(

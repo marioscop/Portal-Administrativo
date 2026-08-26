@@ -264,6 +264,36 @@ export class ConsignadoService {
     'debugOneshotTreImportSync',
   ) as unknown as (opts: { folderUrl?: string; forceKind?: string }) => Promise<Record<string, unknown>>;
 
+  readonly debugOneshotTrtLocalImport = resolveModuleFn(
+    (ns as { debugOneshotTrtLocalImport?: unknown }).debugOneshotTrtLocalImport as unknown,
+    _mod,
+    'debugOneshotTrtLocalImport',
+  ) as unknown as (opts: {
+    localXlsxPath?: string;
+    fileName?: string;
+    folderPath?: string;
+    fileId?: string;
+    parentFolderId?: string;
+    mode?: 'append' | 'replace';
+    resetHashesFirst?: boolean;
+    deleteLixoRowidsGte2?: boolean;
+  }) => Promise<Record<string, unknown>>;
+
+  readonly debugOneshotTreLocalImport = resolveModuleFn(
+    (ns as { debugOneshotTreLocalImport?: unknown }).debugOneshotTreLocalImport as unknown,
+    _mod,
+    'debugOneshotTreLocalImport',
+  ) as unknown as (opts: {
+    localXlsxPath?: string;
+    fileName?: string;
+    folderPath?: string;
+    fileId?: string;
+    parentFolderId?: string;
+    mode?: 'append' | 'replace';
+    resetHashesFirst?: boolean;
+    deleteLixoRowidsGte2?: boolean;
+  }) => Promise<Record<string, unknown>>;
+
   readonly debugLocalSisbrPdfFile = resolveModuleFn(
     (ns as { debugLocalSisbrPdfFile?: unknown }).debugLocalSisbrPdfFile as unknown,
     _mod,

@@ -6634,6 +6634,13 @@ function ensureDefaultLearningProfiles(db: Database) {
       checkDuplicateContent: true,
     },
   });
+  // ========= REGRA OFICIAL GRAVADA em 2026-08-26 — RECURSO TRE (Tribunal Regional Eleitoral) =========
+  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO.
+  // Estrutura Excel TRE = Planilha1, 9 cols: [Matrícula, Nome, CPF, Situação, Rubrica, Descrição, Mês/Ano Referência, Prazo, Valor]
+  // Alias mapping (TRE-LINK1): Rubrica→Contrato · Prazo→N Parcela (→Qtd Parcelas TRE-LINK2 duplicar) · Descrição→Desc Finalidade ·
+  //                            Mês/Ano Referência→Copetencia (só fallback; R17 Copetência = mês nome arquivo +1 JULHO→08/2026) ·
+  //                            Situação=ATIVO/INATIVO→Critério Folha Pagto (TRE-R8).
+  // R6 TRE-LINK3: Rubrica com 3 decimais de moeda → trim p/ inteiro (6191.000 → 6191).
   upsertLearningProfile(db, {
     id: 'recurso_tre',
     kind: 'recurso_tre',
@@ -6641,12 +6648,69 @@ function ensureDefaultLearningProfiles(db: Database) {
     fileNameRegex: '.*TRE.*\\.(xlsx|xlsm|xls)$',
     targetTable: 'Recurso TRE',
     options: {
+      isRecursoTreDefinitiveProfile: true,
+      profileVersion: '2026-08-26_RCAs1-22+R7_RecursoTRE_CopMais1_VencAno2001',
+      competenciaMesArquivoSemIncremento: false,
+      vencimentoPadraoDia26MesCopetenciaAno2001: true,
+      criterioDebitoPadraoFolhaPagto: true,
+      contratoNormalizadoBrMilhar: true,
+      valorParcelaPrefixoRSimbolo: true,
+      nomeUpperTrimSpSimples: true,
+      cpfMascara11dig: true,
+      descFinalidadeDefaultCreditoConsignado: true,
+      fillDown8Cols: true,
+      keep16ExcelExtrasColumnas: true,
       mode: 'append',
-      folderCandidates: ['Relatório Orgão/TRE', 'TRE'],
+      folderCandidates: [
+        'Relatório Orgão/TRE',
+        'Relatorio Orgao/TRE',
+        'TRE',
+      ],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      strictColumnWhitelist: [
+        'Nome',
+        'CPF',
+        'Desc Finalidade',
+        'Contrato',
+        'N Parcela',
+        'Qtd Parcelas',
+        'Vencimento',
+        'Critério de Débito',
+        'Valor Parcela',
+      ],
+      strictColumnMinMatches: 5,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
+  // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — RECURSO TRT (Tribunal Regional do Trabalho — Justiça do Trabalho GO) =========
+  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. (Pipeline idêntico a Recurso ADFEGO / Recurso Eletra — com extensão 16 colunas EXTRAS Excel mantidas.)
+  // VALIDADO EM DEV 25/08/2026 22:30 BRT: arquivo Modelos\TRT-JULHO-2026.xlsx → 10/10 colunas principais IGUAL linha referência rowid=2 (Cop 07/2026).
+  //   [R1] Strict whitelist 9 colunas principais: Nome / CPF / Desc Finalidade / Contrato / N Parcela / Qtd Parcelas / Vencimento / Critério de Débito / Valor Parcela (minMatches=5).
+  //   [R2] 🔑 COPETÊNCIA = MÊS DO ARQUIVO (igual referência rowid=2: arquivo JULHO → 07/2026). DIFERENTE DO SISBR (que incrementa +1).
+  //        Fallback: extrai de topo header Excel (R$ Competencia / Mês Competência) se não conseguiu do nome do arquivo.
+  //   [R3] Fill-down (forward fill) 8 colunas: Nome / CPF / Desc Finalidade / Contrato / Qtd Parcelas / Vencimento / Critério Débito / Valor Parcela (planilhas mescladas).
+  //   [R4] Nome UPPER / trim / espaços simples (origem Excel col Funcionário / Funcionario).
+  //   [R5] CPF máscara 000.000.000-00.
+  //   [R6] Contrato NORMALIZADO BR (separador milhar vírgula: 138157 → 138,157). Igual ADFEGO/Eletro 141,132.
+  //   [R7] Vencimento PADRÃO por referência: dia 26 + MÊS DA COPETÊNCIA + ano 2001 (histórico). (ex: Cop 07/2026 → 26/07/2001; Cop 06/2026 → 26/06/2001).
+  //        Fallback: se existir coluna Vencimento real no Excel, usa ela.
+  //   [R8] Critério de Débito PADRÃO = "Folha Pagto" (se coluna Situação = "DE" — Desconto Efetivado; se outro valor de Situação, usa Situação como Critério).
+  //   [R9] Valor Parcela = "R$ XX.XX" (prefixo R$, decimal PONTO, vírgula BR → ponto).
+  //   [R10] Desc Finalidade PADRÃO = "CREDITO CONSIGNADO" (se coluna Produto = "EMPRESTIMO"; senão usa o valor de Produto).
+  //   [R11] Remove linhas TOTAL / TOTAIS / vazias / cabeçalho fantasma Nome=Nome && CPF=CPF && Contrato=Contrato com minMatches 5.
+  //   [R12] Dedup intra-arquivo chave: Copetencia | CPF | NomeUPPER | ContratoNormBR | NParcela.
+  //   [R13] 🔑 16 COLUNAS EXTRAS PRESERVADAS (CID 15-29 Recurso TRT schema): cabeçalhos do Excel mantidos como colunas extras
+  //        (Identificação do Desconto, Produto, TEC, Contrato CGA, Matrícula, Vínculo/No Pensionista, Órgão, Funcionário, Parcela Atual,
+  //         Quantidade de Parcelas, Valor da parcela, Valor de Desconto, Código da Verba, Situação, Motivo de Não Desconto)
+  //        → Flexible columns schema SQLite grava automaticamente (não precisa ALTER TABLE manual; já existem no schema hoje).
+  //   [R14] BFS SharePoint SEMPRE PULA subpasta "Importados" case insensitive.
+  //   [R15] Anti-duplicata imported_row_hashes kind='learning_profile:Recurso TRT' + checkDuplicateContent SHA256 arquivo (2 camadas).
+  //   [R16] Pós insert OK: PATCH Graph move arquivo Excel → subpasta "Importados" da mesma pasta pai (moveToImportadosSubfolderAfterImport=true).
+  //   [R17] Competência: extrai mês do NOME do arquivo (TRT-JULHO → 7) e aplica +1 (igual SISBR), logo JULHO=08/2026.
+  //        competenciaMesArquivoSemIncremento=false ativa o +1 (default SISBR). Dezembro incrementa ano +1.
   upsertLearningProfile(db, {
     id: 'recurso_trt',
     kind: 'recurso_trt',
@@ -6654,10 +6718,41 @@ function ensureDefaultLearningProfiles(db: Database) {
     fileNameRegex: '.*TRT.*\\.(xlsx|xlsm|xls)$',
     targetTable: 'Recurso TRT',
     options: {
+      isRecursoTrtDefinitiveProfile: true,
+      profileVersion: '2026-08-26_RCAs1-22_RecursoTRT_CopMais1',
+      competenciaMesArquivoSemIncremento: false,
+      vencimentoPadraoDia26MesCopetenciaAno2001: true,
+      criterioDebitoPadraoFolhaPagto: true,
+      contratoNormalizadoBrMilhar: true,
+      valorParcelaPrefixoRSimbolo: true,
+      nomeUpperTrimSpSimples: true,
+      cpfMascara11dig: true,
+      descFinalidadeDefaultCreditoConsignado: true,
+      fillDown8Cols: true,
+      keep16ExcelExtrasColumnas: true,
       mode: 'append',
-      folderCandidates: ['Relatório Orgão/TRT', 'TRT'],
+      folderCandidates: [
+        'Relatório Orgão/TRT',
+        'Relatorio Orgao/TRT',
+        'TRT',
+      ],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      strictColumnWhitelist: [
+        'Nome',
+        'CPF',
+        'Desc Finalidade',
+        'Contrato',
+        'N Parcela',
+        'Qtd Parcelas',
+        'Vencimento',
+        'Critério de Débito',
+        'Valor Parcela',
+      ],
+      strictColumnMinMatches: 5,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-17 — RECURSO ELETRO (Recurso Eletra) =========
@@ -26533,17 +26628,48 @@ async function sendImportFinishedEmailNotification(input: {
 }): Promise<{ attempted: boolean; sent: boolean; to: string[]; error?: string | null }> {
   const out = { attempted: false, sent: false, to: [] as string[], error: null as string | null };
   try {
-    const recipients = splitEmailRecipients(input.notificationTo);
+    const notificationFromEnv = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+    let recipients = splitEmailRecipients(input.notificationTo);
     out.to = recipients;
     if (recipients.length === 0) {
-      out.error = 'Nenhum destinatário de notificação configurado.';
+      // ====== [FALLBACK UNIVERSAL NOTIFICAÇÃO] Requisito: "notificação para TODO tipo de importação" ======
+      // (1) Buscar destinatários PADRÕES salvos no DB (CONFIG_KEY_NOTIFICATION_EMAIL + CONTABILIDADE)
+      try {
+        const fallbackDbFile = getSqlitePath();
+        let dbFallback: any = null;
+        try {
+          dbFallback = await openDatabase(fallbackDbFile);
+          try { ensureSchema(dbFallback); } catch { /* ignore schema errors on fallback */ }
+          const primaryDbEmailRaw = String(getConsignadoAppConfigValue(dbFallback, CONFIG_KEY_NOTIFICATION_EMAIL) ?? '').trim();
+          const contabDbEmailRaw = String(getConsignadoAppConfigValue(dbFallback, CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE) ?? '').trim();
+          const allDbEmailsRaw = [primaryDbEmailRaw, contabDbEmailRaw].filter((s) => s && s.length > 0).join(', ');
+          const dbRecipients = splitEmailRecipients(allDbEmailsRaw);
+          if (dbRecipients.length > 0) {
+            recipients = dbRecipients;
+            out.to = dbRecipients;
+          }
+        } finally {
+          try { if (dbFallback && typeof dbFallback.close === 'function') { dbFallback.close(); } } catch { /* ignore close errors */ }
+        }
+      } catch { /* ignore SQLite fallback open errors — try last env fallback below */ }
+      // (2) Último fallback: usar o e-mail REMETENTE como destinatário (notificacoes@sicoobjuriscred.com.br)
+      if (recipients.length === 0 && notificationFromEnv) {
+        const lastResort = splitEmailRecipients(notificationFromEnv);
+        if (lastResort.length > 0) {
+          recipients = lastResort;
+          out.to = lastResort;
+        }
+      }
+    }
+    if (recipients.length === 0) {
+      out.error = 'Nenhum destinatário de notificação configurado (nem input, nem DB notificationEmail, nem .env NOTIFICATION_EMAIL_FROM).';
       return out;
     }
     out.attempted = true;
     const tenantId = String(process.env.AZURE_TENANT_ID ?? '').trim();
     const clientId = String(process.env.AZURE_CLIENT_ID ?? '').trim();
     const clientSecret = String(process.env.AZURE_CLIENT_SECRET ?? '').trim();
-    const notificationFrom = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+    const notificationFrom = notificationFromEnv;
     if (!tenantId || !clientId || !clientSecret || !notificationFrom) {
       out.error = 'Configuração de Graph/e-mail incompleta (tenantId/clientId/clientSecret/from).';
       return out;
@@ -28290,7 +28416,7 @@ function addMissingColumnsAndImportRows(
     : null;
   const kind = `learning_profile:${tableName}`;
   try {
-    db.run('BEGIN;');
+    _tryCommitMaybeRestartTx(true);
     for (const row of rows) {
       const vals = importCols.map((c) => {
         if (extraStaticColumns && Object.prototype.hasOwnProperty.call(extraStaticColumns, c)) {
@@ -28325,7 +28451,12 @@ function addMissingColumnsAndImportRows(
       ins.run(vals as unknown as any[]);
       insertedRows += 1;
     }
-    db.run('COMMIT;');
+    try { db.run('COMMIT;'); } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e ?? '');
+      if (!msg.includes('no transaction is active') && !msg.includes('cannot commit - no transaction is active')) {
+        safeLogError('addMissingColumnsAndImportRows COMMIT final', e);
+      }
+    }
   } catch (e) {
     try { db.run('ROLLBACK;'); } catch { /* ignore */ }
     throw e;
@@ -29163,7 +29294,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         : String(file.name);
       const anyFile = file as unknown as { folderPath?: string; parentId?: string };
       let parentFolderId: string | null = null;
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'extratos' || kindLower === 'relatorio') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') {
         parentFolderId = typeof anyFile.parentId === 'string' && anyFile.parentId.trim() ? anyFile.parentId.trim() : null;
         // Fallback: se não veio parentId mas temos folderPath (agora JÁ é caminho completo) + driveId → resolver via path direto.
         if (!parentFolderId && driveId && typeof anyFile.folderPath === 'string' && anyFile.folderPath.length > 0 && anyFile.folderPath !== 'base') {
@@ -29253,8 +29384,93 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       let headersToImport: string[] = parsedFinal.headers;
       let rowsToImport: Array<Record<string, unknown>> = parsedFinal.rows;
       let competFromHeader: string | null = null;
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
+      // =================== ALIAS MAPEAMENTO CABEÇALHOS (TRT/TRE e Recursos legados) ===================
+      // Raciocínio: planilhas dos tribunais (TRT, TRE, MP, TC etc.) usam cabeçalhos DIFERENTES das 10 colunas principais
+      // padrão (Nome / CPF / Desc Finalidade / Contrato / N Parcela / Qtd Parcelas / Vencimento / Critério / Valor).
+      // Sem este alias, strictColumnWhitelist NÃO encontra a coluna "Nome" (ela se chama "Funcionário") → cai no flexible schema
+      // → todos os dados são inseridos só nas colunas extras e as 10 principais ficam NULL. (BUG ciclo TRT job real rowid=3).
+      // Regra: DEPOIS de extrair o parsedFinal.headers e ANTES do whitelist matching / fill-down de 10 colunas principais,
+      // criamos um header aliases bidirecional: (1) se header original = alias → substitui headers por canônico;
+      // (2) renomeia chaves em rowsToImport; (3) preserva o valor original em colunas extras (duplicamos antes de sobrescrever).
+      if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
+        const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
+          { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
+          { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
+          { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
+          { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
+          { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
+          { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
+          { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
+          { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
+          { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
+          { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
+        ];
+        const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+        const aliasLut = new Map<string, string>();
+        for (const entry of canonicalAliasMap) {
+          for (const a of [entry.canonical, ...entry.aliases]) {
+            aliasLut.set(buildNorm(a), entry.canonical);
+          }
+        }
+        const headerRenames = new Map<string, string>(); // originalHeader → canonicalHeader
+        const newHeaders: string[] = [];
+        for (const h of headersToImport) {
+          const canonical = aliasLut.get(buildNorm(h));
+          if (canonical && !headerRenames.has(h)) headerRenames.set(h, canonical);
+          newHeaders.push(canonical || h);
+        }
+        if (headerRenames.size > 0) {
+          headersToImport = newHeaders;
+        }
+      }
+      // =================== FIM ALIAS MAPEAMENTO CABEÇALHOS ===================
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre') {
         competFromHeader = extractCompet ? (parsedFinal.extractedCompetenciaMmAaaa ?? null) : null;
+        // ===== 🔑 EXTRAIR COPETÊNCIA DE NOME DO ARQUIVO (padrão TRT-JULHO-2026.xlsx / TRE-MAIO-2026.xlsm / etc) =====
+        // Regra do perfil TRT oficial (R17):
+        //   competenciaMesArquivoSemIncremento=FALSE (TRT/SISBR default) → MÊS+1, JULHO→08/2026. Dezembro→janeiro do ANO+1.
+        //   competenciaMesArquivoSemIncremento=TRUE (outros perfis) → MÊS do arquivo sem +1.
+        if (Boolean(profile.resolvedOptions?.extractCompetenciaFromFileName ?? false) || Boolean(profile.resolvedOptions?.competenciaMesArquivoSemIncremento ?? false)) {
+          const mmNome: Record<string, number> = {
+            janeiro:1, fev:2, fevereiro:2, feve:2, mar:3, marco:3, março:3, marÇo:3,
+            abr:4, abril:4, mai:5, maio:5, jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8,
+            set:9, sep:9, setembro:9, out:10, outu:10, outubro:10, nov:11, novembro:11, dez:12, dezembro:12,
+            jan:1, feb:2, apr:4, may:5, jun_e:6, jul_e:7, aug:8, oct:10, dec:12,
+            january:1, february:2, march:3, april:4, june:6, july:7, august:8, september:9, october:10, november:11, december:12,
+          };
+          const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+          const fnNorm = buildNorm(String(file.name ?? ''));
+          const mAno = fnNorm.match(/\b(20\d{2}|[12]\d{3})\b/);
+          let mmTok = '';
+          const sortedKeys = Object.keys(mmNome).sort((a, b) => b.length - a.length);
+          for (const k of sortedKeys) {
+            if (fnNorm.includes(' ' + k + ' ') || fnNorm.includes('-' + k + '-') || fnNorm.includes('_' + k + '_') || fnNorm.startsWith(k + ' ') || fnNorm.endsWith(' ' + k)) {
+              mmTok = k; break;
+            }
+            const re = new RegExp('(^|[ _-])' + k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '([ _-]|$)','i');
+            if (re.test(fnNorm)) { mmTok = k; break; }
+          }
+          if (!mmTok) {
+            const toks = fnNorm.split(/[ _-]+/).filter(Boolean);
+            for (const t of toks) {
+              if (Object.prototype.hasOwnProperty.call(mmNome, t) && t.length >= 3) { mmTok = t; break; }
+            }
+          }
+          if (mAno && mmTok) {
+            const mm = mmNome[mmTok];
+            if (mm >= 1 && mm <= 12) {
+              const semIncremento = Boolean(profile.resolvedOptions?.competenciaMesArquivoSemIncremento ?? false);
+              let mmFinal = mm;
+              let anoFinal = Number(mAno[1]);
+              if (!semIncremento) {
+                if (mm === 12) { mmFinal = 1; anoFinal = anoFinal + 1; }
+                else { mmFinal = mm + 1; }
+              }
+              const cop = `${String(mmFinal).padStart(2,'0')}/${String(anoFinal)}`;
+              if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) competFromHeader = cop;
+            }
+          }
+        }
         // Competência fallback de path (2026/Julho → 07/2026)
         if (!competFromHeader && typeof file.folderPath === 'string' && file.folderPath.length > 0) {
           const fp = String(file.folderPath).replace(/\\/g, '/');
@@ -29268,6 +29484,9 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           }
         }
         // Strict whitelist (9 colunas). Normaliza nome para matching, mantém displayName original.
+        // IMPORTANTE: use headersToImport PODE já ter sido renomeado pelo alias mapping TRT/TRE/ADFEGO/Eletra (Funcionario→Nome,
+        //             Parcela Atual→N Parcela etc.).
+        //             (Por isso a variável de matching = headersToImport (não mais parsedFinal.headers).
         if (strictWhitelist && strictWhitelist.length > 0) {
           const norm = (s: string) =>
             String(s ?? '')
@@ -29275,13 +29494,24 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
           const whitelistNorm = strictWhitelist.map((w) => ({ orig: w, norm: norm(w) }));
           const matchedBySource: Array<{ sourceHeader: string; targetHeader: string }> = [];
-          for (const h of parsedFinal.headers) {
-            const hn = norm(h);
+          for (let idx = 0; idx < headersToImport.length; idx++) {
+            const hOrig = parsedFinal.headers[idx] || headersToImport[idx];
+            const hNormKey = headersToImport[idx] || hOrig;
+            const hn = norm(hNormKey);
             const hit = whitelistNorm.find((w) => w.norm === hn || (hn && w.norm && (w.norm.startsWith(hn) || hn.startsWith(w.norm)) && Math.abs(w.norm.length - hn.length) <= 5));
-            if (hit) matchedBySource.push({ sourceHeader: h, targetHeader: hit.orig });
+            if (hit) matchedBySource.push({ sourceHeader: hOrig, targetHeader: hit.orig });
           }
+          // Final: deduplicar por targetHeader (evita dupla entrada no sourceToTarget)
+          const seenTargets = new Set<string>();
+          const dedupedMatches: Array<{ sourceHeader: string; targetHeader: string }> = [];
+          for (const m of matchedBySource) {
+            if (seenTargets.has(m.targetHeader)) continue;
+            seenTargets.add(m.targetHeader);
+            dedupedMatches.push(m);
+          }
+          const realMatches = dedupedMatches;
           // Strict min matches — se não bater pelo menos N, pula arquivo safe.
-          if (matchedBySource.length < strictMinMatches) {
+          if (realMatches.length < strictMinMatches) {
             importedFiles.push({
               fileName: file.name,
               targetTable: tableName,
@@ -29290,37 +29520,176 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               insertedRows: 0,
               skippedRows: parsedFinal.rows.length,
               headers: parsedFinal.headers,
-              skippedReason: `strict_whitelist_matches=${matchedBySource.length} < ${strictMinMatches}`,
+              skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatches}`,
             });
             totalRowsSkipped += parsedFinal.rows.length;
             {
               const __dbg = __dbg_loaded({ env: true });
               __dbg.report('E/H5', 'import-consignado.ts:post-parse', 'E:arquivo pulado (strict whitelist não bateu)', {
                 fileName: file.name,
-                matches: matchedBySource.length,
+                matches: realMatches.length,
                 required: strictMinMatches,
-                matchedPreview: matchedBySource.slice(0, 12),
-                headersPreview: parsedFinal.headers.slice(0, 20),
+                matchedPreview: realMatches.slice(0, 12),
+                headersPreview: headersToImport.slice(0, 20),
+                aliasHeaders: headersToImport.slice(0, 20),
               });
             }
             continue;
           }
           const finalHeaders = strictWhitelist.slice();
           const sourceToTarget = new Map<string, string>();
-          for (const m of matchedBySource) sourceToTarget.set(m.sourceHeader, m.targetHeader);
+          for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
+          const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+          const sourceToTargetNorm = new Map<string, string>();
+          for (const [k, v] of sourceToTarget.entries()) {
+            const nk = buildNormKey(k);
+            if (nk && !sourceToTargetNorm.has(nk)) sourceToTargetNorm.set(nk, v);
+          }
+          // ╔══════════════════════════════════════════════════════════════════╗
+          // ║ [DIAGNÓSTICO-TRE PRE-STAGE 1] rowsToImport CRU do parser Excel  ║
+          // ╚══════════════════════════════════════════════════════════════════╝
+          if (kindLower === 'recurso_tre' || kindLower === 'recurso_trt') {
+            const di1 = (rowsToImport ?? []) as Array<Record<string, unknown>>;
+            const dp1 = (parsedFinal.rows ?? []) as Array<Record<string, unknown>>;
+            console.log(`║ [DIAG-TRE-PRE1] src candidatos: rowsToImport.len=${di1.length}  parsedFinal.rows.len=${dp1.length}`);
+            const show1 = (arr: Array<Record<string, unknown>>, tag: string) => {
+              for (let ri = 0; ri < arr.length; ri++) {
+                const rr = arr[ri];
+                const nm = String(rr['Nome'] ?? rr['Funcionário'] ?? rr['Funcionario'] ?? rr['Servidor'] ?? '').trim().padEnd(42, ' ').slice(0, 42);
+                const ct = String(rr['Contrato'] ?? rr['Rubrica'] ?? rr['Código'] ?? rr['Codigo'] ?? '').padStart(12, ' ');
+                const pr = String(rr['Prazo'] ?? rr['Parcela'] ?? rr['N Parcela'] ?? rr['N° Parcela'] ?? '').padStart(6, ' ');
+                const vl = String(rr['Valor'] ?? rr['Valor Parcela'] ?? rr['Valor da parcela'] ?? '').padStart(12, ' ');
+                const cp = String(rr['CPF'] ?? '').padStart(18, ' ');
+                console.log(`║     [${tag}-${ri}] Nome="${nm}" CPF="${cp}" CT="${ct}" Prazo="${pr}" Valor="${vl}"`);
+              }
+            };
+            show1(di1, 'rowsImp');
+            show1(dp1, 'parsedR');
+          }
           const finalRowsRaw: Array<Record<string, unknown>> = [];
-          for (const src of parsedFinal.rows) {
+          const srcRows = Array.isArray(rowsToImport) && rowsToImport.length > 0 ? rowsToImport : parsedFinal.rows;
+          for (const src of srcRows) {
             const outRow: Record<string, unknown> = {};
             for (const targetCol of finalHeaders) outRow[targetCol] = null;
             for (const srcKey of Object.keys(src)) {
-              const target = sourceToTarget.get(srcKey);
+              let target = sourceToTarget.get(srcKey);
+              if (!target) {
+                const nk = buildNormKey(srcKey);
+                if (nk) target = sourceToTargetNorm.get(nk);
+              }
               if (!target) continue;
               const v = src[srcKey];
               outRow[target] = v === undefined ? null : v;
             }
+            const outRowCpf = String(outRow['CPF'] ?? '').replace(/[^\d]/g, '').trim();
+            if (outRowCpf.length < 11 && typeof (src as any)['CPF'] !== 'undefined' && (src as any)['CPF'] !== null) {
+              const srcRawCpf = String((src as any)['CPF'] ?? '').replace(/[^\d]/g, '').trim();
+              if (srcRawCpf.length >= 11) outRow['CPF'] = (src as any)['CPF'];
+            }
+            if (!String(outRow['Nome'] ?? '').trim()) {
+              const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome'];
+              for (const cand of nomeAliases) {
+                const v = Object.prototype.hasOwnProperty.call(src, cand) ? (src as any)[cand] : null;
+                if (v !== null && v !== undefined && String(v).trim().length > 2) {
+                  outRow['Nome'] = v;
+                  break;
+                }
+              }
+              if (!String(outRow['Nome'] ?? '').trim() && typeof buildNormKey === 'function') {
+                for (const srcKey of Object.keys(src)) {
+                  const nk = buildNormKey(srcKey);
+                  if (!nk) continue;
+                  if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome')) continue;
+                  const v = src[srcKey];
+                  if (v !== null && v !== undefined && String(v).trim().length > 2) {
+                    outRow['Nome'] = v;
+                    break;
+                  }
+                }
+              }
+            }
             if (extractCompet && competFromHeader) outRow.Copetencia = competFromHeader;
             const nonEmptyCols = Object.values(outRow).filter((v) => v !== null && v !== undefined && String(v).trim().length > 0).length;
             if (nonEmptyCols >= 2) finalRowsRaw.push(outRow);
+          }
+          // ╔══════════════════════════════════════════════════════════════════╗
+          // ║ [DIAGNÓSTICO-TRE PRE-STAGE 2] finalRowsRaw APÓS nonEmptyCols≥2  ║
+          // ╚══════════════════════════════════════════════════════════════════╝
+          if (kindLower === 'recurso_tre' || kindLower === 'recurso_trt') {
+            const frr = finalRowsRaw as Array<Record<string, unknown>>;
+            console.log(`║ [DIAG-TRE-PRE2] finalRowsRaw.len=${frr.length} (após nonEmptyCols>=2)`);
+            for (let ri = 0; ri < frr.length; ri++) {
+              const rr = frr[ri];
+              const nm = String(rr['Nome'] ?? '').trim().padEnd(42, ' ').slice(0, 42);
+              const ct = String(rr['Contrato'] ?? '').padStart(10, ' ');
+              const np = String(rr['N Parcela'] ?? '').padStart(5, ' ');
+              const cp = String(rr['CPF'] ?? '').padStart(18, ' ');
+              const ne = Object.values(rr).filter((v) => v !== null && v !== undefined && String(v).trim().length > 0).length;
+              console.log(`║     [frr-${ri}] nonEmptyCols=${ne} Nome="${nm}" CPF="${cp}" CT="${ct}" N="${np}"`);
+            }
+          }
+          // ====== [TRE-LINK2 ANTECIPADO] PREENCHER N Parcela + Qtd Parcelas A PARTIR DE Prazo (srcRows) ANTES DE FILLDOWN + DEDUP ======
+          // Motivo: dedupKey (L29929) usa N Parcela na chave. Se N estiver vazio no TRE (só tem coluna Prazo no Excel),
+          // 2 linhas com mesmo Nome/CPF/Contrato geram mesma chave e são dropadas como duplicatas falsas (corte 7→5).
+          // Prazo é acessado diretamente de srcRows[rIdx] (ainda não foi anexado como coluna extra em finalRowsRaw).
+          if (kindLower === 'recurso_tre' && srcRows.length === finalRowsRaw.length) {
+            const colTrimZeros = (s: string): string => {
+              if (!s) return '';
+              const t = String(s).replace(/\s+/g, '').trim();
+              if (!/^\d+$/.test(t)) return t;
+              return String(Number(t));
+            };
+            for (let rIdx = 0; rIdx < finalRowsRaw.length; rIdx++) {
+              const dest = finalRowsRaw[rIdx] as Record<string, unknown>;
+              const src = srcRows[rIdx];
+              if (!src || !dest || typeof src !== 'object' || typeof dest !== 'object') continue;
+              let prazoRaw = '';
+              const srcKeys = Object.keys(src);
+              for (const sk of srcKeys) {
+                const norm = String(sk ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+                if (norm === 'prazo' || norm === 'prazo ' || norm === ' prazo' || norm === 'prazo( meses)' || norm === 'prazo meses') {
+                  prazoRaw = String(src[sk] ?? '');
+                  break;
+                }
+              }
+              const prazo = colTrimZeros(prazoRaw);
+              if (prazo) {
+                const nNow = colTrimZeros(String(dest['N Parcela'] ?? ''));
+                const qNow = colTrimZeros(String(dest['Qtd Parcelas'] ?? ''));
+                if (!nNow) dest['N Parcela'] = prazo;
+                if (!qNow) dest['Qtd Parcelas'] = prazo;
+                if (prazo && !String(dest['N Parcela'] ?? '').trim()) dest['N Parcela'] = prazo;
+                if (prazo && !String(dest['Qtd Parcelas'] ?? '').trim()) dest['Qtd Parcelas'] = prazo;
+              }
+            }
+            // [DIAG-TRE-PRE2B] confirmar N/Qtd preenchidos ANTES do fillDown
+            const frr = finalRowsRaw as Array<Record<string, unknown>>;
+            console.log(`║ [DIAG-TRE-PRE2B] TRE-LINK2 antecipado finalRowsRaw.len=${frr.length} (Prazo→N+Qtd)`);
+            for (let ri = 0; ri < frr.length; ri++) {
+              const rr = frr[ri];
+              const nm = String(rr['Nome'] ?? '').trim().padEnd(30, ' ').slice(0, 30);
+              const np = String(rr['N Parcela'] ?? '').padStart(4, ' ');
+              const qp = String(rr['Qtd Parcelas'] ?? '').padStart(4, ' ');
+              const ct = String(rr['Contrato'] ?? '').padStart(10, ' ');
+              console.log(`║     [frr-${ri}] Nome="${nm}" CT="${ct}" N="${np}" Qtd="${qp}"`);
+            }
+          }
+          // ====== ANEXAR COLUNAS EXTRAS DO EXCEL (16 cabeçalhos originais CID 15-29) AO finalRowsRaw (pipeline 10 cols strictWhitelist) ======
+          // Sem este bloco: Recurso TRT/TRE caem no pipeline 10 cols (bom) mas as 16 extras ficam NULL (ruim), pois flexible schema só roda se NÃO caiu em strict.
+          // Lógica: para cada linha gerada no strict whitelist, copiar o objeto srcRows[i] correspondente → mesclar valores extra (chaves que NÃO estão em finalHeaders).
+          if (srcRows.length === finalRowsRaw.length) {
+            for (let rIdx = 0; rIdx < finalRowsRaw.length; rIdx++) {
+              const src = srcRows[rIdx];
+              const dest = finalRowsRaw[rIdx];
+              if (src && dest && typeof src === 'object' && typeof dest === 'object') {
+                for (const k of Object.keys(src)) {
+                  if (finalHeaders.includes(k)) continue; // já veio do strict pipeline de 10 cols.
+                  if (Object.prototype.hasOwnProperty.call(dest, k)) continue; // não sobrescrever valor gerado.
+                  const v = src[k];
+                  dest[k] = v === undefined ? null : v;
+                }
+              }
+            }
           }
           // (0) Extrair valores fallback (Nome/CPF/Desc Finalidade/Contrato/Qtd etc) das topHeaderLines
           //     (linhas acima do header de dados, onde ADFEGO costuma por células mescladas de identificação)
@@ -29587,28 +29956,25 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           const normContratoBR = (raw: unknown): string => {
             const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
             if (!s) return '';
-            // Se tem vírgula decimal (BR) ou ponto decimal (US), unifica no formato BR com vírgula
-            // Exs: 141,132 -> 141,132 ; 141.132 -> 141,132 ; 141.132,55 -> 141132,55
             const hasComma = s.includes(',');
             const hasDot = s.includes('.');
             if (hasComma && !hasDot) return s;
             if (!hasComma && hasDot) {
-              // Se 3+ dígitos depois do último ponto → é separador de milhar BR
               const lastDot = s.lastIndexOf('.');
               const tail = s.slice(lastDot + 1);
               if (tail.length === 3 && /^\d+$/.test(tail)) {
                 return s.replace(/\./g, ',');
               }
-              // 2 ou menos dígitos depois do ponto → é decimal US, converter para BR
               return s.replace(/,/g, '').replace('.', ',');
             }
             if (hasComma && hasDot) {
-              // Se vírgula vem DEPOIS de último ponto: 1.234,56 -> BR, limpar ponto milhar
               if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
                 return s.replace(/\./g, '');
               }
-              // Ao contrário: 1,234.56 -> US, converter para BR
               return s.replace(/,/g, '').replace('.', ',');
+            }
+            if (!hasComma && !hasDot && /^\d{4,}$/.test(s)) {
+              return Number(s).toLocaleString('pt-BR').replace(/\./g, ',');
             }
             return s;
           };
@@ -29721,15 +30087,109 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 .replace(/[\u0300-\u036f]/g, '')
                 .toUpperCase()
                 .normalize('NFC');
-              // Re-aplicar acentos maiúsculos (melhor esforço: re-normalizar sem remover acentos em segundo passo mantendo acentos)
               r['Nome'] = String(String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase());
             }
             if (Object.prototype.hasOwnProperty.call(r, 'CPF')) r['CPF'] = maskCpf(r['CPF']);
             if (Object.prototype.hasOwnProperty.call(r, 'Desc Finalidade')) r['Desc Finalidade'] = String(r['Desc Finalidade'] ?? '').replace(/\s+/g, ' ').trim();
             if (Object.prototype.hasOwnProperty.call(r, 'Critério de Débito')) r['Critério de Débito'] = String(r['Critério de Débito'] ?? '').replace(/\s+/g, ' ').trim();
             if (Object.prototype.hasOwnProperty.call(r, 'Valor Parcela')) r['Valor Parcela'] = normValorParcela(r['Valor Parcela']);
+            // ===== Regras OFICIAIS GRAVADAS 25/08 (R3, R7, R8, R10 — Recurso TRT/TRE) =====
+            // [R10] Desc Finalidade default = "CREDITO CONSIGNADO" se Produto == EMPRESTIMO e está vazio ou tem o próprio Produto=EMPRESTIMO.
+            if (Boolean(profile.resolvedOptions?.descFinalidadeDefaultCreditoConsignado ?? false)) {
+              const produtoRaw = Object.prototype.hasOwnProperty.call(r, 'Produto') ? r['Produto'] : null;
+              const produtoUpper = String(produtoRaw ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+              const currDesc = String(r['Desc Finalidade'] ?? '').trim().toUpperCase();
+              if (!currDesc || currDesc === produtoUpper || produtoUpper === 'EMPRESTIMO') {
+                r['Desc Finalidade'] = 'CREDITO CONSIGNADO';
+              }
+            }
+            // [R8] Critério de Débito default = "Folha Pagto" se Situação == "DE" (Desconto Efetivado) ou Situação = ATIVO/INATIVO (TRE) ou qualquer valor conhecido.
+            if (Boolean(profile.resolvedOptions?.criterioDebitoPadraoFolhaPagto ?? false)) {
+              const sitRaw = Object.prototype.hasOwnProperty.call(r, 'Situação')
+                ? r['Situação']
+                : (Object.prototype.hasOwnProperty.call(r, 'Situacao') ? r['Situacao'] : null);
+              const sitUpper = String(sitRaw ?? '').trim().toUpperCase();
+              const currCrit = String(r['Critério de Débito'] ?? '').trim();
+              if (!currCrit || sitUpper === 'DE' || sitUpper === 'ATIVO' || sitUpper === 'INATIVO') r['Critério de Débito'] = 'Folha Pagto';
+            }
+            // [R8b TRE-LINK2: se Qtd Parcelas = vazio mas Prazo (N Parcela) tem valor → duplicar para Qtd Parcelas (TRE só tem 1 coluna Prazo)
+            if (kindLower === 'recurso_tre') {
+              let nP = String(r['N Parcela'] ?? '').replace(/\s+/g, '').trim();
+              let qP = String(r['Qtd Parcelas'] ?? '').replace(/\s+/g, '').trim();
+              nP = nP && /^\d+$/.test(nP) ? String(Number(nP)) : nP;
+              qP = qP && /^\d+$/.test(qP) ? String(Number(qP)) : qP;
+              if (nP && !qP) qP = nP;
+              if (qP && !nP) nP = qP;
+              r['N Parcela'] = nP;
+              r['Qtd Parcelas'] = qP;
+              // [R8c TRE-LINK3: Rubrica com decimais de moeda (ex: 6191.000 → 6191 / 6191,000 → 6191)
+              // Aceita AMBOS formatos: ponto (6191.000) e vírgula BR (6191,000) com 3+ dígitos decimais
+              const cRaw = String(r['Contrato'] ?? '').replace(/\s+/g, ' ').trim();
+              if (/^\d+([.,]\d{3,})$/.test(cRaw)) {
+                const cNorm = cRaw.replace(',', '.');
+                const asNum = Number(cNorm);
+                if (Number.isInteger(asNum)) r['Contrato'] = String(asNum);
+              }
+            }
+            // [R8d Geral: N Parcela / Qtd Parcelas numéricas sem zeros à esquerda (059 → 59, 009 → 9) — paridade TRT validado]
+            {
+              const colTrimZeros = (k: string) => {
+                if (!Object.prototype.hasOwnProperty.call(r, k)) return;
+                const raw = String(r[k] ?? '').replace(/\s+/g,'').trim();
+                if (raw && /^\d+$/.test(raw)) r[k] = String(Number(raw));
+              };
+              colTrimZeros('N° Parcela');
+              colTrimZeros('N Parcela');
+              colTrimZeros('Qtd Parcelas');
+            }
+            // [R7] Vencimento PADRÃO dia 26 / MÊS Copetencia / ano 2001 (histórico legado).
+            if (Boolean(profile.resolvedOptions?.vencimentoPadraoDia26MesCopetenciaAno2001 ?? false)) {
+              const copVal = String(r['Copetencia'] ?? '').trim();
+              const mCop = copVal.match(/^(0[1-9]|1[0-2])[\/\-](\d{4})$/);
+              const currVenc = String(r['Vencimento'] ?? '').trim();
+              if (!currVenc && mCop) {
+                r['Vencimento'] = `26/${mCop[1]}/2001`;
+              }
+              if (currVenc) {
+                const mReal = currVenc.match(/^(0[1-9]|[12]\d|3[01])[\/\-.](0[1-9]|1[0-2])[\/\-.](\d{2}|\d{4})$/);
+                if (!mReal && mCop) r['Vencimento'] = `26/${mCop[1]}/2001`;
+                if (mReal && mCop && mReal[3] !== '2001') r['Vencimento'] = `26/${mCop[1]}/2001`;
+              }
+            }
+            // [R6] Contrato já normalizado BR milhar → assegurar que o Contrato normalizado (sem 141.132 vs 141,132) é mantido.
+            if (Boolean(profile.resolvedOptions?.contratoNormalizadoBrMilhar ?? false)) {
+              const c = String(r['Contrato'] ?? '').replace(/\s+/g,' ').trim();
+              if (c) r['Contrato'] = normContratoBR(c);
+            }
           }
-          headersToImport = ['Copetencia', ...finalHeaders];
+          // ====== FINAL: headersToImport NA ORDEM CANÔNICA DO SCHEMA SQLite (CID0..CID9) para evitar deslocamento 1 coluna ======
+          // ORDEM EXATA (RCA24): Nome(CID0) → CPF(CID1) → Copetencia(CID2) → Desc Finalidade(CID3) → Contrato(CID4)
+          //                      → N Parcela(CID5) → Qtd Parcelas(CID6) → Vencimento(CID7) → Critério de Débito(CID8) → Valor Parcela(CID9)
+          const canonical10ColsOrder: string[] = [
+            'Nome',
+            'CPF',
+            'Copetencia',
+            'Desc Finalidade',
+            'Contrato',
+            'N Parcela',
+            'Qtd Parcelas',
+            'Vencimento',
+            'Critério de Débito',
+            'Valor Parcela',
+          ];
+          const allAvailableHeaders = new Set<string>(['Copetencia', ...finalHeaders]);
+          for (const r of finalRows) for (const k of Object.keys(r)) allAvailableHeaders.add(k);
+          const canonicalBasePresent: string[] = canonical10ColsOrder.filter((h) => allAvailableHeaders.has(h));
+          const extraHeadersFromRows: string[] = [];
+          const seenHeaders = new Set<string>(canonicalBasePresent);
+          for (const r of finalRows) {
+            for (const k of Object.keys(r)) {
+              if (seenHeaders.has(k)) continue;
+              seenHeaders.add(k);
+              extraHeadersFromRows.push(k);
+            }
+          }
+          headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
           rowsToImport = finalRows;
         } else if (extractCompet && competFromHeader) {
           // Sem whitelist mas com competência a partir do header: injeta em todas as linhas.
@@ -29739,7 +30199,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
 
       const extraStatic: Record<string, string | null> = {};
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'extratos' || kindLower === 'relatorio') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') {
         if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
       }
 
@@ -29751,6 +30211,80 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         forceKindRaw && Object.prototype.hasOwnProperty.call(kindOrgaoToOrgaoLabel, forceKindRaw)
           ? kindOrgaoToOrgaoLabel[forceKindRaw]
           : null;
+
+      // ====== DEBUG RECURSO TRT/TRE — L30002 DIAGNÓSTICO PONTO CRÍTICO ANTES DO INSERT ======
+      if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre') {
+        console.log(`\n` + '═'.repeat(110));
+        console.log(`║ [DEBUG TRT/TRE L30002] ANTES DO addMissingColumnsAndImportRows — arquivo=${String(file.name ?? '?')}  kind=${kindLower}`);
+        console.log(`═`.repeat(110));
+        console.log(`║ [0/4] CONTAGEM rowsToImport.length = ${rowsToImport?.length ?? -1}`);
+        if (rowsToImport && rowsToImport.length > 0) {
+          for (let ri = 0; ri < rowsToImport.length; ri++) {
+            const rr = rowsToImport[ri] as Record<string, unknown>;
+            const nm = String(rr['Nome'] ?? '').padEnd(42, ' ').slice(0, 42);
+            const ct = String(rr['Contrato'] ?? '').padStart(10, ' ');
+            const np = String(rr['N Parcela'] ?? '').padStart(5, ' ');
+            const qt = String(rr['Qtd Parcelas'] ?? '').padStart(5, ' ');
+            const pr = String(rr['Prazo'] ?? '').padStart(5, ' ');
+            const cp = String(rr['CPF'] ?? '').padStart(18, ' ');
+            console.log(`║     [row${ri}] Nome="${nm}" CPF="${cp}" CT="${ct}" N="${np}" Qtd="${qt}" Prazo="${pr}"`);
+          }
+        }
+        // 1) Flags do perfil (resolvedOptions)
+        const opts = profile?.resolvedOptions ?? {};
+        console.log(`║ [1/4] profile.resolvedOptions flags (${Object.keys(opts).length} chaves):`);
+        const flagNames = [
+          'extractCompetenciaFromFileName','competenciaMesArquivoSemIncremento',
+          'contratoNormalizadoBrMilhar','criterioDebitoPadraoFolhaPagto',
+          'descFinalidadeDefaultCreditoConsignado','vencimentoPadraoDia26MesCopetenciaAno2001',
+          'strictColumnWhitelist','strictColumnMinMatches',
+          'ignoreImportados','moveToImportadosSubfolderAfterImport','checkDuplicateContent',
+        ];
+        for (const fn of flagNames) {
+          const v = (opts as any)[fn];
+          const mark = (typeof v === 'boolean' && v === true) ? '✅ TRUE ' : (typeof v === 'boolean' ? '❌ FALSE' : `⚠️ ${JSON.stringify(v)}`);
+          console.log(`║       ${mark}  ${fn}`);
+        }
+        console.log(`║       strictColumnWhitelist cols: ${JSON.stringify((opts as any)?.strictColumnWhitelist ?? [])}`);
+        // 2) headersToImport (ordem enviada para INSERT POSICIONAL)
+        console.log(`║ [2/4] headersToImport (${headersToImport.length} cols — ORDEM ENVIADA AO INSERT):`);
+        headersToImport.slice(0, 35).forEach((h, i) => {
+          const cidMark = (i <= 9) ? ` 🔹CID${String(i).padStart(2,'0')}` : `     `;
+          console.log(`║       [${String(i).padStart(2,'0')}]${cidMark}  ${h}`);
+        });
+        // 3) rowsToImport[0] — valores brutos da PRIMEIRA LINHA
+        if (rowsToImport && rowsToImport.length > 0) {
+          const r0 = rowsToImport[0];
+          console.log(`║ [3/4] rowsToImport[0] CHAVES E VALORES (${Object.keys(r0||{}).length} keys):`);
+          const main10 = ['Nome','CPF','Copetencia','Desc Finalidade','Contrato','N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela'];
+          const extras = Object.keys(r0||{}).filter(k => !main10.includes(k));
+          for (const mk of main10) {
+            const v = (r0 as any)?.[mk];
+            const ok = (v !== null && v !== undefined && String(v).trim() !== '');
+            console.log(`║       10COLS ${ok ? '✅' : '❌'} ${mk.padEnd(22)} → ${JSON.stringify(v)}`);
+          }
+          // Extras mais importantes: alias originais cabeçalho
+          const aliasImp = ['Funcionário','Funcionario','Produto','Contrato CGA','Parcela Atual','Quantidade de Parcelas','Situação','Situacao','Valor da parcela','TEC'];
+          for (const ak of aliasImp) {
+            const v = (r0 as any)?.[ak];
+            if (v !== undefined && v !== null) {
+              console.log(`║       ALIAS  🔹 ${ak.padEnd(22)} → ${JSON.stringify(v)}`);
+            }
+          }
+          extras.slice(0, 20).forEach(k => {
+            if (main10.includes(k) || aliasImp.includes(k)) return;
+            const v = (r0 as any)?.[k];
+            if (v === null || v === undefined || String(v).trim() === '') return;
+            console.log(`║       EXTRA  🔹 ${k.padEnd(22)} → ${JSON.stringify(String(v).slice(0, 40))}`);
+          });
+        } else {
+          console.log(`║ [3/4] rowsToImport VAZIO (length=0)!`);
+        }
+        // 4) sourceToTarget matches (se variáveis estão em escopo) — via realMatches printado se possível
+        console.log(`║ [4/4] tableName=${tableName}  checkDup=${checkDup}  modeOverride=${modeOverride}`);
+        console.log(`═`.repeat(110) + '\n');
+      }
+      // ====== FIM DEBUG RECURSO TRT/TRE ======
 
       let res: { insertedRows: number; skippedRows: number };
       if (kindLower === 'extratos') {
@@ -29782,7 +30316,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Mover arquivo para subpasta Importados (Graph API), se perfil pedir e arquivo teve alguma interação OK (inserida ou duplicada pulada)
       let moveResult: { ok: boolean; status?: number; error?: string; destFolder?: string; parentIdUsed?: string; parentIdResolvedFromFolderPath?: boolean; folderPath?: string; driveIdPrefix?: string } = { ok: false };
       if (
-        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'extratos' || kindLower === 'relatorio') &&
+        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') &&
         moveToImportados &&
         driveId &&
         file?.id &&
@@ -29890,7 +30424,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                   finalCols: headersToImport.filter((h) => h !== 'Copetencia').length,
                 }
               : null,
-          moveToImportados: (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'extratos' || kindLower === 'relatorio') ? { requested: moveToImportados, result: moveResult } : null,
+          moveToImportados: (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') ? { requested: moveToImportados, result: moveResult } : null,
           headersPreview: parsedFinal.headers.slice(0, 12),
           importedHeadersPreview: headersToImport.slice(0, 12),
         });
@@ -30446,6 +30980,1223 @@ export async function debugOneshotTreImportSync(opts: { folderUrl?: string; forc
   } catch (e) {
     out.phase = 'uncaught';
     out.error = String(e instanceof Error ? (e.stack || e.message) : String(e || '')).slice(0, 2000);
+    return out;
+  }
+}
+// #endregion
+
+// #region debug-oneshot-trt-local: importa 1 arquivo LOCAL XLSX e roda PIPELINE COMPLETO learning profile kind=recurso_trt (com alias+reordenação+DEBUG L30002)
+export async function debugOneshotTrtLocalImport(opts: {
+  localXlsxPath?: string;
+  fileName?: string;
+  folderPath?: string;
+  fileId?: string;
+  parentFolderId?: string;
+  mode?: 'append' | 'replace';
+  resetHashesFirst?: boolean;
+  deleteLixoRowidsGte2?: boolean;
+}): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { ok: false, phase: 'init' };
+  const _crypto = require('crypto') as typeof import('crypto');
+  const _fs = require('fs') as typeof import('fs');
+  const _path = require('path') as typeof import('path');
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
+
+    // Reset hashes L1+L2
+    if (Boolean(opts.resetHashesFirst ?? true)) {
+      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%TRT%' OR value LIKE '%JULHO%' OR value LIKE '%recurso_trt%')`);
+      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'recurso_trt' OR kind LIKE '%trt%'`);
+      db.run(`DELETE FROM import_batch_rows WHERE kind = 'recurso_trt'`);
+      db.run(`DELETE FROM import_batches WHERE kind = 'recurso_trt'`);
+    }
+    if (Boolean(opts.deleteLixoRowidsGte2 ?? true)) {
+      const rDel = db.run('DELETE FROM "Recurso TRT" WHERE rowid >= 2');
+      out.deletedLixoRowidsGte2 = rDel.getRowsModified();
+    }
+
+    // Localiza arquivo local
+    const localPath = String(opts.localXlsxPath || '').trim();
+    if (!localPath || !_fs.existsSync(localPath)) {
+      out.error = `localXlsxPath não existe: ${localPath}`;
+      return out;
+    }
+    out.localXlsxPath = localPath;
+    const buffer = _fs.readFileSync(localPath);
+    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
+    out.sha256 = sha256Hex;
+    out.bufferBytes = buffer.length;
+    out.phase = 'sheetRead';
+
+    const fileName = String(opts.fileName || _path.basename(localPath) || 'TRT-JULHO-2026.xlsx');
+    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRT');
+    const fileId = String(opts.fileId || 'debug-local-trt-' + Date.now());
+    const parentId = String(opts.parentFolderId || 'debug-local-parent-trt');
+    const mode = String(opts.mode || 'append') as 'append' | 'replace';
+
+    // ============= INÍCIO PIPELINE (idêntico ao loop interno importByLearningProfileFromFolderUrl para 1 arquivo) =============
+    out.phase = 'learningProfileResolve';
+    const allProfiles = findLearningProfilesFor(db, '', 'recurso_trt');
+    let matchedProfile: LearningProfileMatch | null = null;
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    for (const p of allProfiles) {
+      try {
+        const reTxt = String(p.file_name_regex ?? '').trim();
+        if (!reTxt) continue;
+        const re = new RegExp(reTxt, 'i');
+        if (re.test(String(fileName ?? ''))) { matchedProfile = p; break; }
+      } catch { /* ignore bad regex */ }
+    }
+    if (!matchedProfile) {
+      // fallback: kind = recurso_trt direto (mesmo que regex não bata — força o perfil)
+      const allDb = findLearningProfilesFor(db, '');
+      for (const p of allDb) { if (String(p.id ?? '').toLowerCase() === 'recurso_trt') { matchedProfile = p; break; } }
+    }
+    const profile: any = matchedProfile;
+    out.profileId = profile?.id;
+    out.profileKind = profile?.kind;
+    out.profileTargetTable = profile?.target_table;
+    out.profileOptionsKeys = profile?.resolvedOptions ? Object.keys(profile.resolvedOptions) : [];
+
+    // Force kind TRT mesmo que profile não resolva (para cair no alias/reordenação)
+    if (profile && (!profile.kind || String(profile.kind).toLowerCase() !== 'recurso_trt')) {
+      profile.kind = 'recurso_trt';
+      profile.id = 'recurso_trt';
+      profile.target_table = 'Recurso TRT';
+    }
+    out.profileKindFinal = profile?.kind;
+    out.phase = 'readSheetTable';
+
+    // Read sheet (parser SÍNCRONO — buffer, kind=recurso_trt)
+    const kindLower = String(profile?.kind || 'recurso_trt').toLowerCase();
+    const parsedFinal: any = readSheetTable(buffer, kindLower === 'recurso_trt' ? 'recurso_trt' : 'recurso_tre');
+    out.sheetHeaders = parsedFinal.headers?.slice(0, 30) || [];
+    out.sheetHeadersCount = parsedFinal.headers?.length || 0;
+    out.sheetRowsCount = parsedFinal.rows?.length || 0;
+    if (!parsedFinal.rows || parsedFinal.rows.length === 0) {
+      out.error = 'readSheetTable retornou 0 linhas';
+      return out;
+    }
+    // File objeto (como o loop interno faz — necessário para as lógicas de mover/idempotência/competência from folderPath)
+    const file: any = {
+      id: fileId,
+      name: fileName,
+      parentId: parentId,
+      folderPath: folderPath,
+      size: buffer.length,
+    };
+    const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
+
+    out.phase = 'importPerFile (criar scope vars)';
+    // Todas variáveis que precisam estar em escopo para o pipeline 10 cols:
+    const tableName = String(profile?.target_table || 'Recurso TRT');
+    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
+    const modeOverride: any = mode;
+    const moveToImportados = Boolean(profile?.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? false);
+    const extractCompet = Boolean(profile?.resolvedOptions?.extractCompetenciaFromTopHeader
+      || profile?.resolvedOptions?.extractCompetenciaFromFileName
+      || profile?.resolvedOptions?.competenciaMesArquivoSemIncremento);
+    const strictWhitelist = Array.isArray(profile?.resolvedOptions?.strictColumnWhitelist) ? profile.resolvedOptions.strictColumnWhitelist.slice() : [];
+    const strictMinMatches = Number(profile?.resolvedOptions?.strictColumnMinMatches ?? 0);
+    const driveId = 'debug-local-drive';
+    const parentFolderId = parentId || '';
+    const anyFile = file;
+    let insertedRows = 0;
+    let skippedRows = 0;
+    // const importedFiles: any[] = []; // não necessitamos deste array de retorno
+
+    // Verificar idempotência L2 SHA256
+    out.phase = 'checkIdempotencyL2';
+    const prevImp = isFileAlreadyImportedByContentHash(db, sha256Hex);
+    out.contentHashPrev = prevImp.imported ? { ok: true, at: prevImp.at || null, meta: prevImp.meta || null } : { ok: false };
+
+    // Declarar todas as variáveis do pipeline (FORA do if para não ficar block-scoped)
+    let headersToImport: string[] = parsedFinal.headers;
+    let rowsToImport: Array<Record<string, unknown>> = parsedFinal.rows;
+    let competFromHeader: string | null = null;
+    const tableNameFinal = tableName;
+    const checkDupFinal = checkDup;
+    const profileFinal: any = profile;
+    const kindLowerFinal = kindLower;
+    const fileFinal: any = file;
+    const extractCompetFinal = extractCompet;
+    const strictWhitelistFinal = strictWhitelist;
+    const strictMinMatchesFinal = strictMinMatches;
+    const sourceFileFullFinal = sourceFileFull;
+    const moveToImportadosFinal = moveToImportados;
+    const driveIdFinal: any = driveId;
+    const parentFolderIdFinal = parentFolderId;
+    const anyFileFinal: any = anyFile;
+    const modeOverrideFinal: any = modeOverride;
+    const importedFiles: any[] = [];
+    let totalRowsSkipped = 0;
+    const accessToken = '';
+    out.phase = 'pipeline alias mapping + regras + reordenação + addMissingColumnsAndImportRows (inline copiado L29308-30088)';
+
+    try {
+      // =================== INÍCIO PIPELINE 10 COLS INLINE ===================
+      {
+        // Escopo anônimo (código idêntico ao loop interno importByLearningProfileFromFolderUrl por arquivo)
+        // Variáveis locais deste bloco (re-declaradas para não colidir com o escopo pai):
+        const kindLower = kindLowerFinal;
+        const parsedFinalScoped: any = parsedFinal;
+        const fileScoped: any = fileFinal;
+        const profileScoped: any = profileFinal;
+        const extractCompet = extractCompetFinal;
+        const strictWhitelist = strictWhitelistFinal;
+        const strictMinMatches = strictMinMatchesFinal;
+        const sourceFileFull = sourceFileFullFinal;
+        const tableName = tableNameFinal;
+        const checkDup = checkDupFinal;
+        const modeOverride = modeOverrideFinal;
+
+        let headersToImport: string[] = parsedFinalScoped.headers;
+        let rowsToImport: Array<Record<string, unknown>> = parsedFinalScoped.rows;
+        let competFromHeader: string | null = null;
+
+        // ALIAS MAPEAMENTO CABEÇALHOS
+        if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
+          const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
+            { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
+            { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
+            { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
+            { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
+            { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
+            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
+            { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
+            { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
+            { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
+            { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
+          ];
+          const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+          const aliasLut = new Map<string, string>();
+          for (const entry of canonicalAliasMap) {
+            for (const a of [entry.canonical, ...entry.aliases]) {
+              aliasLut.set(buildNorm(a), entry.canonical);
+            }
+          }
+          const headerRenames = new Map<string, string>();
+          const newHeaders: string[] = [];
+          for (const h of headersToImport) {
+            const canonical = aliasLut.get(buildNorm(h));
+            if (canonical && !headerRenames.has(h)) headerRenames.set(h, canonical);
+            newHeaders.push(canonical || h);
+          }
+          if (headerRenames.size > 0) {
+            headersToImport = newHeaders;
+          }
+        }
+
+        let profileOptionsAny: any = profileScoped?.resolvedOptions ?? {};
+
+        if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre') {
+          competFromHeader = extractCompet ? (parsedFinalScoped.extractedCompetenciaMmAaaa ?? null) : null;
+          if (Boolean(profileOptionsAny?.extractCompetenciaFromFileName ?? false) || Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false)) {
+            const mmNome: Record<string, number> = {
+              janeiro:1, fev:2, fevereiro:2, feve:2, mar:3, marco:3, março:3, marÇo:3,
+              abr:4, abril:4, mai:5, maio:5, jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8,
+              set:9, sep:9, setembro:9, out:10, outu:10, outubro:10, nov:11, novembro:11, dez:12, dezembro:12,
+              jan:1, feb:2, apr:4, may:5, jun_e:6, jul_e:7, aug:8, oct:10, dec:12,
+              january:1, february:2, march:3, april:4, june:6, july:7, august:8, september:9, october:10, november:11, december:12,
+            };
+            const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+            const fnNorm = buildNorm(String(fileScoped.name ?? ''));
+            const mAno = fnNorm.match(/\b(20\d{2}|[12]\d{3})\b/);
+            let mmTok = '';
+            const sortedKeys = Object.keys(mmNome).sort((a, b) => b.length - a.length);
+            for (const k of sortedKeys) {
+              if (fnNorm.includes(' ' + k + ' ') || fnNorm.includes('-' + k + '-') || fnNorm.includes('_' + k + '_') || fnNorm.startsWith(k + ' ') || fnNorm.endsWith(' ' + k)) {
+                mmTok = k; break;
+              }
+              const re = new RegExp('(^|[ _-])' + k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '([ _-]|$)','i');
+              if (re.test(fnNorm)) { mmTok = k; break; }
+            }
+            if (!mmTok) {
+              const toks = fnNorm.split(/[ _-]+/).filter(Boolean);
+              for (const t of toks) {
+                if (Object.prototype.hasOwnProperty.call(mmNome, t) && t.length >= 3) { mmTok = t; break; }
+              }
+            }
+            if (mAno && mmTok) {
+              const mm = mmNome[mmTok];
+              if (mm >= 1 && mm <= 12) {
+                const semIncremento = Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false);
+                let mmFinal = mm;
+                let anoFinal = Number(mAno[1]);
+                if (!semIncremento) {
+                  if (mm === 12) { mmFinal = 1; anoFinal = anoFinal + 1; }
+                  else { mmFinal = mm + 1; }
+                }
+                const cop = `${String(mmFinal).padStart(2,'0')}/${String(anoFinal)}`;
+                if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) competFromHeader = cop;
+              }
+            }
+          }
+          if (!competFromHeader && typeof fileScoped.folderPath === 'string' && fileScoped.folderPath.length > 0) {
+            const fp = String(fileScoped.folderPath).replace(/\\/g, '/');
+            const mAno = fp.match(/(^|\/)(20\d{2})(\/|$)/);
+            const m = fp.match(/(^|\/)(Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)(\/|$)/i);
+            if (mAno && m) {
+              const mm = (['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro']
+                .map((x) => x.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase())
+                .indexOf(String(m[2]).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase()) + 1);
+              if (mm >= 1 && mm <= 12) competFromHeader = `${String(mm).padStart(2,'0')}/${String(mAno[2])}`;
+            }
+          }
+          if (strictWhitelist && strictWhitelist.length > 0) {
+            const norm = (s: string) =>
+              String(s ?? '')
+                .normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+                .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+            const whitelistNorm = strictWhitelist.map((w) => ({ orig: w, norm: norm(w) }));
+            const matchedBySource: Array<{ sourceHeader: string; targetHeader: string }> = [];
+            for (let idx = 0; idx < headersToImport.length; idx++) {
+              const hOrig = parsedFinalScoped.headers[idx] || headersToImport[idx];
+              const hNormKey = headersToImport[idx] || hOrig;
+              const hn = norm(hNormKey);
+              const hit = whitelistNorm.find((w) => w.norm === hn || (hn && w.norm && (w.norm.startsWith(hn) || hn.startsWith(w.norm)) && Math.abs(w.norm.length - hn.length) <= 5));
+              if (hit) matchedBySource.push({ sourceHeader: hOrig, targetHeader: hit.orig });
+            }
+            const seenTargets = new Set<string>();
+            const dedupedMatches: Array<{ sourceHeader: string; targetHeader: string }> = [];
+            for (const m of matchedBySource) {
+              if (seenTargets.has(m.targetHeader)) continue;
+              seenTargets.add(m.targetHeader);
+              dedupedMatches.push(m);
+            }
+            const realMatches = dedupedMatches;
+            if (realMatches.length < strictMinMatches) {
+              importedFiles.push({
+                fileName: fileScoped.name, targetTable: tableName, kind: profileScoped.kind,
+                profileId: profileScoped.id, insertedRows: 0, skippedRows: parsedFinalScoped.rows.length,
+                headers: parsedFinalScoped.headers,
+                skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatches}`,
+              });
+              totalRowsSkipped += parsedFinalScoped.rows.length;
+              throw new Error(`strict whitelist ${realMatches.length} < ${strictMinMatches}`);
+            }
+            const finalHeaders = strictWhitelist.slice();
+            const sourceToTarget = new Map<string, string>();
+            for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
+            const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+            const sourceToTargetNorm = new Map<string, string>();
+            for (const [k, v] of sourceToTarget.entries()) {
+              const nk = buildNormKey(k);
+              if (nk && !sourceToTargetNorm.has(nk)) sourceToTargetNorm.set(nk, v);
+            }
+            const finalRowsRaw: Array<Record<string, unknown>> = [];
+            const srcRows = Array.isArray(rowsToImport) && rowsToImport.length > 0 ? rowsToImport : parsedFinalScoped.rows;
+            for (const src of srcRows) {
+              const outRow: Record<string, unknown> = {};
+              for (const targetCol of finalHeaders) outRow[targetCol] = null;
+              for (const srcKey of Object.keys(src)) {
+                let target = sourceToTarget.get(srcKey);
+                if (!target) {
+                  const nk = buildNormKey(srcKey);
+                  if (nk) target = sourceToTargetNorm.get(nk);
+                }
+                if (!target) continue;
+                const v = src[srcKey];
+                outRow[target] = v === undefined ? null : v;
+              }
+              const outRowCpf = String(outRow['CPF'] ?? '').replace(/[^\d]/g, '').trim();
+              if (outRowCpf.length < 11 && typeof (src as any)['CPF'] !== 'undefined' && (src as any)['CPF'] !== null) {
+                const srcRawCpf = String((src as any)['CPF'] ?? '').replace(/[^\d]/g, '').trim();
+                if (srcRawCpf.length >= 11) outRow['CPF'] = (src as any)['CPF'];
+              }
+              if (!String(outRow['Nome'] ?? '').trim()) {
+                const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome'];
+                for (const cand of nomeAliases) {
+                  const v = Object.prototype.hasOwnProperty.call(src, cand) ? (src as any)[cand] : null;
+                  if (v !== null && v !== undefined && String(v).trim().length > 2) {
+                    outRow['Nome'] = v;
+                    break;
+                  }
+                }
+                if (!String(outRow['Nome'] ?? '').trim() && typeof buildNormKey === 'function') {
+                  for (const srcKey of Object.keys(src)) {
+                    const nk = buildNormKey(srcKey);
+                    if (!nk) continue;
+                    if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome')) continue;
+                    const v = src[srcKey];
+                    if (v !== null && v !== undefined && String(v).trim().length > 2) {
+                      outRow['Nome'] = v;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (extractCompet && competFromHeader) outRow.Copetencia = competFromHeader;
+              const nonEmptyCols = Object.values(outRow).filter((v) => v !== null && v !== undefined && String(v).trim().length > 0).length;
+              if (nonEmptyCols >= 2) finalRowsRaw.push(outRow);
+            }
+            if (srcRows.length === finalRowsRaw.length) {
+              for (let rIdx = 0; rIdx < finalRowsRaw.length; rIdx++) {
+                const src = srcRows[rIdx];
+                const dest = finalRowsRaw[rIdx];
+                if (src && dest && typeof src === 'object' && typeof dest === 'object') {
+                  for (const k of Object.keys(src)) {
+                    if (finalHeaders.includes(k)) continue;
+                    if (Object.prototype.hasOwnProperty.call(dest, k)) continue;
+                    const v = src[k];
+                    dest[k] = v === undefined ? null : v;
+                  }
+                }
+              }
+            }
+            const dedupKey = (r: Record<string, unknown>): string => {
+              const cop = Object.prototype.hasOwnProperty.call(r, 'Copetencia') ? String(r['Copetencia'] ?? '').trim() : '';
+              const nome = Object.prototype.hasOwnProperty.call(r, 'Nome') ? String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase() : '';
+              const cpf = (String(Object.prototype.hasOwnProperty.call(r, 'CPF') ? r['CPF'] : '') ?? '').replace(/[^\d]/g, '').trim();
+              const normContratoBR = (raw: unknown): string => {
+                const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+                if (!s) return '';
+                const hasComma = s.includes(',');
+                const hasDot = s.includes('.');
+                if (hasComma && !hasDot) return s;
+                if (!hasComma && hasDot) {
+                  const lastDot = s.lastIndexOf('.');
+                  const tail = s.slice(lastDot + 1);
+                  if (tail.length === 3 && /^\d+$/.test(tail)) return s.replace(/\./g, ',');
+                  return s.replace(/,/g, '').replace('.', ',');
+                }
+                if (hasComma && hasDot) {
+                  if (s.lastIndexOf(',') > s.lastIndexOf('.')) return s.replace(/\./g, '');
+                  return s.replace(/,/g, '').replace('.', ',');
+                }
+                if (!hasComma && !hasDot && /^\d{4,}$/.test(s)) {
+                  return Number(s).toLocaleString('pt-BR').replace(/\./g, ',');
+                }
+                return s;
+              };
+              const contrato = normContratoBR(Object.prototype.hasOwnProperty.call(r, 'Contrato') ? r['Contrato'] : '');
+              const nParcela = Object.prototype.hasOwnProperty.call(r, 'N Parcela') ? String(r['N Parcela'] ?? '').trim() : '';
+              return `${cop}|${cpf}|${nome}|${contrato}|${nParcela}`;
+            };
+
+            const normContratoBR = (raw: unknown): string => {
+              const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+              if (!s) return '';
+              const hasComma = s.includes(',');
+              const hasDot = s.includes('.');
+              if (hasComma && !hasDot) return s;
+              if (!hasComma && hasDot) {
+                const lastDot = s.lastIndexOf('.');
+                const tail = s.slice(lastDot + 1);
+                if (tail.length === 3 && /^\d+$/.test(tail)) return s.replace(/\./g, ',');
+                return s.replace(/,/g, '').replace('.', ',');
+              }
+              if (hasComma && hasDot) {
+                if (s.lastIndexOf(',') > s.lastIndexOf('.')) return s.replace(/\./g, '');
+                return s.replace(/,/g, '').replace('.', ',');
+              }
+              if (!hasComma && !hasDot && /^\d{4,}$/.test(s)) {
+                return Number(s).toLocaleString('pt-BR').replace(/\./g, ',');
+              }
+              return s;
+            };
+
+            const afterTotals: Array<Record<string, unknown>> = [];
+            const seenIntra = new Set<string>();
+            for (const r of finalRowsRaw) {
+              const vals = Object.values(r);
+              const anyTotal = vals.some((v) => {
+                const s = v === null || v === undefined ? '' : String(v).trim().toUpperCase();
+                return s === 'TOTAL' || s === 'TOTAIS' || s.startsWith('TOTAL ') || s.startsWith('TOTAL:') || s.startsWith('TOTAIS');
+              });
+              if (anyTotal) continue;
+              const anyNotEmpty = vals.some((v) => {
+                const s = v === null || v === undefined ? '' : String(v).trim();
+                return s.length > 0;
+              });
+              if (!anyNotEmpty) continue;
+              if (Object.prototype.hasOwnProperty.call(r, 'Contrato')) {
+                r['Contrato'] = normContratoBR(r['Contrato']);
+              }
+              const k = dedupKey(r);
+              if (seenIntra.has(k)) continue;
+              seenIntra.add(k);
+              afterTotals.push(r);
+            }
+            const finalRows: Array<Record<string, unknown>> = afterTotals;
+            const maskCpf = (raw: unknown): string => {
+              const digits = String(raw ?? '').replace(/\D/g, '').slice(0, 11);
+              if (digits.length === 0) return '';
+              if (digits.length <= 3) return digits;
+              if (digits.length <= 6) return `${digits.slice(0,3)}.${digits.slice(3)}`;
+              if (digits.length <= 9) return `${digits.slice(0,3)}.${digits.slice(3,6)}.${digits.slice(6)}`;
+              return `${digits.slice(0,3)}.${digits.slice(3,6)}.${digits.slice(6,9)}-${digits.slice(9)}`;
+            };
+            const normValorParcela = (raw: unknown): string => {
+              let s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+              if (!s) return '';
+              let only = s.replace(/R\$\s*/i, '').trim();
+              if (!only) return '';
+              const lastComma = only.lastIndexOf(',');
+              const lastDot = only.lastIndexOf('.');
+              if (lastComma >= 0 && lastDot < 0) only = only.replace(',', '.');
+              else if (lastComma >= 0 && lastDot >= 0) {
+                if (lastComma > lastDot) only = only.replace(/\./g, '').replace(',', '.');
+                else only = only.replace(/,/g, '');
+              }
+              return `R$ ${only}`;
+            };
+            for (const r of finalRows) {
+              if (Object.prototype.hasOwnProperty.call(r, 'Nome')) {
+                r['Nome'] = String(String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase());
+              }
+              if (Object.prototype.hasOwnProperty.call(r, 'CPF')) r['CPF'] = maskCpf(r['CPF']);
+              if (Object.prototype.hasOwnProperty.call(r, 'Desc Finalidade')) r['Desc Finalidade'] = String(r['Desc Finalidade'] ?? '').replace(/\s+/g, ' ').trim();
+              if (Object.prototype.hasOwnProperty.call(r, 'Critério de Débito')) r['Critério de Débito'] = String(r['Critério de Débito'] ?? '').replace(/\s+/g, ' ').trim();
+              if (Object.prototype.hasOwnProperty.call(r, 'Valor Parcela')) r['Valor Parcela'] = normValorParcela(r['Valor Parcela']);
+              if (Boolean(profileOptionsAny?.descFinalidadeDefaultCreditoConsignado ?? false)) {
+                const produtoRaw = Object.prototype.hasOwnProperty.call(r, 'Produto') ? r['Produto'] : null;
+                const produtoUpper = String(produtoRaw ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+                const currDesc = String(r['Desc Finalidade'] ?? '').trim().toUpperCase();
+                if (!currDesc || currDesc === produtoUpper || produtoUpper === 'EMPRESTIMO') {
+                  r['Desc Finalidade'] = 'CREDITO CONSIGNADO';
+                }
+              }
+              if (Boolean(profileOptionsAny?.criterioDebitoPadraoFolhaPagto ?? false)) {
+                const sitRaw = Object.prototype.hasOwnProperty.call(r, 'Situação')
+                  ? r['Situação']
+                  : (Object.prototype.hasOwnProperty.call(r, 'Situacao') ? r['Situacao'] : null);
+                const sitUpper = String(sitRaw ?? '').trim().toUpperCase();
+                const currCrit = String(r['Critério de Débito'] ?? '').trim();
+                if (!currCrit || sitUpper === 'DE' || sitUpper === 'ATIVO' || sitUpper === 'INATIVO') r['Critério de Débito'] = 'Folha Pagto';
+              }
+              if (kindLower === 'recurso_tre') {
+                const nP = String(r['N Parcela'] ?? '').replace(/\s+/g, '').trim();
+                const qP = String(r['Qtd Parcelas'] ?? '').replace(/\s+/g, '').trim();
+                if (nP && !qP) r['Qtd Parcelas'] = nP;
+                const cRaw = String(r['Contrato'] ?? '').replace(/\s+/g, ' ').trim();
+                if (/^\d+(\.\d{3,})$/.test(cRaw)) {
+                  const asNum = Number(cRaw);
+                  if (Number.isInteger(asNum)) r['Contrato'] = String(asNum);
+                }
+              }
+              if (Boolean(profileOptionsAny?.vencimentoPadraoDia26MesCopetenciaAno2001 ?? false)) {
+                const copVal = String(r['Copetencia'] ?? '').trim();
+                const mCop = copVal.match(/^(0[1-9]|1[0-2])[\/\-](\d{4})$/);
+                const currVenc = String(r['Vencimento'] ?? '').trim();
+                if (!currVenc && mCop) {
+                  r['Vencimento'] = `26/${mCop[1]}/2001`;
+                }
+                if (currVenc && mCop) {
+                  const mReal = currVenc.match(/^(0[1-9]|[12]\d|3[01])[\/\-.](0[1-9]|1[0-2])[\/\-.](\d{2}|\d{4})$/);
+                  if (!mReal) r['Vencimento'] = `26/${mCop[1]}/2001`;
+                  if (mReal && mReal[3] !== '2001') r['Vencimento'] = `26/${mCop[1]}/2001`;
+                }
+              }
+              if (Boolean(profileOptionsAny?.contratoNormalizadoBrMilhar ?? false)) {
+                const c = String(r['Contrato'] ?? '').replace(/\s+/g,' ').trim();
+                if (c) r['Contrato'] = normContratoBR(c);
+              }
+            }
+            const canonical10ColsOrder: string[] = [
+              'Nome','CPF','Copetencia','Desc Finalidade','Contrato',
+              'N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela',
+            ];
+            const allAvailableHeaders = new Set<string>(['Copetencia', ...finalHeaders]);
+            for (const r of finalRows) for (const k of Object.keys(r)) allAvailableHeaders.add(k);
+            const canonicalBasePresent: string[] = canonical10ColsOrder.filter((h) => allAvailableHeaders.has(h));
+            const extraHeadersFromRows: string[] = [];
+            const seenHeaders = new Set<string>(canonicalBasePresent);
+            for (const r of finalRows) {
+              for (const k of Object.keys(r)) {
+                if (seenHeaders.has(k)) continue;
+                seenHeaders.add(k);
+                extraHeadersFromRows.push(k);
+              }
+            }
+            headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
+            rowsToImport = finalRows;
+          } else if (extractCompet && competFromHeader) {
+            rowsToImport = parsedFinalScoped.rows.map((r: any) => ({ ...r, Copetencia: competFromHeader }));
+            if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
+          }
+        }
+
+        const extraStatic: Record<string, string | null> = {};
+        if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') {
+          if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
+        }
+
+        // DEBUG L30002 PONTO CRÍTICO ANTES DO INSERT
+        if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre') {
+          console.log(`\n` + '═'.repeat(110));
+          console.log(`║ [DEBUG LOCAL TRT/TRE L30002-ONESHOT] ANTES DO addMissingColumnsAndImportRows — arquivo=${String(fileScoped.name ?? '?')}  kind=${kindLower}`);
+          console.log(`═`.repeat(110));
+          const opts = profileScoped?.resolvedOptions ?? {};
+          console.log(`║ [1/4] profile.resolvedOptions flags (${Object.keys(opts).length} chaves):`);
+          const flagNames = [
+            'extractCompetenciaFromFileName','competenciaMesArquivoSemIncremento',
+            'contratoNormalizadoBrMilhar','criterioDebitoPadraoFolhaPagto',
+            'descFinalidadeDefaultCreditoConsignado','vencimentoPadraoDia26MesCopetenciaAno2001',
+            'strictColumnWhitelist','strictColumnMinMatches',
+            'ignoreImportados','moveToImportadosSubfolderAfterImport','checkDuplicateContent',
+          ];
+          for (const fn of flagNames) {
+            const v = (opts as any)[fn];
+            const mark = (typeof v === 'boolean' && v === true) ? '✅ TRUE ' : (typeof v === 'boolean' ? '❌ FALSE' : `⚠️ ${JSON.stringify(v)}`);
+            console.log(`║       ${mark}  ${fn}`);
+          }
+          console.log(`║       strictColumnWhitelist cols: ${JSON.stringify((opts as any)?.strictColumnWhitelist ?? [])}`);
+          console.log(`║ [2/4] headersToImport (${headersToImport.length} cols — ORDEM ENVIADA AO INSERT):`);
+          headersToImport.slice(0, 35).forEach((h, i) => {
+            const cidMark = (i <= 9) ? ` 🔹CID${String(i).padStart(2,'0')}` : `     `;
+            console.log(`║       [${String(i).padStart(2,'0')}]${cidMark}  ${h}`);
+          });
+          if (rowsToImport && rowsToImport.length > 0) {
+            const r0 = rowsToImport[0];
+            console.log(`║ [3/4] rowsToImport[0] CHAVES E VALORES (${Object.keys(r0||{}).length} keys):`);
+            const main10 = ['Nome','CPF','Copetencia','Desc Finalidade','Contrato','N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela'];
+            const extras = Object.keys(r0||{}).filter(k => !main10.includes(k));
+            for (const mk of main10) {
+              const v = (r0 as any)?.[mk];
+              const ok = (v !== null && v !== undefined && String(v).trim() !== '');
+              console.log(`║       10COLS ${ok ? '✅' : '❌'} ${mk.padEnd(22)} → ${JSON.stringify(v)}`);
+            }
+            const aliasImp = ['Funcionário','Funcionario','Produto','Contrato CGA','Parcela Atual','Quantidade de Parcelas','Situação','Situacao','Valor da parcela','TEC'];
+            for (const ak of aliasImp) {
+              const v = (r0 as any)?.[ak];
+              if (v !== undefined && v !== null) {
+                console.log(`║       ALIAS  🔹 ${ak.padEnd(22)} → ${JSON.stringify(v)}`);
+              }
+            }
+            extras.slice(0, 20).forEach(k => {
+              if (main10.includes(k) || aliasImp.includes(k)) return;
+              const v = (r0 as any)?.[k];
+              if (v === null || v === undefined || String(v).trim() === '') return;
+              console.log(`║       EXTRA  🔹 ${k.padEnd(22)} → ${JSON.stringify(String(v).slice(0, 40))}`);
+            });
+          } else {
+            console.log(`║ [3/4] rowsToImport VAZIO (length=0)!`);
+          }
+          console.log(`║ [4/4] tableName=${tableName}  checkDup=${checkDup}  modeOverride=${modeOverride}`);
+          console.log(`═`.repeat(110) + '\n');
+        }
+
+        const res = addMissingColumnsAndImportRows(
+          db,
+          tableName,
+          headersToImport,
+          rowsToImport,
+          checkDup,
+          modeOverride,
+          Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
+        );
+
+        insertedRows = res.insertedRows;
+        skippedRows = res.skippedRows;
+        out.insertResult = res;
+        markFileImportedByContentHash(db, sha256Hex, {
+          fileName,
+          fileId,
+          kind: profile?.kind || null,
+          targetTable: profile?.target_table || null,
+          profileId: profile?.id || null,
+          insertedRows: res.insertedRows,
+          skippedRows: res.skippedRows,
+          mode: modeOverride,
+          at: new Date().toISOString(),
+        });
+        importedFiles.push({
+          fileName,
+          targetTable: profile?.target_table,
+          kind: profile?.kind,
+          profileId: profile?.id,
+          insertedRows: res.insertedRows,
+          skippedRows: res.skippedRows,
+          headers: headersToImport.slice(0, 30),
+          skippedReason: null,
+        });
+      }
+      out.importedFiles = importedFiles;
+      out.insertedRowsFinal = insertedRows;
+      out.skippedRowsFinal = skippedRows;
+    } catch (pipeE: any) {
+      out.pipelineError = String(pipeE?.stack || pipeE?.message || pipeE).slice(0, 2000);
+      out.importedFiles = importedFiles;
+    }
+
+    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
+    try { await db.close(); } catch (_) { /* ignore */ }
+
+    out.ok = true;
+    out.phase = 'done';
+    out.hint = 'Debug oneshot LOCAL finalizado. Ver logs L30002-ONESHOT no output do processo backend. Depois validar SQL: SELECT rowid,* FROM "Recurso TRT" WHERE rowid>=2 ORDER BY rowid DESC LIMIT 5;';
+    return out;
+  } catch (e: any) {
+    out.phase = 'uncaught';
+    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
+    return out;
+  }
+}
+// #endregion
+
+// #region debug-oneshot-tre-local
+export async function debugOneshotTreLocalImport(opts: {
+  localXlsxPath?: string;
+  fileName?: string;
+  folderPath?: string;
+  fileId?: string;
+  parentFolderId?: string;
+  mode?: 'append' | 'replace';
+  resetHashesFirst?: boolean;
+  deleteLixoRowidsGte2?: boolean;
+}): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { ok: false, phase: 'init' };
+  const _crypto = require('crypto') as typeof import('crypto');
+  const _fs = require('fs') as typeof import('fs');
+  const _path = require('path') as typeof import('path');
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
+
+    if (Boolean(opts.resetHashesFirst ?? true)) {
+      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%TRE%' OR value LIKE '%JULHO%' OR value LIKE '%recurso_tre%')`);
+      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'recurso_tre' OR kind LIKE '%tre%'`);
+      db.run(`DELETE FROM import_batch_rows WHERE kind = 'recurso_tre'`);
+      db.run(`DELETE FROM import_batches WHERE kind = 'recurso_tre'`);
+    }
+    if (Boolean(opts.deleteLixoRowidsGte2 ?? true)) {
+      try {
+        const rDel = db.run('DELETE FROM "Recurso TRE" WHERE rowid >= 2');
+        out.deletedLixoRowidsGte2 = rDel.getRowsModified();
+      } catch (e) {
+        try {
+          const rDel = db.run('DELETE FROM "Recurso TRE"');
+          out.deletedLixoRowidsGte2 = rDel.getRowsModified();
+        } catch (_) { out.deletedLixoRowidsGte2 = null; }
+      }
+    }
+
+    const localPath = String(opts.localXlsxPath || '').trim();
+    if (!localPath || !_fs.existsSync(localPath)) {
+      out.error = `localXlsxPath não existe: ${localPath}`;
+      return out;
+    }
+    out.localXlsxPath = localPath;
+    const buffer = _fs.readFileSync(localPath);
+    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
+    out.sha256 = sha256Hex;
+    out.bufferBytes = buffer.length;
+    out.phase = 'sheetRead';
+
+    const fileName = String(opts.fileName || _path.basename(localPath) || 'TRE-JULHO-2026.xlsx');
+    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRE');
+    const fileId = String(opts.fileId || 'debug-local-tre-' + Date.now());
+    const parentId = String(opts.parentFolderId || 'debug-local-parent-tre');
+    const mode = String(opts.mode || 'append') as 'append' | 'replace';
+
+    out.phase = 'learningProfileResolve';
+    const allProfiles = findLearningProfilesFor(db, '', 'recurso_tre');
+    let matchedProfile: LearningProfileMatch | null = null;
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    for (const p of allProfiles) {
+      try {
+        const reTxt = String(p.file_name_regex ?? '').trim();
+        if (!reTxt) continue;
+        if (new RegExp(reTxt, 'i').test(fileName)) {
+          matchedProfile = p; break;
+        }
+      } catch (_re) { /* ignore */ }
+    }
+    if (!matchedProfile && allProfiles.length > 0) matchedProfile = allProfiles[0];
+    if (!matchedProfile) {
+      out.error = `Nenhum learning profile kind=recurso_tre encontrou arquivo ${fileName}. Perfil upsert falhou?`;
+      try { persistDatabase(db, dbFilePath); } catch (_) {}
+      try { await db.close(); } catch (_) {}
+      return out;
+    }
+    out.profile = { id: matchedProfile.id, kind: matchedProfile.kind, target_table: matchedProfile.target_table, file_name_regex: matchedProfile.file_name_regex };
+    const profile: any = {
+      id: matchedProfile.id,
+      kind: matchedProfile.kind,
+      target_table: matchedProfile.target_table,
+      resolvedOptions: typeof matchedProfile.options_json === 'string' ? JSON.parse(matchedProfile.options_json) : (matchedProfile.options_json || {}),
+    };
+
+    const kindLower = String(profile?.kind || '').trim().toLowerCase();
+    out.kindLower = kindLower;
+    const tableName = String(profile?.target_table || 'Recurso TRE');
+    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
+    const modeOverride: any = mode;
+
+    const file: any = { name: fileName, folderPath, id: fileId, parentId, size: buffer.length };
+    const parsedFinal: any = readSheetTable(buffer, kindLower === 'recurso_tre' ? 'recurso_tre' : 'recurso_tre');
+    out.phase = 'importPerFile (pipeline 10 cols inline)';
+    const importedFiles: any[] = [];
+    let insertedRows = 0;
+    let skippedRows = 0;
+
+    try {
+      {
+        const kindLowerInner = kindLower;
+        const parsedFinalScoped: any = parsedFinal;
+        const fileScoped: any = file;
+        const profileScoped: any = profile;
+        const extractCompet = Boolean(profileScoped?.resolvedOptions?.extractCompetenciaFromTopHeader || profileScoped?.resolvedOptions?.extractCompetenciaFromFileName || profileScoped?.resolvedOptions?.competenciaMesArquivoSemIncremento);
+        const strictWhitelist = Array.isArray(profileScoped?.resolvedOptions?.strictColumnWhitelist) ? profileScoped.resolvedOptions.strictColumnWhitelist.slice() : [];
+        const strictMinMatches = Number(profileScoped?.resolvedOptions?.strictColumnMinMatches ?? 0);
+        const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
+        const tableNameInner = tableName;
+        const checkDupFinal = checkDup;
+        const modeOverrideFinal: any = modeOverride;
+
+        let headersToImport: string[] = parsedFinalScoped.headers;
+        let rowsToImport: Array<Record<string, unknown>> = parsedFinalScoped.rows;
+        let competFromHeader: string | null = null;
+
+        if (kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre' || kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra') {
+          const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
+            { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
+            { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
+            { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
+            { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
+            { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
+            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
+            { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
+            { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
+            { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
+            { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
+          ];
+          const buildNormAlias = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+          const aliasLut = new Map<string, string>();
+          for (const entry of canonicalAliasMap) {
+            for (const a of [entry.canonical, ...entry.aliases]) {
+              aliasLut.set(buildNormAlias(a), entry.canonical);
+            }
+          }
+          const headerRenames = new Map<string, string>();
+          const newHeaders: string[] = [];
+          for (const h of headersToImport) {
+            const canonical = aliasLut.get(buildNormAlias(h));
+            if (canonical && !headerRenames.has(h)) headerRenames.set(h, canonical);
+            newHeaders.push(canonical || h);
+          }
+          if (headerRenames.size > 0) headersToImport = newHeaders;
+        }
+
+        let profileOptionsAny: any = profileScoped?.resolvedOptions ?? {};
+        const strictWhitelistFinal = strictWhitelist;
+        const strictMinMatchesFinal = strictMinMatches;
+        const extractCompetFinal = extractCompet;
+
+        let finalHeaders = headersToImport;
+        let finalRows: Array<Record<string, any>> = (rowsToImport || []).map(r => ({ ...r }));
+        let matchedCount = 0;
+        if (kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre') {
+          competFromHeader = extractCompetFinal ? (parsedFinalScoped.extractedCompetenciaMmAaaa ?? null) : null;
+          if (Boolean(profileOptionsAny?.extractCompetenciaFromFileName ?? false) || Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false)) {
+            const mmNome: Record<string, number> = {
+              janeiro:1, fev:2, fevereiro:2, feve:2, mar:3, marco:3, março:3,
+              abr:4, abril:4, mai:5, maio:5, jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8,
+              set:9, sep:9, setembro:9, out:10, outu:10, outubro:10, nov:11, novembro:11, dez:12, dezembro:12,
+            };
+            const buildNorm2 = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+            const fnNorm = buildNorm2(String(fileScoped.name ?? ''));
+            const mAno = fnNorm.match(/\b(20\d{2}|[12]\d{3})\b/);
+            let mmTok = '';
+            const sortedKeys = Object.keys(mmNome).sort((a, b) => b.length - a.length);
+            for (const k of sortedKeys) {
+              if (fnNorm.includes(' ' + k + ' ') || fnNorm.includes('-' + k + '-') || fnNorm.includes('_' + k + '_') || fnNorm.startsWith(k + ' ') || fnNorm.endsWith(' ' + k)) {
+                mmTok = k; break;
+              }
+              const re = new RegExp('(^|[ _-])' + k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '([ _-]|$)','i');
+              if (re.test(fnNorm)) { mmTok = k; break; }
+            }
+            if (!mmTok) {
+              const toks = fnNorm.split(/[ _-]+/).filter(Boolean);
+              for (const t of toks) {
+                if (Object.prototype.hasOwnProperty.call(mmNome, t) && t.length >= 3) { mmTok = t; break; }
+              }
+            }
+            if (mAno && mmTok) {
+              const mm = mmNome[mmTok];
+              if (mm >= 1 && mm <= 12) {
+                const semIncremento = Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false);
+                let mmFinal = mm;
+                let anoFinal = Number(mAno[1]);
+                if (!semIncremento) {
+                  if (mm === 12) { mmFinal = 1; anoFinal = anoFinal + 1; }
+                  else { mmFinal = mm + 1; }
+                }
+                const cop = `${String(mmFinal).padStart(2,'0')}/${String(anoFinal)}`;
+                if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) competFromHeader = cop;
+              }
+            }
+          }
+          if (!competFromHeader && typeof fileScoped.folderPath === 'string' && fileScoped.folderPath.length > 0) {
+            const fp = String(fileScoped.folderPath).replace(/\\/g, '/');
+            const mAno = fp.match(/(^|\/)(20\d{2})(\/|$)/);
+            const m = fp.match(/(^|\/)(Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)(\/|$)/i);
+            if (mAno && m) {
+              const mm = (['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro']
+                .map((x) => x.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase())
+                .indexOf(String(m[2]).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase()) + 1);
+              if (mm >= 1 && mm <= 12) competFromHeader = `${String(mm).padStart(2,'0')}/${String(mAno[2])}`;
+            }
+          }
+
+          if (strictWhitelistFinal && strictWhitelistFinal.length > 0) {
+            const normMatch = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+            const wlNormalized = strictWhitelistFinal.map(normMatch);
+            const headerMatches = headersToImport.filter(h => wlNormalized.includes(normMatch(h)));
+            matchedCount = headerMatches.length;
+            out.strictMatches = { minRequired: strictMinMatchesFinal, matched: matchedCount, headersMatched: headerMatches, headersAvailable: headersToImport.slice(0, 30) };
+          }
+
+          const isHeaderGhostRowOneshot = (r: Record<string, unknown>): boolean => {
+            const requiredPairs: Array<[string, string]> = [
+              ['Nome', 'Nome'], ['CPF', 'CPF'], ['Desc Finalidade', 'Desc Finalidade'],
+              ['Contrato', 'Contrato'], ['N° Parcela', 'N° Parcela'], ['N Parcela', 'N Parcela'],
+              ['Qtd Parcelas', 'Qtd Parcelas'], ['Vencimento', 'Vencimento'],
+              ['Critério de Débito', 'Critério de Débito'], ['Valor Parcela', 'Valor Parcela'],
+            ];
+            let matches = 0;
+            for (const [k, expected] of requiredPairs) {
+              if (!Object.prototype.hasOwnProperty.call(r, k)) continue;
+              const raw = r[k];
+              const s = raw === null || raw === undefined ? '' : String(raw).replace(/\s+/g, ' ').trim();
+              if (s && s.toLowerCase() === expected.toLowerCase()) matches++;
+            }
+            return matches >= 5;
+          };
+          const normCpfOneshot = (raw: unknown): string => String(raw ?? '').replace(/[^\d]/g, '').trim();
+          const normContratoBRDedup = (raw: unknown): string => {
+            const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+            if (!s) return '';
+            const hasComma = s.includes(','); const hasDot = s.includes('.');
+            if (hasComma && !hasDot) return s;
+            if (!hasComma && hasDot) {
+              const lastDot = s.lastIndexOf('.'); const tail = s.slice(lastDot + 1);
+              if (tail.length === 3 && /^\d+$/.test(tail)) return s.replace(/\./g, ',');
+              return s.replace(/,/g, '').replace('.', ',');
+            }
+            if (hasComma && hasDot) {
+              if (s.lastIndexOf(',') > s.lastIndexOf('.')) return s.replace(/\./g, '');
+              return s.replace(/,/g, '').replace('.', ',');
+            }
+            if (!hasComma && !hasDot && /^\d{4,}$/.test(s)) return Number(s).toLocaleString('pt-BR').replace(/\./g, ',');
+            return s;
+          };
+          const dedupKeyOneshot = (r: Record<string, unknown>): string => {
+            const cop = Object.prototype.hasOwnProperty.call(r, 'Copetencia') ? String(r['Copetencia'] ?? '').trim() : '';
+            const nome = Object.prototype.hasOwnProperty.call(r, 'Nome') ? String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase() : '';
+            const cpf = normCpfOneshot(Object.prototype.hasOwnProperty.call(r, 'CPF') ? r['CPF'] : '');
+            const contrato = normContratoBRDedup(Object.prototype.hasOwnProperty.call(r, 'Contrato') ? r['Contrato'] : '');
+            const nParcela = Object.prototype.hasOwnProperty.call(r, 'N° Parcela')
+              ? String(r['N° Parcela'] ?? '').trim()
+              : (Object.prototype.hasOwnProperty.call(r, 'N Parcela') ? String(r['N Parcela'] ?? '').trim() : '');
+            return `${cop}|${cpf}|${nome}|${contrato}|${nParcela}`;
+          };
+          const afterTotalsOneshot: Array<Record<string, unknown>> = [];
+          for (const r of finalRows as Array<Record<string, unknown>>) {
+            if (!r || typeof r !== 'object') continue;
+            const vals = Object.values(r);
+            const anyTotal = vals.some((v) => {
+              const s = v === null || v === undefined ? '' : String(v).trim().toUpperCase();
+              return s === 'TOTAL' || s === 'TOTAIS' || s.startsWith('TOTAL ') || s.startsWith('TOTAL:') || s.startsWith('TOTAIS') || s.startsWith('SOMA');
+            });
+            if (anyTotal) continue;
+            const anyNotEmpty = vals.some((v) => {
+              const s = v === null || v === undefined ? '' : String(v).trim();
+              return s.length > 0;
+            });
+            if (!anyNotEmpty) continue;
+            if (isHeaderGhostRowOneshot(r)) continue;
+            afterTotalsOneshot.push(r);
+          }
+          finalRows = afterTotalsOneshot as any[];
+
+          const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+          const sourceHeadersOriginal = Array.isArray(parsedFinalScoped?.rawHeadersOriginal?.length) ? parsedFinalScoped.rawHeadersOriginal : parsedFinalScoped.headers || [];
+          const sourceToTargetNorm = new Map<string, string>();
+          for (let i = 0; i < Math.min(sourceHeadersOriginal.length, finalHeaders.length); i++) {
+            const s = buildNormKey(sourceHeadersOriginal[i]);
+            const t = finalHeaders[i];
+            if (s && t) sourceToTargetNorm.set(s, t);
+          }
+          if (competFromHeader && !finalHeaders.includes('Copetencia')) {
+            finalHeaders = ['Copetencia', ...finalHeaders];
+          }
+          if (kindLowerInner === 'recurso_tre') {
+            if (!finalHeaders.includes('N Parcela')) {
+              const idxQtd = finalHeaders.indexOf('Qtd Parcelas');
+              if (idxQtd >= 0) finalHeaders.splice(idxQtd, 0, 'N Parcela');
+              else finalHeaders.push('N Parcela');
+            }
+          }
+
+          for (let i = 0; i < finalRows.length; i++) {
+            const r = finalRows[i];
+            if (!r) continue;
+            const normContratoBR = (raw: unknown): string => {
+              const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+              if (!s) return '';
+              const hasComma = s.includes(',');
+              const hasDot = s.includes('.');
+              if (hasComma && !hasDot) return s;
+              if (!hasComma && hasDot) {
+                const lastDot = s.lastIndexOf('.');
+                const tail = s.slice(lastDot + 1);
+                if (tail.length === 3 && /^\d+$/.test(tail)) {
+                  return s.replace(/\./g, ',');
+                }
+                return s.replace(/,/g, '').replace('.', ',');
+              }
+              if (hasComma && hasDot) {
+                if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
+                  return s.replace(/\./g, '');
+                }
+                return s.replace(/,/g, '').replace('.', ',');
+              }
+              if (!hasComma && !hasDot && /^\d{4,}$/.test(s)) {
+                return Number(s).toLocaleString('pt-BR').replace(/\./g, ',');
+              }
+              return s;
+            };
+            const normValorParcela = (raw: unknown): string => {
+              let s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+              if (!s) return '';
+              let only = s.replace(/R\$\s*/i, '').trim();
+              if (!only) return '';
+              const lastComma = only.lastIndexOf(',');
+              const lastDot = only.lastIndexOf('.');
+              if (lastComma >= 0 && lastDot < 0) {
+                only = only.replace(',', '.');
+              } else if (lastComma >= 0 && lastDot >= 0) {
+                if (lastComma > lastDot) {
+                  only = only.replace(/\./g, '').replace(',', '.');
+                } else {
+                  only = only.replace(/,/g, '');
+                }
+              }
+              return `R$ ${only}`;
+            };
+            if (competFromHeader && !Object.prototype.hasOwnProperty.call(r, 'Copetencia')) r['Copetencia'] = competFromHeader;
+
+            const tryLookup = (targetK: string, candidateKeys: string[]) => {
+              if (Object.prototype.hasOwnProperty.call(r, targetK) && r[targetK] !== null && r[targetK] !== undefined && String(r[targetK]).trim() !== '') return;
+              for (const ck of candidateKeys) {
+                const v = (sourceToTargetNorm.get(buildNormKey(ck)) && Object.prototype.hasOwnProperty.call(r, sourceToTargetNorm.get(buildNormKey(ck)) || '') && (r as any)[sourceToTargetNorm.get(buildNormKey(ck)) || '']) ||
+                          (Object.prototype.hasOwnProperty.call(r, ck) ? (r as any)[ck] : undefined);
+                if (v !== null && v !== undefined && String(v).trim() !== '') { r[targetK] = v; return; }
+              }
+            };
+            tryLookup('CPF', ['CPF', 'CPF do Funcionário', 'CPF Funcionário', 'C.P.F.', 'Número do CPF']);
+            const nomeCandidates = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome'];
+            tryLookup('Nome', nomeCandidates);
+            tryLookup('Desc Finalidade', ['Descrição','Descricao','Descrição Rubrica','Finalidade','Produto','Natureza']);
+            tryLookup('Contrato', ['Rubrica','Rub','Contrato','Número Contrato','Nº Contrato','Código Empréstimo','Codigo','Código']);
+            tryLookup('N Parcela', ['Prazo','Nº Parcela','Número Parcela','Parcela','N Parcela','Nº','Nro Parcela']);
+            tryLookup('Qtd Parcelas', ['Prazo','Qtd Parcelas','Qtde Parcelas','Quantidade Parcelas','Total Parcelas','Nº Total Parcelas','Prazo Total']);
+            tryLookup('Vencimento', ['Vencimento','Data Vencimento','Dt Venc','Venc']);
+            tryLookup('Critério de Débito', ['Situação','Situacao','Sit','Critério','Criterio','Critério de Débito','Modalidade']);
+            tryLookup('Valor Parcela', ['Valor','Vlr','Valor Parcela','Valor Bruto','Parcela','Valor Mensal','Rubrica Valor']);
+
+            if (kindLowerInner === 'recurso_tre') {
+              let nP = String(r['N Parcela'] ?? '').replace(/\s+/g,'').trim();
+              let qP = String(r['Qtd Parcelas'] ?? '').replace(/\s+/g,'').trim();
+              nP = nP && /^\d+$/.test(nP) ? String(Number(nP)) : nP;
+              qP = qP && /^\d+$/.test(qP) ? String(Number(qP)) : qP;
+              if (nP && !qP) qP = nP;
+              if (qP && !nP) nP = qP;
+              r['N Parcela'] = nP;
+              r['Qtd Parcelas'] = qP;
+              const cRaw = String(r['Contrato'] ?? '').replace(/\s+/g,' ').trim();
+              if (/^\d+([.,]\d{3,})$/.test(cRaw)) {
+                const cNorm = cRaw.replace(',', '.');
+                const asNum = Number(cNorm);
+                if (Number.isInteger(asNum)) r['Contrato'] = String(asNum);
+              }
+            }
+            {
+              const colTrimZeros = (k: string) => {
+                if (!Object.prototype.hasOwnProperty.call(r, k)) return;
+                const raw = String(r[k] ?? '').replace(/\s+/g,'').trim();
+                if (raw && /^\d+$/.test(raw)) r[k] = String(Number(raw));
+              };
+              colTrimZeros('N° Parcela');
+              colTrimZeros('N Parcela');
+              colTrimZeros('Qtd Parcelas');
+            }
+
+            if (Boolean(profileOptionsAny?.nomeUpperTrimSpSimples ?? false)) {
+              const nomeV = String(r['Nome'] ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+              if (nomeV) r['Nome'] = nomeV;
+            }
+            if (Boolean(profileOptionsAny?.cpfMascara11dig ?? false)) {
+              const cpfV = String(r['CPF'] ?? '').replace(/\D+/g, '');
+              if (cpfV.length >= 11) r['CPF'] = cpfV.slice(0, 11).replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
+            }
+            if (Object.prototype.hasOwnProperty.call(r, 'Valor Parcela')) r['Valor Parcela'] = normValorParcela(r['Valor Parcela']);
+            if (Boolean(profileOptionsAny?.descFinalidadeDefaultCreditoConsignado ?? false)) {
+              const produtoRaw = Object.prototype.hasOwnProperty.call(r, 'Produto') ? r['Produto'] : (Object.prototype.hasOwnProperty.call(r, 'Descrição') ? r['Descrição'] : null);
+              const produtoUpper = String(produtoRaw ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+              const currDesc = String(r['Desc Finalidade'] ?? '').trim().toUpperCase();
+              if (!currDesc || currDesc === produtoUpper || produtoUpper.includes('EMPRESTIMO') || produtoUpper.includes('CRÉDITO') || produtoUpper.includes('CONSIGNADO')) {
+                r['Desc Finalidade'] = 'CREDITO CONSIGNADO';
+              }
+            }
+            if (Boolean(profileOptionsAny?.criterioDebitoPadraoFolhaPagto ?? false)) {
+              const sitRaw = Object.prototype.hasOwnProperty.call(r, 'Situação')
+                ? r['Situação']
+                : (Object.prototype.hasOwnProperty.call(r, 'Situacao') ? r['Situacao'] : null);
+              const sitUpper = String(sitRaw ?? '').trim().toUpperCase();
+              const currCrit = String(r['Critério de Débito'] ?? '').trim();
+              if (!currCrit || sitUpper === 'DE' || sitUpper === 'ATIVO' || sitUpper === 'INATIVO') r['Critério de Débito'] = 'Folha Pagto';
+            }
+            if (Boolean(profileOptionsAny?.vencimentoPadraoDia26MesCopetenciaAno2001 ?? false)) {
+              const copVal = String(r['Copetencia'] ?? '').trim();
+              const mCop = copVal.match(/^(0[1-9]|1[0-2])[\/\-](\d{4})$/);
+              const currVenc = String(r['Vencimento'] ?? '').trim();
+              if (!currVenc && mCop) r['Vencimento'] = `26/${mCop[1]}/2001`;
+              if (currVenc && mCop) {
+                const mReal = currVenc.match(/^(0[1-9]|[12]\d|3[01])[\/\-.](0[1-9]|1[0-2])[\/\-.](\d{2}|\d{4})$/);
+                if (!mReal) r['Vencimento'] = `26/${mCop[1]}/2001`;
+                if (mReal && mReal[3] !== '2001') r['Vencimento'] = `26/${mCop[1]}/2001`;
+              }
+            }
+            if (Boolean(profileOptionsAny?.contratoNormalizadoBrMilhar ?? false)) {
+              const c = String(r['Contrato'] ?? '').replace(/\s+/g,' ').trim();
+              if (c) r['Contrato'] = normContratoBR(c);
+            }
+          }
+
+          const seenIntraOneshot = new Set<string>();
+          const finalRowsDedup: Array<Record<string, unknown>> = [];
+          for (const r of finalRows as Array<Record<string, unknown>>) {
+            const k = dedupKeyOneshot(r);
+            if (seenIntraOneshot.has(k)) continue;
+            seenIntraOneshot.add(k);
+            finalRowsDedup.push(r);
+          }
+          finalRows = finalRowsDedup as any[];
+
+          const canonical10ColsOrder: string[] = [
+            'Nome','CPF','Copetencia','Desc Finalidade','Contrato',
+            'N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela',
+          ];
+          const allAvailableHeaders = new Set<string>(['Copetencia', ...finalHeaders]);
+          for (const r of finalRows) for (const k of Object.keys(r)) allAvailableHeaders.add(k);
+          const canonicalBasePresent: string[] = canonical10ColsOrder.filter((h) => allAvailableHeaders.has(h));
+          const extraHeadersFromRows: string[] = [];
+          const seenHeaders = new Set<string>(canonicalBasePresent);
+          for (const r of finalRows) {
+            for (const k of Object.keys(r)) {
+              if (seenHeaders.has(k)) continue;
+              seenHeaders.add(k);
+              extraHeadersFromRows.push(k);
+            }
+          }
+          headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
+          rowsToImport = finalRows;
+        } else if (extractCompetFinal && competFromHeader) {
+          rowsToImport = parsedFinalScoped.rows.map((r: any) => ({ ...r, Copetencia: competFromHeader }));
+          if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
+        }
+
+        const extraStatic: Record<string, string | null> = {};
+        if (kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre') {
+          if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
+        }
+
+        if (kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre') {
+          console.log(`\n` + '═'.repeat(110));
+          console.log(`║ [DEBUG LOCAL TRE L30002-ONESHOT] ANTES DO INSERT — arquivo=${String(fileScoped.name ?? '?')}  kind=${kindLowerInner}`);
+          console.log(`═`.repeat(110));
+          const optsX = profileScoped?.resolvedOptions ?? {};
+          console.log(`║ [1/4] profile.resolvedOptions (${Object.keys(optsX).length} chaves):`);
+          Object.keys(optsX).sort().forEach(fn => {
+            const v = (optsX as any)[fn];
+            const mark = (typeof v === 'boolean' && v === true) ? '✅ TRUE ' : (typeof v === 'boolean' ? '❌ FALSE' : `⚠️ ${typeof v}`);
+            console.log(`║       ${mark}  ${fn}${typeof v !== 'boolean' ? ' = ' + JSON.stringify(v).slice(0, 80) : ''}`);
+          });
+          console.log(`║ [2/4] headersToImport (${headersToImport.length} cols):`);
+          headersToImport.slice(0, 40).forEach((h, i) => {
+            const cidMark = (i <= 9) ? ` 🔹CID${String(i).padStart(2,'0')}` : `     `;
+            console.log(`║       [${String(i).padStart(2,'0')}]${cidMark}  ${h}`);
+          });
+          if (rowsToImport && rowsToImport.length > 0) {
+            const r0 = rowsToImport[0];
+            console.log(`║ [3/4] rowsToImport[0] (len=${rowsToImport.length}):`);
+            const main10 = ['Nome','CPF','Copetencia','Desc Finalidade','Contrato','N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela'];
+            for (const mk of main10) {
+              const v = (r0 as any)?.[mk];
+              const ok = (v !== null && v !== undefined && String(v).trim() !== '');
+              console.log(`║       10COLS ${ok ? '✅' : '❌'} ${mk.padEnd(20)} → ${JSON.stringify(v)}`);
+            }
+            Object.keys(r0||{}).filter(k => !main10.includes(k)).slice(0, 15).forEach(k => {
+              const v = (r0 as any)?.[k];
+              console.log(`║       EXTRA  🔹 ${String(k).padEnd(20)} → ${JSON.stringify(String(v ?? '').slice(0, 40))}`);
+            });
+          } else {
+            console.log(`║ [3/4] rowsToImport VAZIO length=0`);
+          }
+          console.log(`║ [4/4] table=${tableNameInner}  checkDup=${checkDupFinal}  mode=${modeOverrideFinal}`);
+          console.log(`═`.repeat(110) + '\n');
+        }
+
+        const res = addMissingColumnsAndImportRows(
+          db,
+          tableNameInner,
+          headersToImport,
+          rowsToImport,
+          checkDupFinal,
+          modeOverrideFinal,
+          Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
+        );
+        insertedRows = res.insertedRows;
+        skippedRows = res.skippedRows;
+        out.insertResult = res;
+        markFileImportedByContentHash(db, sha256Hex, {
+          fileName,
+          fileId,
+          kind: profile?.kind || null,
+          targetTable: profile?.target_table || null,
+          profileId: profile?.id || null,
+          insertedRows: res.insertedRows,
+          skippedRows: res.skippedRows,
+          mode: modeOverrideFinal,
+          at: new Date().toISOString(),
+        });
+        importedFiles.push({
+          fileName,
+          targetTable: profile?.target_table,
+          kind: profile?.kind,
+          profileId: profile?.id,
+          insertedRows: res.insertedRows,
+          skippedRows: res.skippedRows,
+          headers: headersToImport.slice(0, 30),
+          skippedReason: null,
+        });
+      }
+      out.importedFiles = importedFiles;
+      out.insertedRowsFinal = insertedRows;
+      out.skippedRowsFinal = skippedRows;
+    } catch (pipeE: any) {
+      out.pipelineError = String(pipeE?.stack || pipeE?.message || pipeE).slice(0, 2000);
+      out.importedFiles = importedFiles;
+    }
+
+    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
+    try { await db.close(); } catch (_) { /* ignore */ }
+
+    out.ok = true;
+    out.phase = 'done';
+    out.hint = 'Debug oneshot LOCAL TRE finalizado. Ver logs acima no processo backend. Depois validar SQL: SELECT rowid,* FROM "Recurso TRE" ORDER BY rowid DESC LIMIT 10;';
+    return out;
+  } catch (e: any) {
+    out.phase = 'uncaught';
+    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
     return out;
   }
 }
