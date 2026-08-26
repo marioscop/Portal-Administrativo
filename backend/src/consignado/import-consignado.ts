@@ -6893,6 +6893,114 @@ function ensureDefaultLearningProfiles(db: Database) {
       moveToImportadosSubfolderAfterImport: true,
     },
   });
+  // ========= REGRA OFICIAL GRAVADA em 2026-08-26 — EXTRATO RECURSO ADFEGO (Associação dos Deficientes do Estado de Goiás — CONTA CORRENTE) =========
+  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
+  // Formato idêntico ao TRE/TRT — planilha conta corrente 4 cols: DATA / DOCUMENTO / HISTÓRICO / VALOR.
+  //   [AE1] Match: Nome do arquivo comece com "ADFEGO" (case insensitive) + extensão .xlsx/.xlsm/.xls.
+  //   [AE2] Pipeline idêntico TRE/TRT:
+  //        DATA → DATA (Excel col 1) · DOCUMENTO → DOCUMENTO (col 2) · HISTÓRICO Excel → HISTÓRICO (col 3)
+  //        VALOR → VALOR (col 4). HISTÓRICO_1 BD vazio.
+  //        Copetencia = Mês arquivo + 1 (ex: ADFEGO-JULHO-2026 → 08/2026).
+  //        CompetenciaArquivo = prefixo-mês-ano (ex: ADFEGO-JULHO-2026).
+  //   [AE3] BFS SharePoint prioriza subpastas ADFEGO. checkDuplicateContent=true. Pós-insert move para Importados.
+  upsertLearningProfile(db, {
+    id: 'extratos_adfego_go',
+    kind: 'extratos',
+    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
+    fileNameRegex: '^ADFEGO.*\\.(xlsx|xlsm|xls)$',
+    targetTable: 'extratos',
+    options: {
+      isAdfegoExtratoProfile: true,
+      isOrgaoContaCorrenteExtrato: true,
+      mode: 'append',
+      folderCandidates: [
+        'Extratos de Recurso/ADFEGO',
+        'Extrato de Recurso/ADFEGO',
+        'Extratos do Recurso/ADFEGO',
+        'Extrato do Recurso/ADFEGO',
+        'Extratos Recurso/ADFEGO',
+        'Extrato Recurso/ADFEGO',
+        'Extratos/ADFEGO',
+        'Extrato/ADFEGO',
+        'ADFEGO',
+        'Extratos de Recurso',
+        'Extrato de Recurso',
+        'Extratos do Recurso',
+        'Extrato do Recurso',
+        'Extratos Recurso',
+        'Extrato Recurso',
+        'Extratos',
+        'Extrato',
+        'Extrato(s)',
+        'Extratos de Recursos',
+        'Extrato de Recursos',
+      ],
+      ignoreImportados: true,
+      checkDuplicateContent: true,
+      strictColumnWhitelist: null,
+      strictColumnMinMatches: 0,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
+    },
+  });
+  // ========= REGRA OFICIAL GRAVADA em 2026-08-26 — EXTRATO RECURSO ELETRO (Eletra / EQTPREV — CONTA CORRENTE) =========
+  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
+  // Formato idêntico ao TRE/TRT — planilha conta corrente 4 cols: DATA / DOCUMENTO / HISTÓRICO / VALOR.
+  //   [EL1] Match: Nome do arquivo contenha "ELETRO" OU "ELETRA" OU "EQTPREV" (case insensitive) + .xlsx/.xlsm/.xls.
+  //   [EL2] Pipeline idêntico TRE/TRT/ADFEGO:
+  //        DATA → DATA · DOCUMENTO → DOCUMENTO · HISTÓRICO Excel → HISTÓRICO BD · VALOR → VALOR.
+  //        Copetencia = Mês arquivo + 1 (ex: ELETRA-JULHO-2026 → 08/2026).
+  //        CompetenciaArquivo = prefixo-mês-ano (ex: ELETRA-JULHO-2026 / ELETRO-JULHO-2026 / EQTPREV-JULHO-2026).
+  //   [EL3] BFS SharePoint prioriza subpastas ELETRO/ELETRA. checkDup=true. Move para Importados pós-insert.
+  upsertLearningProfile(db, {
+    id: 'extratos_eletra_go',
+    kind: 'extratos',
+    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
+    fileNameRegex: '.*(?:ELETRO|ELETRA|EQTPREV).*\\.(xlsx|xlsm|xls)$',
+    targetTable: 'extratos',
+    options: {
+      isEletraExtratoProfile: true,
+      isOrgaoContaCorrenteExtrato: true,
+      mode: 'append',
+      folderCandidates: [
+        'Extratos de Recurso/ELETRA',
+        'Extrato de Recurso/ELETRA',
+        'Extratos do Recurso/ELETRA',
+        'Extrato do Recurso/ELETRA',
+        'Extratos Recurso/ELETRA',
+        'Extrato Recurso/ELETRA',
+        'Extratos/ELETRA',
+        'Extrato/ELETRA',
+        'Extratos de Recurso/ELETRO',
+        'Extrato de Recurso/ELETRO',
+        'Extratos/ELETRO',
+        'Extrato/ELETRO',
+        'ELETRO',
+        'ELETRA',
+        'Eletra',
+        'Eletro',
+        'Extratos de Recurso',
+        'Extrato de Recurso',
+        'Extratos do Recurso',
+        'Extrato do Recurso',
+        'Extratos Recurso',
+        'Extrato Recurso',
+        'Extratos',
+        'Extrato',
+        'Extrato(s)',
+        'Extratos de Recursos',
+        'Extrato de Recursos',
+      ],
+      ignoreImportados: true,
+      checkDuplicateContent: true,
+      strictColumnWhitelist: null,
+      strictColumnMinMatches: 0,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
+    },
+  });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-19 — EXTRATOS (Extrato Recurso / Extrato de Recurso) =========
   // Pipeline de transformação (antes do insert, aplicado se kind === 'extratos'):
   //   [E1] Flexibilidade total: QUALQUER arquivo .xlsx/.xlsm/.xls dentro de uma pasta com nome
@@ -7552,7 +7660,7 @@ function extractCredTedStrLineFromHistorico(raw: unknown): string {
 function historicoCellHasCredTedMarker(raw: unknown): boolean {
   const s = typeof raw === 'string' ? raw : String(raw ?? '').trim();
   if (!s) return false;
-  return /(?:CR[ÉE]D\.?\s*TED-STR|CRED\.?\s*TED-STR|\bTED-STR\b)/i.test(s);
+  return /(?:CR[ÉE]D\.?\s*TED-STR|CRED\.?\s*TED-STR|\bTED-STR\b|LIQUIDA[ÇC][AÃ]O\s*COBRAN[ÇC]A|CR[ÉE]D\.?\s*LIQUIDA[ÇC][AÃ]O|PIX\s*RECEBIDO|TRANSF\.?\s*RECEBIDA|CR[ÉE]DITO\s*RECEBIDO)/i.test(s);
 }
 
 // ===== TRE-GO: layout Extrato Conta Corrente sempre começa com "CRÉD.TED-STR"
@@ -8035,22 +8143,52 @@ function detectCustomFileRules(opts: {
 
   // Nome do arquivo dá um hint forte do órgão
   const orgaoHintByFileName = parsedByFileName?.orgaoPrefixoRaw ?? '';
+  const orgaoHintByFileNameUpper = orgaoHintByFileName.toUpperCase();
   const orgaoTemPrefixoTREouTRT =
-    orgaoHintByFileName.toUpperCase() === 'TRE' ||
-    orgaoHintByFileName.toUpperCase().startsWith('TRE ') ||
-    orgaoHintByFileName.toUpperCase() === 'TRT' ||
-    orgaoHintByFileName.toUpperCase().startsWith('TRT ') ||
+    orgaoHintByFileNameUpper === 'TRE' ||
+    orgaoHintByFileNameUpper.startsWith('TRE ') ||
+    orgaoHintByFileNameUpper === 'TRT' ||
+    orgaoHintByFileNameUpper.startsWith('TRT ') ||
     infoCompTemTRE_GO ||
     infoCompTemTRT_GO ||
     orgaoUI_E_TRE ||
     orgaoUI_E_TRT;
+  const orgaoTemPrefixoADFEGO =
+    orgaoHintByFileNameUpper === 'ADFEGO' ||
+    orgaoHintByFileNameUpper.startsWith('ADFEGO');
+  const orgaoTemPrefixoELETRO =
+    orgaoHintByFileNameUpper === 'ELETRO' ||
+    orgaoHintByFileNameUpper.startsWith('ELETRO') ||
+    orgaoHintByFileNameUpper === 'ELETRA' ||
+    orgaoHintByFileNameUpper.startsWith('ELETRA') ||
+    orgaoHintByFileNameUpper === 'EQTPREV' ||
+    orgaoHintByFileNameUpper.startsWith('EQTPREV');
+  const orgaoUI_E_ADFEGO = Boolean(orgaoUIKey) && (
+    orgaoUIKey === 'ADFEGO' ||
+    orgaoUIKey.startsWith('ADFEGO') ||
+    orgaoUIKey.includes('ASSOCIACAO DEFICIENTES')
+  );
+  const orgaoUI_E_ELETRO = Boolean(orgaoUIKey) && (
+    orgaoUIKey === 'ELETRO' ||
+    orgaoUIKey.startsWith('ELETRO') ||
+    orgaoUIKey === 'ELETRA' ||
+    orgaoUIKey.startsWith('ELETRA') ||
+    orgaoUIKey === 'EQTPREV' ||
+    orgaoUIKey.startsWith('EQTPREV')
+  );
+  const orgaoTemPrefixoContaCorrente =
+    orgaoTemPrefixoTREouTRT ||
+    orgaoTemPrefixoADFEGO ||
+    orgaoTemPrefixoELETRO ||
+    orgaoUI_E_ADFEGO ||
+    orgaoUI_E_ELETRO;
 
-  if (!parsedByFileName && !orgaoTemPrefixoTREouTRT) return null;
+  if (!parsedByFileName && !orgaoTemPrefixoContaCorrente) return null;
 
   const extraColumns: Record<string, unknown> = {};
   let historico1KeepFirstLineOnly = false;
 
-  if (orgaoTemPrefixoTREouTRT) {
+  if (orgaoTemPrefixoContaCorrente) {
     historico1KeepFirstLineOnly = true;
   }
 
@@ -8060,7 +8198,7 @@ function detectCustomFileRules(opts: {
   let tokenCompetencia = parsedByFileName?.tokenCompetencia ?? null;
   let competenciaFixa = parsedByFileName?.competenciaFixa ?? null;
 
-  if (!competenciaFixa && orgaoTemPrefixoTREouTRT) {
+  if (!competenciaFixa && orgaoTemPrefixoContaCorrente) {
     const dataColRaw = colunas.find((c) => normalizeHeaderKey(c).replace(/\s/g, '') === 'DATA') ?? null;
     const firstDataRaw = dataColRaw && sampleRows.length > 0 ? sampleRows[0]?.[dataColRaw] : null;
     const d = firstDataRaw ? parseDateValue(firstDataRaw) : null;
@@ -8075,12 +8213,24 @@ function detectCustomFileRules(opts: {
 
   const qualOrgaoPrefixo =
     (parsedByFileName && parsedByFileName.orgaoPrefixoRaw && String(parsedByFileName.orgaoPrefixoRaw).trim().toUpperCase()) ||
-    (infoCompTemTRE_GO ? 'TRE' : infoCompTemTRT_GO ? 'TRT' : orgaoUI_E_TRE ? 'TRE' : orgaoUI_E_TRT ? 'TRT' : 'TRE');
-  const isTrt = qualOrgaoPrefixo === 'TRT';
+    (orgaoTemPrefixoADFEGO || orgaoUI_E_ADFEGO ? 'ADFEGO' :
+     orgaoTemPrefixoELETRO || orgaoUI_E_ELETRO ? (orgaoHintByFileNameUpper || 'ELETRO').replace(/EQTPREV.*/,'EQTPREV').replace(/^ELETRA.*/,'ELETRA').replace(/^ELETRO.*/,'ELETRO') :
+     infoCompTemTRE_GO ? 'TRE' : infoCompTemTRT_GO ? 'TRT' : orgaoUI_E_TRE ? 'TRE' : orgaoUI_E_TRT ? 'TRT' : 'TRE');
+  const prefixoNorm = (() => {
+    const up = String(qualOrgaoPrefixo || '').toUpperCase();
+    if (up.startsWith('ADFEGO')) return 'ADFEGO';
+    if (up.startsWith('EQTPREV')) return 'EQTPREV';
+    if (up.startsWith('ELETRA')) return 'ELETRA';
+    if (up.startsWith('ELETRO')) return 'ELETRO';
+    if (up.startsWith('TRT')) return 'TRT';
+    if (up.startsWith('TRE')) return 'TRE';
+    return up || 'TRE';
+  })();
+  const isTrt = prefixoNorm === 'TRT';
 
   if (parsedByFileName && parsedByFileName.tokenCompetencia) {
     extraColumns['CompetenciaArquivo'] = parsedByFileName.tokenCompetencia;
-  } else if (!tokenCompetencia && orgaoTemPrefixoTREouTRT && competenciaFixa) {
+  } else if (!tokenCompetencia && orgaoTemPrefixoContaCorrente && competenciaFixa) {
     const p = competenciaFixa.match(/^(\d{2})\/(\d{4})$/);
     if (p) {
       const mm = Number(p[1]);
@@ -8090,8 +8240,7 @@ function detectCustomFileRules(opts: {
         7:'JULHO',8:'AGOSTO',9:'SETEMBRO',10:'OUTUBRO',11:'NOVEMBRO',12:'DEZEMBRO',
       };
       if (meses[mm]) {
-        const prefixo = isTrt ? 'TRT' : 'TRE';
-        tokenCompetencia = `${prefixo}-${meses[mm]}-${yyyy}`;
+        tokenCompetencia = `${prefixoNorm}-${meses[mm]}-${yyyy}`;
         extraColumns['CompetenciaArquivo'] = tokenCompetencia;
       }
     }
@@ -8106,7 +8255,7 @@ function detectCustomFileRules(opts: {
     tokenCompetencia,
     competenciaFixa,
     historico1KeepFirstLine: historico1KeepFirstLineOnly,
-    isTreExtrato: orgaoTemPrefixoTREouTRT,
+    isTreExtrato: orgaoTemPrefixoContaCorrente,
     extraColumns,
   };
 }
@@ -8165,13 +8314,37 @@ function insertExtratosRows(opts: {
       ((opts.learningProfileOptions as Record<string, unknown>).isTreExtratoProfile === true ||
        (opts.learningProfileOptions as Record<string, unknown>).isJusticaEleitoralTrabalhoProfile === true),
   );
+  const profileOptionsIsAdfego = Boolean(
+    opts.learningProfileOptions &&
+      typeof opts.learningProfileOptions === 'object' &&
+      opts.learningProfileOptions !== null &&
+      (opts.learningProfileOptions as Record<string, unknown>).isAdfegoExtratoProfile === true,
+  );
+  const profileOptionsIsEletra = Boolean(
+    opts.learningProfileOptions &&
+      typeof opts.learningProfileOptions === 'object' &&
+      opts.learningProfileOptions !== null &&
+      (opts.learningProfileOptions as Record<string, unknown>).isEletraExtratoProfile === true,
+  );
+  const profileOptionsIsContaCorrente = Boolean(
+    opts.learningProfileOptions &&
+      typeof opts.learningProfileOptions === 'object' &&
+      opts.learningProfileOptions !== null &&
+      (opts.learningProfileOptions as Record<string, unknown>).isOrgaoContaCorrenteExtrato === true,
+  );
   const isTreTrtById =
     profileIdNorm.startsWith('extratos_tre_trt') ||
     profileIdNorm.startsWith('extratos_tre') ||
     profileIdNorm.startsWith('extratos_trt');
+  const isAdfegoById = profileIdNorm.startsWith('extratos_adfego');
+  const isEletraById = profileIdNorm.startsWith('extratos_eletra');
   const isTreTrtProfile = isTreTrtById || profileOptionsIsTre;
+  const isAdfegoProfile = isAdfegoById || profileOptionsIsAdfego;
+  const isEletraProfile = isEletraById || profileOptionsIsEletra;
+  const isContaCorrenteProfile =
+    isTreTrtProfile || isAdfegoProfile || isEletraProfile || profileOptionsIsContaCorrente;
   const forceOrgaoFromUIForProfile =
-    isTreTrtProfile ? null :
+    isContaCorrenteProfile ? null :
     (typeof opts.forceOrgaoFromUI === 'string' ? opts.forceOrgaoFromUI : null);
   const CUSTOM_RULES: CustomFileRules = detectCustomFileRules({
     sourceFile: opts.sourceFile,
@@ -8179,7 +8352,7 @@ function insertExtratosRows(opts: {
     firstRowsSample: SAMPLE_ROWS,
     forceOrgaoFromUI: forceOrgaoFromUIForProfile,
   });
-  if (isTreTrtProfile && CUSTOM_RULES) {
+  if (isContaCorrenteProfile && CUSTOM_RULES) {
     CUSTOM_RULES.isTreExtrato = true;
     if (!CUSTOM_RULES.historico1KeepFirstLine) CUSTOM_RULES.historico1KeepFirstLine = true;
   }
@@ -8444,9 +8617,38 @@ function insertExtratosRows(opts: {
     for (const row of opts.rows) {
       if (credTedFilterColumn) {
         const raw = row[credTedFilterColumn];
-        if (!historicoCellHasCredTedMarker(raw)) {
-          skippedRows += 1;
-          continue;
+        const marcadorOk = historicoCellHasCredTedMarker(raw);
+        // Fallback para órgãos ADFEGO/ELETRA (conta corrente não-TRE/TRT):
+        // se linha tem DATA e VALOR numérico positivo válidos, deixa passar mesmo sem marcador
+        // (evita bloquear linhas válidas com históricos variados fora do padrão TED-STR)
+        if (!marcadorOk) {
+          const ehPerfilContaCorrenteNaoTre =
+            isContaCorrenteProfile && !isTreTrtProfile;
+          const temDataValida = (() => {
+            if (!dataCol) return false;
+            const d = parseDateValue(row[dataCol]);
+            return d instanceof Date && Number.isFinite(d.getTime());
+          })();
+          const temValorPositivo = (() => {
+            const valorCol =
+              headerMap.sourceColumnByTarget.get('VALOR') ??
+              opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'VALOR') ??
+              null;
+            if (!valorCol) return false;
+            const raw = row[valorCol];
+            let n: number;
+            if (typeof raw === 'number') n = raw;
+            else {
+              const s = String(raw ?? '').trim().replace(/\./g, '').replace(',', '.');
+              if (!s) return false;
+              n = Number.parseFloat(s);
+            }
+            return Number.isFinite(n) && n > 0;
+          })();
+          if (!(ehPerfilContaCorrenteNaoTre && temDataValida && temValorPositivo)) {
+            skippedRows += 1;
+            continue;
+          }
         }
       }
       const buildRowForHash: Record<string, unknown> = {};
@@ -32198,6 +32400,321 @@ export async function debugOneshotTreLocalImport(opts: {
     out.ok = true;
     out.phase = 'done';
     out.hint = 'Debug oneshot LOCAL TRE finalizado. Ver logs acima no processo backend. Depois validar SQL: SELECT rowid,* FROM "Recurso TRE" ORDER BY rowid DESC LIMIT 10;';
+    return out;
+  } catch (e: any) {
+    out.phase = 'uncaught';
+    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
+    return out;
+  }
+}
+// #endregion
+
+// #region debug-oneshot-adfego-extrato-local
+export async function debugOneshotAdfegoExtratoLocalImport(opts: {
+  localXlsxPath?: string;
+  fileName?: string;
+  folderPath?: string;
+  fileId?: string;
+  parentFolderId?: string;
+  mode?: 'append' | 'replace';
+  resetHashesFirst?: boolean;
+  deleteLixoRowidsGte2?: boolean;
+}): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { ok: false, phase: 'init' };
+  const _crypto = require('crypto') as typeof import('crypto');
+  const _fs = require('fs') as typeof import('fs');
+  const _path = require('path') as typeof import('path');
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
+
+    if (Boolean(opts.resetHashesFirst ?? true)) {
+      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%ADFEGO%' OR value LIKE '%JULHO%' OR value LIKE '%extratos_adfego%')`);
+      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'extratos'`);
+      db.run(`DELETE FROM import_batch_rows WHERE kind = 'extratos'`);
+      db.run(`DELETE FROM import_batches WHERE kind = 'extratos'`);
+    }
+    if (Boolean(opts.deleteLixoRowidsGte2 ?? true)) {
+      try {
+        const rDel = db.run("DELETE FROM extratos WHERE CompetenciaArquivo LIKE 'ADFEGO-%'");
+        out.deletedLixoRowidsGte2 = rDel.getRowsModified();
+      } catch (_) { out.deletedLixoRowidsGte2 = null; }
+    }
+
+    const localPath = String(opts.localXlsxPath || '').trim();
+    if (!localPath || !_fs.existsSync(localPath)) {
+      out.error = `localXlsxPath não existe: ${localPath}`;
+      return out;
+    }
+    out.localXlsxPath = localPath;
+    const buffer = _fs.readFileSync(localPath);
+    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
+    out.sha256 = sha256Hex;
+    out.bufferBytes = buffer.length;
+    out.phase = 'sheetRead';
+
+    const fileName = String(opts.fileName || _path.basename(localPath) || 'ADFEGO-JULHO-2026.xlsx');
+    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Julho/Extratos de Recurso/ADFEGO');
+    const fileId = String(opts.fileId || 'debug-local-adfego-extrato-' + Date.now());
+    const parentId = String(opts.parentFolderId || 'debug-local-parent-adfego');
+    const mode = String(opts.mode || 'append') as 'append' | 'replace';
+
+    out.phase = 'learningProfileResolve';
+    const allProfilesRaw = findLearningProfilesFor(db, '', 'extratos');
+    const allProfiles = (Array.isArray(allProfilesRaw) ? allProfilesRaw.slice() : []).sort((a: any, b: any) => {
+      const aId = String(a?.id || '').toLowerCase();
+      const bId = String(b?.id || '').toLowerCase();
+      const aGeneric = aId === 'extratos_recurso' ? 1 : 0;
+      const bGeneric = bId === 'extratos_recurso' ? 1 : 0;
+      if (aGeneric !== bGeneric) return aGeneric - bGeneric;
+      return aId.localeCompare(bId);
+    });
+    let matchedProfile: LearningProfileMatch | null = null;
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    for (const p of allProfiles) {
+      try {
+        const reTxt = String(p.file_name_regex ?? '').trim();
+        if (!reTxt) continue;
+        if (new RegExp(reTxt, 'i').test(fileName)) {
+          matchedProfile = p; break;
+        }
+      } catch (_re) { /* ignore */ }
+    }
+    if (!matchedProfile) {
+      // Fallback: força match no perfil extratos_adfego_go id se ele existir
+      matchedProfile = allProfiles.find((p: any) => String(p.id).toLowerCase() === 'extratos_adfego_go') || null;
+    }
+    if (!matchedProfile && allProfiles.length > 0) matchedProfile = allProfiles[0];
+    if (!matchedProfile) {
+      out.error = `Nenhum learning profile kind=extratos encontrou arquivo ${fileName}. Perfil extratos_adfego_go upsert falhou?`;
+      try { persistDatabase(db, dbFilePath); } catch (_) {}
+      try { await db.close(); } catch (_) {}
+      return out;
+    }
+    out.profile = { id: matchedProfile.id, kind: matchedProfile.kind, target_table: matchedProfile.target_table, file_name_regex: matchedProfile.file_name_regex };
+    const profile: any = {
+      id: matchedProfile.id,
+      kind: matchedProfile.kind,
+      target_table: matchedProfile.target_table,
+      resolvedOptions: typeof matchedProfile.options_json === 'string' ? JSON.parse(matchedProfile.options_json) : (matchedProfile.options_json || {}),
+    };
+
+    const kindLower = String(profile?.kind || '').trim().toLowerCase();
+    out.kindLower = kindLower;
+    const tableName = String(profile?.target_table || 'extratos');
+    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
+
+    const file: any = { name: fileName, folderPath, id: fileId, parentId, size: buffer.length };
+    const parsedFinal: any = readSheetTable(buffer, 'extratos');
+    const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
+    out.headersDetected = (parsedFinal?.headers || []).slice(0, 12);
+    out.rowsDetected = Number(parsedFinal?.rows?.length) || 0;
+    out.phase = 'insertExtratosRows pipeline';
+
+    const ir = insertExtratosRows({
+      db,
+      sourceFile: sourceFileFull,
+      fileColumns: parsedFinal.headers,
+      rows: parsedFinal.rows,
+      learningProfileId: profile?.id ?? null,
+      learningProfileOptions:
+        (profile && profile.resolvedOptions && typeof profile.resolvedOptions === 'object')
+          ? (profile.resolvedOptions as Record<string, unknown>)
+          : null,
+    });
+    out.insertResult = ir;
+    const insertedRows = ir.insertedRows;
+    const skippedRows = ir.skippedRows;
+
+    markFileImportedByContentHash(db, sha256Hex, {
+      fileName,
+      fileId,
+      kind: profile?.kind || null,
+      targetTable: profile?.target_table || null,
+      profileId: profile?.id || null,
+      insertedRows,
+      skippedRows,
+      mode,
+      at: new Date().toISOString(),
+    });
+    out.importedFiles = [{
+      fileName,
+      targetTable: profile?.target_table,
+      kind: profile?.kind,
+      profileId: profile?.id,
+      insertedRows,
+      skippedRows,
+      headers: parsedFinal.headers.slice(0, 24),
+      skippedReason: null,
+    }];
+    out.insertedRowsFinal = insertedRows;
+    out.skippedRowsFinal = skippedRows;
+
+    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
+    try { await db.close(); } catch (_) { /* ignore */ }
+
+    out.ok = true;
+    out.phase = 'done';
+    out.hint = 'Debug oneshot LOCAL ADFEGO extrato finalizado. Validar SQL: SELECT rowid,DATA,DOCUMENTO,HISTÓRICO,VALOR,Copetencia,CompetenciaArquivo,__source_file FROM extratos WHERE CompetenciaArquivo LIKE \'ADFEGO-%\' ORDER BY rowid DESC LIMIT 10;';
+    return out;
+  } catch (e: any) {
+    out.phase = 'uncaught';
+    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
+    return out;
+  }
+}
+// #endregion
+
+// #region debug-oneshot-eletra-extrato-local
+export async function debugOneshotEletraExtratoLocalImport(opts: {
+  localXlsxPath?: string;
+  fileName?: string;
+  folderPath?: string;
+  fileId?: string;
+  parentFolderId?: string;
+  mode?: 'append' | 'replace';
+  resetHashesFirst?: boolean;
+  deleteLixoRowidsGte2?: boolean;
+}): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { ok: false, phase: 'init' };
+  const _crypto = require('crypto') as typeof import('crypto');
+  const _fs = require('fs') as typeof import('fs');
+  const _path = require('path') as typeof import('path');
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
+
+    if (Boolean(opts.resetHashesFirst ?? true)) {
+      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%ELETRO%' OR value LIKE '%ELETRA%' OR value LIKE '%EQTPREV%' OR value LIKE '%JULHO%' OR value LIKE '%extratos_eletra%')`);
+      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'extratos'`);
+      db.run(`DELETE FROM import_batch_rows WHERE kind = 'extratos'`);
+      db.run(`DELETE FROM import_batches WHERE kind = 'extratos'`);
+    }
+    if (Boolean(opts.deleteLixoRowidsGte2 ?? true)) {
+      try {
+        const rDel = db.run("DELETE FROM extratos WHERE CompetenciaArquivo LIKE 'ELETRO-%' OR CompetenciaArquivo LIKE 'ELETRA-%' OR CompetenciaArquivo LIKE 'EQTPREV-%'");
+        out.deletedLixoRowidsGte2 = rDel.getRowsModified();
+      } catch (_) { out.deletedLixoRowidsGte2 = null; }
+    }
+
+    const localPath = String(opts.localXlsxPath || '').trim();
+    if (!localPath || !_fs.existsSync(localPath)) {
+      out.error = `localXlsxPath não existe: ${localPath}`;
+      return out;
+    }
+    out.localXlsxPath = localPath;
+    const buffer = _fs.readFileSync(localPath);
+    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
+    out.sha256 = sha256Hex;
+    out.bufferBytes = buffer.length;
+    out.phase = 'sheetRead';
+
+    const fileName = String(opts.fileName || _path.basename(localPath) || 'ELETRA-JULHO-2026.xlsx');
+    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Julho/Extratos de Recurso/ELETRA');
+    const fileId = String(opts.fileId || 'debug-local-eletra-extrato-' + Date.now());
+    const parentId = String(opts.parentFolderId || 'debug-local-parent-eletra');
+    const mode = String(opts.mode || 'append') as 'append' | 'replace';
+
+    out.phase = 'learningProfileResolve';
+    const allProfilesRaw = findLearningProfilesFor(db, '', 'extratos');
+    const allProfiles = (Array.isArray(allProfilesRaw) ? allProfilesRaw.slice() : []).sort((a: any, b: any) => {
+      const aId = String(a?.id || '').toLowerCase();
+      const bId = String(b?.id || '').toLowerCase();
+      const aGeneric = aId === 'extratos_recurso' ? 1 : 0;
+      const bGeneric = bId === 'extratos_recurso' ? 1 : 0;
+      if (aGeneric !== bGeneric) return aGeneric - bGeneric;
+      return aId.localeCompare(bId);
+    });
+    let matchedProfile: LearningProfileMatch | null = null;
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    for (const p of allProfiles) {
+      try {
+        const reTxt = String(p.file_name_regex ?? '').trim();
+        if (!reTxt) continue;
+        if (new RegExp(reTxt, 'i').test(fileName)) {
+          matchedProfile = p; break;
+        }
+      } catch (_re) { /* ignore */ }
+    }
+    if (!matchedProfile) {
+      matchedProfile = allProfiles.find((p: any) => String(p.id).toLowerCase() === 'extratos_eletra_go') || null;
+    }
+    if (!matchedProfile && allProfiles.length > 0) matchedProfile = allProfiles[0];
+    if (!matchedProfile) {
+      out.error = `Nenhum learning profile kind=extratos encontrou arquivo ${fileName}. Perfil extratos_eletra_go upsert falhou?`;
+      try { persistDatabase(db, dbFilePath); } catch (_) {}
+      try { await db.close(); } catch (_) {}
+      return out;
+    }
+    out.profile = { id: matchedProfile.id, kind: matchedProfile.kind, target_table: matchedProfile.target_table, file_name_regex: matchedProfile.file_name_regex };
+    const profile: any = {
+      id: matchedProfile.id,
+      kind: matchedProfile.kind,
+      target_table: matchedProfile.target_table,
+      resolvedOptions: typeof matchedProfile.options_json === 'string' ? JSON.parse(matchedProfile.options_json) : (matchedProfile.options_json || {}),
+    };
+
+    const kindLower = String(profile?.kind || '').trim().toLowerCase();
+    out.kindLower = kindLower;
+    const tableName = String(profile?.target_table || 'extratos');
+    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
+
+    const file: any = { name: fileName, folderPath, id: fileId, parentId, size: buffer.length };
+    const parsedFinal: any = readSheetTable(buffer, 'extratos');
+    const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
+    out.headersDetected = (parsedFinal?.headers || []).slice(0, 12);
+    out.rowsDetected = Number(parsedFinal?.rows?.length) || 0;
+    out.phase = 'insertExtratosRows pipeline';
+
+    const ir = insertExtratosRows({
+      db,
+      sourceFile: sourceFileFull,
+      fileColumns: parsedFinal.headers,
+      rows: parsedFinal.rows,
+      learningProfileId: profile?.id ?? null,
+      learningProfileOptions:
+        (profile && profile.resolvedOptions && typeof profile.resolvedOptions === 'object')
+          ? (profile.resolvedOptions as Record<string, unknown>)
+          : null,
+    });
+    out.insertResult = ir;
+    const insertedRows = ir.insertedRows;
+    const skippedRows = ir.skippedRows;
+
+    markFileImportedByContentHash(db, sha256Hex, {
+      fileName,
+      fileId,
+      kind: profile?.kind || null,
+      targetTable: profile?.target_table || null,
+      profileId: profile?.id || null,
+      insertedRows,
+      skippedRows,
+      mode,
+      at: new Date().toISOString(),
+    });
+    out.importedFiles = [{
+      fileName,
+      targetTable: profile?.target_table,
+      kind: profile?.kind,
+      profileId: profile?.id,
+      insertedRows,
+      skippedRows,
+      headers: parsedFinal.headers.slice(0, 24),
+      skippedReason: null,
+    }];
+    out.insertedRowsFinal = insertedRows;
+    out.skippedRowsFinal = skippedRows;
+
+    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
+    try { await db.close(); } catch (_) { /* ignore */ }
+
+    out.ok = true;
+    out.phase = 'done';
+    out.hint = 'Debug oneshot LOCAL ELETRA extrato finalizado. Validar SQL: SELECT rowid,DATA,DOCUMENTO,HISTÓRICO,VALOR,Copetencia,CompetenciaArquivo,__source_file FROM extratos WHERE CompetenciaArquivo LIKE \'ELETRO-%\' OR CompetenciaArquivo LIKE \'ELETRA-%\' OR CompetenciaArquivo LIKE \'EQTPREV-%\' ORDER BY rowid DESC LIMIT 10;';
     return out;
   } catch (e: any) {
     out.phase = 'uncaught';

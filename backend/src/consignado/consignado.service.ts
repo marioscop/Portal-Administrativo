@@ -294,6 +294,36 @@ export class ConsignadoService {
     deleteLixoRowidsGte2?: boolean;
   }) => Promise<Record<string, unknown>>;
 
+  readonly debugOneshotAdfegoExtratoLocalImport = resolveModuleFn(
+    (ns as { debugOneshotAdfegoExtratoLocalImport?: unknown }).debugOneshotAdfegoExtratoLocalImport as unknown,
+    _mod,
+    'debugOneshotAdfegoExtratoLocalImport',
+  ) as unknown as (opts: {
+    localXlsxPath?: string;
+    fileName?: string;
+    folderPath?: string;
+    fileId?: string;
+    parentFolderId?: string;
+    mode?: 'append' | 'replace';
+    resetHashesFirst?: boolean;
+    deleteLixoRowidsGte2?: boolean;
+  }) => Promise<Record<string, unknown>>;
+
+  readonly debugOneshotEletraExtratoLocalImport = resolveModuleFn(
+    (ns as { debugOneshotEletraExtratoLocalImport?: unknown }).debugOneshotEletraExtratoLocalImport as unknown,
+    _mod,
+    'debugOneshotEletraExtratoLocalImport',
+  ) as unknown as (opts: {
+    localXlsxPath?: string;
+    fileName?: string;
+    folderPath?: string;
+    fileId?: string;
+    parentFolderId?: string;
+    mode?: 'append' | 'replace';
+    resetHashesFirst?: boolean;
+    deleteLixoRowidsGte2?: boolean;
+  }) => Promise<Record<string, unknown>>;
+
   readonly debugLocalSisbrPdfFile = resolveModuleFn(
     (ns as { debugLocalSisbrPdfFile?: unknown }).debugLocalSisbrPdfFile as unknown,
     _mod,
