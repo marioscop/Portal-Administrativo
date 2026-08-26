@@ -1,0 +1,198 @@
+{
+  "ok": true,
+  "filePath": "C:\\Users\\mario.junior\\OneDrive - Sicoob Juriscred\\1.Projetos\\33.Portal Administrativo\\Portal-Administrativo\\Modelos\\TRIBUNAL REGIONAL DO TRABALHO.pdf",
+  "fileExists": true,
+  "fileName": "TRIBUNAL REGIONAL DO TRABALHO.pdf",
+  "fileSizeBytes": 10511,
+  "pdfText": "CENTRAL:\nEMPRESA:\n1004 - CCMS JUSTIÇA DO ESTADO GOIÁS E\n47090 - TRIBUNAL REGIONAL DO TRABALHO DA 18 ÓRGÃO:\n3348 - CCMS JUSTIÇA DO ESTADO GOIÁS E\tCOOPERATIVA:\nHora Emissão:\nSISBR 2.0 - Plataforma de Crédito\nRelatório de Parcelas a Vencer 25/08/2026\tData Emissão:\n3348 - CCMS JUSTIÇA DO ESTADO GOIÁS E EMPREGADOS CELG LTD 09:15:37\nData Processamento: 25/08/2026\nPERÍODO: 01/08/2026 31/08/2026\ta\nMatrícula\nValor Juros Valorização\tModalidade\nAtividade\nValor Operação\nTelefone\nTx. Juros\tVencto. Operação\tOperação\nCliente\nParcela Valor Parcela\nNome\nRendas Apropriar\tVencimento\nCPF\n357-3 30818106 LUIZ EDUARDO DA SILVA PARAGUASSU 996157939\tPESSOA FISICA\t371.344.771-34\n13815-7 58\tCCCP 25/10/2029 0,96 25/08/2026 43.300,14 705,71 226,22 698,39 7,32\nTotal Cliente: 705,71 226,22 698,39 7,32\nTotal Empresa: 705,71 226,22 698,39 7,32\nTotal Cooperativa: 705,71 226,22 698,39 7,32\nTotal Central: 705,71 226,22 698,39 7,32\n7,32\t226,22\t705,71 698,39\tTotal Geral:\n* parcela em carência\nEMP-158 Pag.: 1 / 1\n\n-- 1 of 1 --\n\n",
+  "pdfTextLength": 1005,
+  "extractResult": {
+    "headers": [
+      "EMPRESA",
+      "Cliente",
+      "Matrícula",
+      "CPF",
+      "Nome",
+      "Atividade",
+      "Telefone",
+      "Operação",
+      "Modalidade",
+      "Vencto. Operação",
+      "Tx. Juros",
+      "Parcela",
+      "Vencimento",
+      "Valor Operação",
+      "Valor Parcela",
+      "Valor Juros",
+      "Valorização",
+      "Rendas Apropriar",
+      "Copetencia"
+    ],
+    "rows": [
+      {
+        "EMPRESA": "47090 - TRIBUNAL REGIONAL DO TRABALHO DA 18",
+        "Cliente": "",
+        "Matrícula": "",
+        "CPF": "",
+        "Nome": "",
+        "Atividade": "",
+        "Telefone": "",
+        "Operação": "13815-7",
+        "Modalidade": "CCCP",
+        "Vencto. Operação": "25/10/2029",
+        "Tx. Juros": "0,96",
+        "Parcela": "58",
+        "Vencimento": "25/08/2026",
+        "Valor Operação": "43.300,14",
+        "Valor Parcela": "705,71",
+        "Valor Juros": "226,22",
+        "Valorização": "698,39",
+        "Rendas Apropriar": "7,32",
+        "Copetencia": "08/2026"
+      }
+    ]
+  },
+  "extractRowsCount": 1,
+  "headersFirst30": [
+    {
+      "key": "EMPRESA",
+      "sampleRow0": "47090 - TRIBUNAL REGIONAL DO TRABALHO DA 18",
+      "sampleRow1": null
+    },
+    {
+      "key": "Cliente",
+      "sampleRow0": "",
+      "sampleRow1": null
+    },
+    {
+      "key": "Matrícula",
+      "sampleRow0": "",
+      "sampleRow1": null
+    },
+    {
+      "key": "CPF",
+      "sampleRow0": "",
+      "sampleRow1": null
+    },
+    {
+      "key": "Nome",
+      "sampleRow0": "",
+      "sampleRow1": null
+    },
+    {
+      "key": "Atividade",
+      "sampleRow0": "",
+      "sampleRow1": null
+    },
+    {
+      "key": "Telefone",
+      "sampleRow0": "",
+      "sampleRow1": null
+    },
+    {
+      "key": "Operação",
+      "sampleRow0": "13815-7",
+      "sampleRow1": null
+    },
+    {
+      "key": "Modalidade",
+      "sampleRow0": "CCCP",
+      "sampleRow1": null
+    },
+    {
+      "key": "Vencto. Operação",
+      "sampleRow0": "25/10/2029",
+      "sampleRow1": null
+    },
+    {
+      "key": "Tx. Juros",
+      "sampleRow0": "0,96",
+      "sampleRow1": null
+    },
+    {
+      "key": "Parcela",
+      "sampleRow0": "58",
+      "sampleRow1": null
+    },
+    {
+      "key": "Vencimento",
+      "sampleRow0": "25/08/2026",
+      "sampleRow1": null
+    },
+    {
+      "key": "Valor Operação",
+      "sampleRow0": "43.300,14",
+      "sampleRow1": null
+    },
+    {
+      "key": "Valor Parcela",
+      "sampleRow0": "705,71",
+      "sampleRow1": null
+    },
+    {
+      "key": "Valor Juros",
+      "sampleRow0": "226,22",
+      "sampleRow1": null
+    },
+    {
+      "key": "Valorização",
+      "sampleRow0": "698,39",
+      "sampleRow1": null
+    },
+    {
+      "key": "Rendas Apropriar",
+      "sampleRow0": "7,32",
+      "sampleRow1": null
+    },
+    {
+      "key": "Copetencia",
+      "sampleRow0": "08/2026",
+      "sampleRow1": null
+    }
+  ],
+  "rowsFirst20": [
+    {
+      "EMPRESA": "47090 - TRIBUNAL REGIONAL DO TRABALHO DA 18",
+      "Cliente": "",
+      "Matrícula": "",
+      "CPF": "",
+      "Nome": "",
+      "Atividade": "",
+      "Telefone": "",
+      "Operação": "13815-7",
+      "Modalidade": "CCCP",
+      "Vencto. Operação": "25/10/2029",
+      "Tx. Juros": "0,96",
+      "Parcela": "58"
+    }
+  ],
+  "allMoneysCount": 26,
+  "allMoneysFirst30": [
+    "0,96",
+    "43.300,14",
+    "705,71",
+    "226,22",
+    "698,39",
+    "7,32",
+    "705,71",
+    "226,22",
+    "698,39",
+    "7,32",
+    "705,71",
+    "226,22",
+    "698,39",
+    "7,32",
+    "705,71",
+    "226,22",
+    "698,39",
+    "7,32",
+    "705,71",
+    "226,22",
+    "698,39",
+    "7,32",
+    "7,32",
+    "226,22",
+    "705,71",
+    "698,39"
+  ]
+}

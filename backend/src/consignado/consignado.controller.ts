@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Body, Query, Param, Header, Res, UploadedFile, UseInterceptors, InternalServerErrorException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
+import * as path from 'node:path';
 import { ConsignadoService, type RecursoTarget } from './consignado.service.js';
 
 @Controller('api/consignado')
@@ -119,6 +120,39 @@ export class ConsignadoController {
     });
   }
 
+  @Post('debug-local-sisbr')
+  async debugLocalSisbr(
+    @Body()
+    body: {
+      fileNameInModelos?: string;
+      filePathAbs?: string;
+    },
+  ) {
+    const rootProject = path.resolve(__dirname, '../../..');
+    let resolvedPath: string | null = null;
+    if (body && typeof body.fileNameInModelos === 'string' && body.fileNameInModelos.trim()) {
+      const name = body.fileNameInModelos.trim();
+      if (!/^[A-Za-zÀ-üÇç0-9 .()_-]+$/.test(name)) {
+        throw new InternalServerErrorException(`Caracteres inválidos no nome do arquivo: ${name}`);
+      }
+      if (!name.toLowerCase().endsWith('.pdf')) {
+        throw new InternalServerErrorException(`Arquivo deve ser PDF.`);
+      }
+      resolvedPath = path.join(rootProject, 'Modelos', name);
+    } else if (body && typeof body.filePathAbs === 'string' && body.filePathAbs.trim()) {
+      const p = path.resolve(body.filePathAbs.trim());
+      const projNorm = path.normalize(rootProject).toLowerCase();
+      const pNorm = path.normalize(p).toLowerCase();
+      if (!pNorm.startsWith(projNorm)) {
+        throw new InternalServerErrorException(`filePathAbs deve estar contido dentro da pasta do projeto.`);
+      }
+      resolvedPath = p;
+    } else {
+      throw new InternalServerErrorException(`Informe fileNameInModelos ou filePathAbs.`);
+    }
+    return await this.service.debugLocalSisbrPdfFile(resolvedPath);
+  }
+
   @Post('import')
   @Header('X-Content-Type-Options', 'nosniff')
   async importNow(
@@ -126,7 +160,7 @@ export class ConsignadoController {
     body: {
       folderUrl?: string;
       learningUrl?: string;
-      notificationTo?: string;
+      notificationTo?: string | string[];
       modalidades?: string[];
       mode?: 'append' | 'replace';
       sync?: boolean;
@@ -152,12 +186,19 @@ export class ConsignadoController {
         throw new Error('Importação em modo "replace" está desabilitada para evitar apagar dados.');
       }
       const forceSync = Boolean(body.sync);
+      const parseNotificationTo = (raw: unknown): string[] | undefined => {
+        if (Array.isArray(raw)) return raw.map((s) => String(s ?? '').trim()).filter(Boolean);
+        if (typeof raw === 'string' && raw.trim()) return raw.split(/[;,\n]/).map((s) => s.trim()).filter(Boolean);
+        return undefined;
+      };
+      const notificationTo = parseNotificationTo(body.notificationTo);
       if (forceSync) {
         if (this.service.isRecursoTarget(body.target as RecursoTarget)) {
           const url = String(body.learningUrl ?? body.folderUrl ?? '').trim();
           return await this.service.importByLearningProfileFromFolderUrlResolved({
             folderUrl: url,
             forceKind: body.target,
+            notificationTo,
             ...(body.mode ? { forceMode: body.mode } : {}),
           });
         }
@@ -167,11 +208,6 @@ export class ConsignadoController {
             'Link do Teams (reunião) não é um arquivo. Para importar Extrato/Relatório, informe a URL do SharePoint (pasta ou arquivo).',
           );
         }
-        const notificationTo = Array.isArray(body.notificationTo)
-          ? body.notificationTo
-          : typeof body.notificationTo === 'string' && body.notificationTo.trim()
-            ? body.notificationTo.split(/[;,]/).map((s) => s.trim()).filter(Boolean)
-            : undefined;
         return await this.service.runImportConsignadoResolved({
           folderUrl: body.folderUrl,
           notificationTo,
@@ -188,6 +224,7 @@ export class ConsignadoController {
           {
             folderUrl: url,
             forceKind: body.target,
+            notificationTo,
             ...(body.mode ? { forceMode: body.mode } : {}),
           },
         );
@@ -198,11 +235,6 @@ export class ConsignadoController {
             'Link do Teams (reunião) não é um arquivo. Para importar Extrato/Relatório, informe a URL do SharePoint (pasta ou arquivo).',
           );
         }
-        const notificationTo = Array.isArray(body.notificationTo)
-          ? body.notificationTo
-          : typeof body.notificationTo === 'string' && body.notificationTo.trim()
-            ? body.notificationTo.split(/[;,]/).map((s) => s.trim()).filter(Boolean)
-            : undefined;
         submitted = await this.service.submitImportJobAsync('runImportConsignado', {
           folderUrl: body.folderUrl,
           notificationTo,

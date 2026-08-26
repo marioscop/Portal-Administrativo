@@ -1,0 +1,37 @@
+const fs = require("fs");
+const initSqlJs = require("sql.js");
+const path = require("path");
+(async () => {
+  const SQL = await initSqlJs();
+  const dbPath = path.resolve(__dirname, "data/consignado.sqlite");
+  const buf = fs.readFileSync(dbPath);
+  const db = new SQL.Database(buf);
+  console.log("=== (1) PRAGMA table_info(imported_row_hashes) ===");
+  const r1 = db.exec("PRAGMA table_info(imported_row_hashes)");
+  if (r1.length) {
+    for (const row of r1[0].values) console.log("  cid=" + row[0] + " name=" + row[1] + " type=" + row[2]);
+  } else console.log("  Tabela nao existe?");
+  console.log("\n=== (2) Tipos `kind` existentes + COUNT em imported_row_hashes ===");
+  const r2 = db.exec("SELECT kind, COUNT(*) as cnt, MIN(imported_at) as min_at, MAX(imported_at) as max_at FROM imported_row_hashes GROUP BY kind ORDER BY cnt DESC LIMIT 20");
+  if (r2.length) for (const row of r2[0].values) console.log("  kind=" + row[0] + "  cnt=" + row[1] + "  min_at=" + row[2] + "  max_at=" + row[3]);
+  else console.log("  Vazio.");
+  console.log("\n=== (3) Todos kinds = '__virtual_relatorio%' OU 'learning_profile:__virtual_relatorio%' (import SISBR) ===");
+  const r3 = db.exec(`SELECT kind, COUNT(*) as cnt, MAX(imported_at) as max_at FROM imported_row_hashes WHERE kind LIKE '%relatorio%' GROUP BY kind ORDER BY max_at DESC`);
+  if (r3.length) for (const row of r3[0].values) console.log("  kind=" + row[0] + "  cnt=" + row[1] + "  max_at=" + row[2]);
+  else console.log("  Nenhum kind contendo 'relatorio'.");
+  console.log("\n=== (4) Linhas relatorio_consignado onde __source_file = 2 PDFs da importação ontem ===");
+  const r4 = db.exec(`SELECT __source_file, COUNT(*) as cnt, MIN(rowid) as min_rowid, MAX(rowid) as max_rowid FROM relatorio_consignado WHERE __source_file LIKE '%TRIBUNAL REGIONAL DO TRABALHO%' OR __source_file LIKE '%TRIBUNAL REGIONAL ELEITORAL DE GOIAS%' GROUP BY __source_file`);
+  if (r4.length) for (const row of r4[0].values) console.log("  src=" + row[0] + "  cnt=" + row[1] + "  rowids=" + row[2] + ".." + row[3]);
+  else console.log("  Nenhuma linha com __source_file dos 2 PDFs! (talvez __source_file estava nulo na importação errada de ontem)");
+  console.log("\n=== (5) Últimas 2 linhas inseridas ERRADAS (rowid 4519/4520) — se existirem ===");
+  const r5 = db.exec("SELECT rowid, EMPRESA, Operação, Parcela, [Valor Operação], Copetencia, __source_file FROM relatorio_consignado WHERE rowid IN (4519,4520)");
+  if (r5.length && r5[0].values.length) for (const row of r5[0].values) console.log("  rowid=" + row[0] + " EMP=" + row[1] + " OP=" + row[2] + " Parcela=" + row[3] + " ValOp=" + row[4] + " Copet=" + row[5] + " src=" + row[6]);
+  else console.log("  4519/4520 nao existem (já foram limpas).");
+  console.log("\n=== (6) COUNT linhas ONTEM 25/08 OPERACAO SEM HIFEN CLIENTE/EMPRESA/CPF NULL (importacao errada) ===");
+  const r6 = db.exec(`SELECT COUNT(*) as c FROM relatorio_consignado WHERE (Cliente IS NULL OR Cliente='') AND (Matrícula IS NULL OR Matrícula='') AND (CPF IS NULL OR CPF='') AND (Nome IS NULL OR Nome='') AND Operação IS NOT NULL AND Operação != '' AND Operação NOT GLOB '%-%'`);
+  console.log("  TOTAL linhas com sintoma COLUNAS ERRADAS (15 campos NULL, Operação sem hífen): " + (r6[0]?.values[0]?.[0] ?? 0));
+  console.log("\n=== (7) Se idempotência travando: DELETE hashes relatorio DE 25/08 20:44 (ANTES DA REIMPORTAÇÃO) ===");
+  const sqlDel = `DELETE FROM imported_row_hashes WHERE kind LIKE '%relatorio%' AND (imported_at LIKE '%2026-08-25%' OR imported_at LIKE '%25/08/2026%' OR imported_at >= '2026-08-25 20:00:00')`;
+  console.log("  SQL de remoção a executar SE CONFIRMADO: " + sqlDel);
+  db.close();
+})().catch(e => { console.error(e); process.exit(2); });

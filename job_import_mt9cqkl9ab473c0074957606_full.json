@@ -1,0 +1,143 @@
+{
+  "jobId": "import_mt9cqkl9ab473c0074957606",
+  "kind": "runImportConsignado",
+  "status": "succeeded",
+  "createdAtIso": "2026-08-26T00:24:48.573Z",
+  "heartbeatAtIso": "2026-08-26T00:25:38.957Z",
+  "optsSnapshot": {
+    "folderUrl": "https://sicoobjuriscredcelgbr.sharepoint.com/:f:/r/sites/PortaldeDocumentosSicoobJuriscred/Documents/Diretoria%20Administrativo/Tecnologia%20da%20Informa%C3%A7%C3%A3o/99-Automa%C3%A7%C3%B5es_TI/9.Recupera%C3%A7%C3%A3o%20de%20Cr%C3%A9dito?d=wff10d8d2bc6047d896f6ad683630f8bc&csf=1&web=1&e=m4dRvU",
+    "mode": "append",
+    "target": "relatorio"
+  },
+  "totalRowsInserted": 0,
+  "totalRowsSkipped": 0,
+  "progressFiles": [
+    {
+      "idx": 0,
+      "fileName": "TRIBUNAL REGIONAL DO TRABALHO.pdf",
+      "targetTable": "relatorio_consignado",
+      "insertedRows": 0,
+      "skippedRows": 0,
+      "skippedReason": "idempotente: bytes idênticos já importados em 25/08/2026, 20:44:38",
+      "atIso": "2026-08-26T00:25:35.53Z"
+    },
+    {
+      "idx": 1,
+      "fileName": "TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf",
+      "targetTable": "relatorio_consignado",
+      "insertedRows": 0,
+      "skippedRows": 0,
+      "skippedReason": "idempotente: bytes idênticos já importados em 25/08/2026, 20:44:40",
+      "atIso": "2026-08-26T00:25:35.53Z"
+    }
+  ],
+  "startedAtIso": "2026-08-26T00:24:48.574Z",
+  "preImportSnapshotPath": "C:\\Users\\mario.junior\\OneDrive - Sicoob Juriscred\\1.Projetos\\33.Portal Administrativo\\Portal-Administrativo\\backend\\data\\snaps\\consignado.sqlite.batch-20260826-002448.sqlite",
+  "totalFilesMatched": 2,
+  "totalFilesScanned": 2,
+  "finishedAtIso": "2026-08-26T00:25:38.957Z",
+  "resultSummary": {
+    "executed": true,
+    "summary": {
+      "importedKinds": [
+        "relatorio"
+      ],
+      "failedKinds": [],
+      "firstErrorMessage": null,
+      "firstErrorStack": null,
+      "selectedTarget": "relatorio",
+      "executedKinds": [
+        "relatorio"
+      ],
+      "totals": {
+        "totalRowsInserted": 0,
+        "totalRowsSkipped": 0,
+        "totalFilesMatched": 2,
+        "totalFilesScanned": 2,
+        "preImportSnapshotPath": "C:\\Users\\mario.junior\\OneDrive - Sicoob Juriscred\\1.Projetos\\33.Portal Administrativo\\Portal-Administrativo\\backend\\data\\snaps\\consignado.sqlite.batch-20260826-002448.sqlite"
+      }
+    },
+    "resultsPerKind": {
+      "relatorio": {
+        "importedFiles": [
+          {
+            "fileName": "TRIBUNAL REGIONAL DO TRABALHO.pdf",
+            "targetTable": "relatorio_consignado",
+            "kind": "relatorio",
+            "profileId": "__virtual_relatorio_1787703934343_739",
+            "insertedRows": 0,
+            "skippedRows": 0,
+            "headers": [],
+            "skippedReason": "idempotente: bytes idênticos já importados em 25/08/2026, 20:44:38"
+          },
+          {
+            "fileName": "TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf",
+            "targetTable": "relatorio_consignado",
+            "kind": "relatorio",
+            "profileId": "__virtual_relatorio_1787703934827_112",
+            "insertedRows": 0,
+            "skippedRows": 0,
+            "headers": [],
+            "skippedReason": "idempotente: bytes idênticos já importados em 25/08/2026, 20:44:40"
+          }
+        ],
+        "totalFilesScanned": 2,
+        "totalFilesMatched": 2,
+        "totalRowsInserted": 0,
+        "totalRowsSkipped": 0,
+        "notificationEmail": {
+          "attempted": true,
+          "sent": false,
+          "to": [],
+          "error": "Erro: nenhuma linha inserida nem pulada (0/0) em todos os arquivos compatíveis (2). Arquivos: TRIBUNAL REGIONAL DO TRABALHO.pdf, TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf. Parser retornou 0 linhas nos arquivos. Verifique o formato/layout dos arquivos (PDF deve ter tabelas com valores monetários e datas)."
+        },
+        "mode": "append",
+        "tableName": "relatorio_consignado",
+        "rows": 0,
+        "columns": 20,
+        "skippedDuplicates": 0,
+        "skippedNoCpf": 0,
+        "movedToImportados": false,
+        "movedToImportadosCount": null,
+        "moveError": null,
+        "filesImported": [
+          {
+            "name": "TRIBUNAL REGIONAL DO TRABALHO.pdf",
+            "insertedRows": 0,
+            "skippedDuplicates": 0,
+            "skippedNoCpf": 0
+          },
+          {
+            "name": "TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf",
+            "insertedRows": 0,
+            "skippedDuplicates": 0,
+            "skippedNoCpf": 0
+          }
+        ],
+        "tablesCreated": [
+          {
+            "tableName": "relatorio_consignado",
+            "insertedRows": 0,
+            "skippedDuplicates": 0,
+            "skippedNoCpf": 0
+          }
+        ],
+        "dbFilePath": "C:\\Users\\mario.junior\\OneDrive - Sicoob Juriscred\\1.Projetos\\33.Portal Administrativo\\Portal-Administrativo\\backend\\data\\consignado.sqlite"
+      }
+    },
+    "notificationEmail": {
+      "attempted": true,
+      "sent": false,
+      "to": [],
+      "error": "Erro: nenhuma linha inserida nem pulada (0/0) em todos os arquivos compatíveis (2). Arquivos: TRIBUNAL REGIONAL DO TRABALHO.pdf, TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf. Parser retornou 0 linhas nos arquivos. Verifique o formato/layout dos arquivos (PDF deve ter tabelas com valores monetários e datas)."
+    },
+    "notificationEmailsByKind": {
+      "relatorio": {
+        "attempted": true,
+        "sent": false,
+        "to": [],
+        "error": "Erro: nenhuma linha inserida nem pulada (0/0) em todos os arquivos compatíveis (2). Arquivos: TRIBUNAL REGIONAL DO TRABALHO.pdf, TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf. Parser retornou 0 linhas nos arquivos. Verifique o formato/layout dos arquivos (PDF deve ter tabelas com valores monetários e datas)."
+      }
+    }
+  }
+}

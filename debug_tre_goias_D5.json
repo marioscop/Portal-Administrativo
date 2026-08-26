@@ -1,0 +1,377 @@
+{
+  "ok": true,
+  "filePath": "C:\\Users\\mario.junior\\OneDrive - Sicoob Juriscred\\1.Projetos\\33.Portal Administrativo\\Portal-Administrativo\\Modelos\\TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf",
+  "fileExists": true,
+  "fileName": "TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf",
+  "fileSizeBytes": 11305,
+  "pdfText": "CENTRAL:\nEMPRESA:\n1004 - CCMS JUSTIÇA DO ESTADO GOIÁS E\n45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS ÓRGÃO:\n3348 - SICOOB - PA TRIBUNAL\tCOOPERATIVA:\nHora Emissão:\nSISBR 2.0 - Plataforma de Crédito\nRelatório de Parcelas a Vencer 25/08/2026\tData Emissão:\n3348 - CCMS JUSTIÇA DO ESTADO GOIÁS E EMPREGADOS CELG LTD 09:17:51\nData Processamento: 25/08/2026\nPERÍODO: 01/08/2026 31/08/2026\ta\nMatrícula\nValor Juros Valorização\tModalidade\nAtividade\nValor Operação\nTelefone\nTx. Juros\tVencto. Operação\tOperação\nCliente\nParcela Valor Parcela\nNome\nRendas Apropriar\tVencimento\nCPF\n19189-2 5067251 MARIA DE LOURDES MACEDO DE ANDRADE 32613348\tPESSOA FISICA\t263.608.961-68\n17266-0 38\tRCCP 25/06/2033 1,43 25/08/2026 28.843,22 516,28 366,66 504,38 11,90\n17089-5 39\tCCCP 25/05/2033 1,37 3.518,13 61,10 42,16 59,73 1,37\n16422-0 43\tCCCP 25/01/2033 1,54 14.355,62 270,49 193,23 264,22 6,27\nTotal Cliente: 847,87 602,05 828,33 19,54\n19461-1 5067120 JORGE MARCOS DE SOUZA 999485225\t929.288.708-49\n17818-8 35\tCCCP 25/09/2033 1,43 25.390,58 453,90 328,28 443,24 10,66\nTotal Cliente: 453,90 328,28 443,24 10,66\n53268-1 0000001 BENEDITO DA COSTA VELOSO FILHO 32071884\t222.101.051-53\n21550-3 11\tPCCN 25/06/2032 1,30 277.992,54 5.731,94 3.534,76 5.617,18 114,76\n21551-0 11\tPCCN 25/05/2031 1,30 172.505,30 3.944,41 2.138,20 3.875,00 69,41\nTotal Cliente: 9.676,35 5.672,96 9.492,18 184,17\nTotal Empresa: 10.978,12 6.603,29 10.763,75 214,37\nTotal Cooperativa: 10.978,12 6.603,29 10.763,75 214,37\nTotal Central: 10.978,12 6.603,29 10.763,75 214,37\n214,37\t6.603,29\t10.978,12 10.763,75\tTotal Geral:\n* parcela em carência\nEMP-158 Pag.: 1 / 1\n\n-- 1 of 1 --\n\n",
+  "pdfTextLength": 1619,
+  "extractResult": {
+    "headers": [
+      "EMPRESA",
+      "Cliente",
+      "Matrícula",
+      "CPF",
+      "Nome",
+      "Atividade",
+      "Telefone",
+      "Operação",
+      "Modalidade",
+      "Vencto. Operação",
+      "Tx. Juros",
+      "Parcela",
+      "Vencimento",
+      "Valor Operação",
+      "Valor Parcela",
+      "Valor Juros",
+      "Valorização",
+      "Rendas Apropriar",
+      "Copetencia"
+    ],
+    "rows": [
+      {
+        "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+        "Cliente": "19189-2",
+        "Matrícula": "5067251",
+        "CPF": "263.608.961-68",
+        "Nome": "MARIA DE LOURDES MACEDO DE ANDRADE",
+        "Atividade": "PESSOA FISICA",
+        "Telefone": "32613348",
+        "Operação": "17266-0",
+        "Modalidade": "RCCP",
+        "Vencto. Operação": "25/06/2033",
+        "Tx. Juros": "1,43",
+        "Parcela": "38",
+        "Vencimento": "25/08/2026",
+        "Valor Operação": "28.843,22",
+        "Valor Parcela": "516,28",
+        "Valor Juros": "366,66",
+        "Valorização": "504,38",
+        "Rendas Apropriar": "11,90",
+        "Copetencia": "08/2026"
+      },
+      {
+        "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+        "Cliente": "19189-2",
+        "Matrícula": "5067251",
+        "CPF": "263.608.961-68",
+        "Nome": "MARIA DE LOURDES MACEDO DE ANDRADE",
+        "Atividade": "PESSOA FISICA",
+        "Telefone": "32613348",
+        "Operação": "17089-5",
+        "Modalidade": "CCCP",
+        "Vencto. Operação": "25/05/2033",
+        "Tx. Juros": "1,37",
+        "Parcela": "39",
+        "Vencimento": "25/08/2026",
+        "Valor Operação": "3.518,13",
+        "Valor Parcela": "61,10",
+        "Valor Juros": "42,16",
+        "Valorização": "59,73",
+        "Rendas Apropriar": "1,37",
+        "Copetencia": "08/2026"
+      },
+      {
+        "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+        "Cliente": "19189-2",
+        "Matrícula": "5067251",
+        "CPF": "263.608.961-68",
+        "Nome": "MARIA DE LOURDES MACEDO DE ANDRADE",
+        "Atividade": "PESSOA FISICA",
+        "Telefone": "32613348",
+        "Operação": "16422-0",
+        "Modalidade": "CCCP",
+        "Vencto. Operação": "25/01/2033",
+        "Tx. Juros": "1,54",
+        "Parcela": "43",
+        "Vencimento": "25/08/2026",
+        "Valor Operação": "14.355,62",
+        "Valor Parcela": "270,49",
+        "Valor Juros": "193,23",
+        "Valorização": "264,22",
+        "Rendas Apropriar": "6,27",
+        "Copetencia": "08/2026"
+      },
+      {
+        "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+        "Cliente": "19461-1",
+        "Matrícula": "5067120",
+        "CPF": "929.288.708-49",
+        "Nome": "JORGE MARCOS DE SOUZA",
+        "Atividade": "",
+        "Telefone": "999485225",
+        "Operação": "17818-8",
+        "Modalidade": "CCCP",
+        "Vencto. Operação": "25/09/2033",
+        "Tx. Juros": "1,43",
+        "Parcela": "35",
+        "Vencimento": "25/08/2026",
+        "Valor Operação": "25.390,58",
+        "Valor Parcela": "453,90",
+        "Valor Juros": "328,28",
+        "Valorização": "443,24",
+        "Rendas Apropriar": "10,66",
+        "Copetencia": "08/2026"
+      },
+      {
+        "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+        "Cliente": "53268-1",
+        "Matrícula": "0000001",
+        "CPF": "222.101.051-53",
+        "Nome": "BENEDITO DA COSTA VELOSO FILHO",
+        "Atividade": "",
+        "Telefone": "32071884",
+        "Operação": "21550-3",
+        "Modalidade": "PCCN",
+        "Vencto. Operação": "25/06/2032",
+        "Tx. Juros": "1,30",
+        "Parcela": "11",
+        "Vencimento": "25/08/2026",
+        "Valor Operação": "277.992,54",
+        "Valor Parcela": "5.731,94",
+        "Valor Juros": "3.534,76",
+        "Valorização": "5.617,18",
+        "Rendas Apropriar": "114,76",
+        "Copetencia": "08/2026"
+      },
+      {
+        "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+        "Cliente": "53268-1",
+        "Matrícula": "0000001",
+        "CPF": "222.101.051-53",
+        "Nome": "BENEDITO DA COSTA VELOSO FILHO",
+        "Atividade": "",
+        "Telefone": "32071884",
+        "Operação": "21551-0",
+        "Modalidade": "PCCN",
+        "Vencto. Operação": "25/05/2031",
+        "Tx. Juros": "1,30",
+        "Parcela": "11",
+        "Vencimento": "25/08/2026",
+        "Valor Operação": "172.505,30",
+        "Valor Parcela": "3.944,41",
+        "Valor Juros": "2.138,20",
+        "Valorização": "3.875,00",
+        "Rendas Apropriar": "69,41",
+        "Copetencia": "08/2026"
+      }
+    ]
+  },
+  "extractRowsCount": 6,
+  "headersFirst30": [
+    {
+      "key": "EMPRESA",
+      "sampleRow0": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+      "sampleRow1": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS"
+    },
+    {
+      "key": "Cliente",
+      "sampleRow0": "19189-2",
+      "sampleRow1": "19189-2"
+    },
+    {
+      "key": "Matrícula",
+      "sampleRow0": "5067251",
+      "sampleRow1": "5067251"
+    },
+    {
+      "key": "CPF",
+      "sampleRow0": "263.608.961-68",
+      "sampleRow1": "263.608.961-68"
+    },
+    {
+      "key": "Nome",
+      "sampleRow0": "MARIA DE LOURDES MACEDO DE ANDRADE",
+      "sampleRow1": "MARIA DE LOURDES MACEDO DE ANDRADE"
+    },
+    {
+      "key": "Atividade",
+      "sampleRow0": "PESSOA FISICA",
+      "sampleRow1": "PESSOA FISICA"
+    },
+    {
+      "key": "Telefone",
+      "sampleRow0": "32613348",
+      "sampleRow1": "32613348"
+    },
+    {
+      "key": "Operação",
+      "sampleRow0": "17266-0",
+      "sampleRow1": "17089-5"
+    },
+    {
+      "key": "Modalidade",
+      "sampleRow0": "RCCP",
+      "sampleRow1": "CCCP"
+    },
+    {
+      "key": "Vencto. Operação",
+      "sampleRow0": "25/06/2033",
+      "sampleRow1": "25/05/2033"
+    },
+    {
+      "key": "Tx. Juros",
+      "sampleRow0": "1,43",
+      "sampleRow1": "1,37"
+    },
+    {
+      "key": "Parcela",
+      "sampleRow0": "38",
+      "sampleRow1": "39"
+    },
+    {
+      "key": "Vencimento",
+      "sampleRow0": "25/08/2026",
+      "sampleRow1": "25/08/2026"
+    },
+    {
+      "key": "Valor Operação",
+      "sampleRow0": "28.843,22",
+      "sampleRow1": "3.518,13"
+    },
+    {
+      "key": "Valor Parcela",
+      "sampleRow0": "516,28",
+      "sampleRow1": "61,10"
+    },
+    {
+      "key": "Valor Juros",
+      "sampleRow0": "366,66",
+      "sampleRow1": "42,16"
+    },
+    {
+      "key": "Valorização",
+      "sampleRow0": "504,38",
+      "sampleRow1": "59,73"
+    },
+    {
+      "key": "Rendas Apropriar",
+      "sampleRow0": "11,90",
+      "sampleRow1": "1,37"
+    },
+    {
+      "key": "Copetencia",
+      "sampleRow0": "08/2026",
+      "sampleRow1": "08/2026"
+    }
+  ],
+  "rowsFirst20": [
+    {
+      "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+      "Cliente": "19189-2",
+      "Matrícula": "5067251",
+      "CPF": "263.608.961-68",
+      "Nome": "MARIA DE LOURDES MACEDO DE ANDRADE",
+      "Atividade": "PESSOA FISICA",
+      "Telefone": "32613348",
+      "Operação": "17266-0",
+      "Modalidade": "RCCP",
+      "Vencto. Operação": "25/06/2033",
+      "Tx. Juros": "1,43",
+      "Parcela": "38"
+    },
+    {
+      "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+      "Cliente": "19189-2",
+      "Matrícula": "5067251",
+      "CPF": "263.608.961-68",
+      "Nome": "MARIA DE LOURDES MACEDO DE ANDRADE",
+      "Atividade": "PESSOA FISICA",
+      "Telefone": "32613348",
+      "Operação": "17089-5",
+      "Modalidade": "CCCP",
+      "Vencto. Operação": "25/05/2033",
+      "Tx. Juros": "1,37",
+      "Parcela": "39"
+    },
+    {
+      "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+      "Cliente": "19189-2",
+      "Matrícula": "5067251",
+      "CPF": "263.608.961-68",
+      "Nome": "MARIA DE LOURDES MACEDO DE ANDRADE",
+      "Atividade": "PESSOA FISICA",
+      "Telefone": "32613348",
+      "Operação": "16422-0",
+      "Modalidade": "CCCP",
+      "Vencto. Operação": "25/01/2033",
+      "Tx. Juros": "1,54",
+      "Parcela": "43"
+    },
+    {
+      "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+      "Cliente": "19461-1",
+      "Matrícula": "5067120",
+      "CPF": "929.288.708-49",
+      "Nome": "JORGE MARCOS DE SOUZA",
+      "Atividade": "",
+      "Telefone": "999485225",
+      "Operação": "17818-8",
+      "Modalidade": "CCCP",
+      "Vencto. Operação": "25/09/2033",
+      "Tx. Juros": "1,43",
+      "Parcela": "35"
+    },
+    {
+      "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+      "Cliente": "53268-1",
+      "Matrícula": "0000001",
+      "CPF": "222.101.051-53",
+      "Nome": "BENEDITO DA COSTA VELOSO FILHO",
+      "Atividade": "",
+      "Telefone": "32071884",
+      "Operação": "21550-3",
+      "Modalidade": "PCCN",
+      "Vencto. Operação": "25/06/2032",
+      "Tx. Juros": "1,30",
+      "Parcela": "11"
+    },
+    {
+      "EMPRESA": "45039 - TRIBUNAL REGIONAL ELEITORAL DE GOIAS",
+      "Cliente": "53268-1",
+      "Matrícula": "0000001",
+      "CPF": "222.101.051-53",
+      "Nome": "BENEDITO DA COSTA VELOSO FILHO",
+      "Atividade": "",
+      "Telefone": "32071884",
+      "Operação": "21551-0",
+      "Modalidade": "PCCN",
+      "Vencto. Operação": "25/05/2031",
+      "Tx. Juros": "1,30",
+      "Parcela": "11"
+    }
+  ],
+  "allMoneysCount": 64,
+  "allMoneysFirst30": [
+    "1,43",
+    "28.843,22",
+    "516,28",
+    "366,66",
+    "504,38",
+    "11,90",
+    "1,37",
+    "3.518,13",
+    "61,10",
+    "42,16",
+    "59,73",
+    "1,37",
+    "1,54",
+    "14.355,62",
+    "270,49",
+    "193,23",
+    "264,22",
+    "6,27",
+    "847,87",
+    "602,05",
+    "828,33",
+    "19,54",
+    "1,43",
+    "25.390,58",
+    "453,90",
+    "328,28",
+    "443,24",
+    "10,66",
+    "453,90",
+    "328,28"
+  ]
+}

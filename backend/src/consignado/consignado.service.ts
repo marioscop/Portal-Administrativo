@@ -264,6 +264,32 @@ export class ConsignadoService {
     'debugOneshotTreImportSync',
   ) as unknown as (opts: { folderUrl?: string; forceKind?: string }) => Promise<Record<string, unknown>>;
 
+  readonly debugLocalSisbrPdfFile = resolveModuleFn(
+    (ns as { debugLocalSisbrPdfFile?: unknown }).debugLocalSisbrPdfFile as unknown,
+    _mod,
+    'debugLocalSisbrPdfFile',
+  ) as unknown as (
+    filePathAbs: string,
+  ) => Promise<{
+    ok: boolean;
+    filePath: string;
+    fileExists: boolean;
+    fileName: string;
+    fileSizeBytes: number | null;
+    pdfText: string | null;
+    pdfTextLength: number;
+    extractResult: {
+      headers: string[];
+      rows: Array<Record<string, unknown>>;
+    } | null;
+    extractRowsCount: number;
+    headersFirst30: Array<{ key: string; sampleRow0: unknown; sampleRow1: unknown }>;
+    rowsFirst20: Array<Record<string, unknown>>;
+    allMoneysCount: number;
+    allMoneysFirst30: string[];
+    error?: string;
+  }>;
+
   readonly isTeamsMeetingUrl = (value: string): boolean => {
     try {
       const u = new URL(value);

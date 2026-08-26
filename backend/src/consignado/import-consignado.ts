@@ -1487,18 +1487,28 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
   driveId: string;
   baseFolderId: string;
   basePath: string;
+  subfolderCandidates?: string[];
   __trace?: (step: string, data: Record<string, unknown>) => void;
+  permitirPdfSisbr?: boolean;
 }): Promise<Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>> {
   const tr = opts.__trace ?? (() => {});
   const isRecuperacaoCreditoInPath = (path: string) => {
     const k = normalizeNameForMatch(path);
     return k.includes('recuperacao de credito') || k.endsWith('9.recuperacao de credito');
   };
-  const isExtratoRecursoFolder = (name: string) => {
-    const k = normalizeNameForMatch(name);
-    return k.includes('extrato recurso') || k.startsWith('extrato recurso') || k === 'extratos recurso';
-  };
   const isDoc = (n: string) => /\.(xlsx|xlsm|xls)$/i.test(String(n ?? '').trim());
+  // PDF SOMENTE para SISBR e SOMENTE se caller explicitamente permitir (forceKind=relatorio).
+  // Qualquer outro forceKind (extratos, orgao etc) continua 100% Excel.
+  const isDocOuPdfSeSisbr = (n: string, folderPath: string): boolean => {
+    if (isDoc(n)) return true;
+    if (!Boolean(opts.permitirPdfSisbr)) return false;
+    const temSisbr = (path: string): boolean => {
+      const k = normalizeNameForMatch(String(path ?? ''));
+      return k.includes('sisbr') || k.includes('relatorio sisbr');
+    };
+    if (!temSisbr(folderPath)) return false;
+    return isPdfFile(String(n ?? ''));
+  };
   const out: Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }> = [];
   if (!opts.driveId || !opts.token) return out;
 
@@ -1517,7 +1527,10 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
     alvoMesNorm ? alvoMesNorm.toLowerCase() : '',
     MESES_PT_BR[alvoMes0] ?? '',
   ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
-  const pastaExtratoVariacoes = ['Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso'];
+  const pastaExtratoVariacoesDefault = ['Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso'];
+  const subfolderCandidatesNormalized: string[] = Array.isArray(opts.subfolderCandidates) && opts.subfolderCandidates.length > 0
+    ? opts.subfolderCandidates.slice()
+    : pastaExtratoVariacoesDefault.slice();
 
   tr('setup', { alvoAno, alvoMes0, alvoMesNorm, alvoMesVariacoes, cleanedBasePath, baseFolderIdLen: (opts.baseFolderId || '').length, baseFolderIdEqDriveId: opts.baseFolderId === opts.driveId });
 
@@ -1668,40 +1681,239 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
   if (!monthId) { tr('noMonth', {}); return out; }
   tr('mesOk', { monthName, monthIdPrefix: monthId.slice(0, 8) });
 
-  // ====== PASSO 4: Descender Pasta "Extrato Recurso" (ou equivalentes) ======
+  // ====== PASSO 4: Descender Pastas-alvo (Extrato Recurso / Relatório de Órgão / Relatório Sisbr etc) ======
   const monthPath = `${yearPath}/${monthName}`;
   const mcKids = await safeListChildren(monthId);
-  let extratoId: string | null = null;
-  let extratoName = '';
-  for (const v of pastaExtratoVariacoes) {
+  // TRACE DETALHADO: listar TODAS subpastas/arquivos do mês (para diagnosticar por que só Extrato Recurso aparece)
+  tr('mesSubpastasDetalhado', {
+    monthName,
+    totalItems: mcKids.length,
+    items: mcKids.map((c, idx) => ({
+      idx,
+      name: String(c.name ?? ''),
+      isFolder: !!c.folder,
+      isFile: !!c.file,
+      normName: normalizeNameForMatch(String(c.name ?? ''))
+    }))
+  });
+  const subPastaMatches: Array<{ id: string; name: string }> = [];
+  const seenSubPastaIds = new Set<string>();
+  tr('subfolderCandidatesEntrada', {
+    subfolderCandidatesNormalized,
+    subfolderCandidatesNormalizedCount: subfolderCandidatesNormalized.length
+  });
+  for (const v of subfolderCandidatesNormalized) {
+    if (!v) continue;
     const vN = normalizeNameForMatch(v);
+    if (!vN) continue;
     const ft = mcKids.find((f) => f.folder && normalizeNameForMatch(f.name) === vN)
       ?? mcKids.find((f) => f.folder && normalizeNameForMatch(f.name).includes(vN.slice(0, Math.min(4, vN.length))));
-    if (ft) { extratoId = String(ft.id); extratoName = String(ft.name ?? ''); break; }
+    if (ft && !seenSubPastaIds.has(String(ft.id))) {
+      seenSubPastaIds.add(String(ft.id));
+      subPastaMatches.push({ id: String(ft.id), name: String(ft.name ?? '') });
+      tr('subpastaMatchPorCandidate', {
+        candidate: v,
+        matchedName: String(ft.name ?? ''),
+        totalAteAgora: subPastaMatches.length
+      });
+    }
   }
-  let targetId = extratoId;
-  let targetPath = extratoId ? `${monthPath}/${extratoName}` : monthPath;
-  if (!targetId) {
-    // Não tem subpasta Extrato Recurso → lê a própria pasta do mês.
-    targetId = monthId;
-    tr('extratoFolderFallback', { reason: 'nenhuma pasta Extrato Recurso encontrada; usando mês diretamente.', targetPath });
-  } else {
-    tr('extratoFolderOk', { extratoName, extratoIdPrefix: String(extratoId || '').slice(0, 8), targetPath });
-  }
-
-  // ====== PASSO 5: Coletar planilhas ======
-  const finals = await safeListChildren(targetId);
-  for (const f of finals) {
-    if (!f.file || !isDoc(f.name)) continue;
-    out.push({
-      id: String(f.id),
-      name: String(f.name ?? ''),
-      lastModifiedDateTime: f.lastModifiedDateTime,
-      folderPath: targetPath,
-      parentId: String(targetId),
+  tr('subpastaAposCandidatesPrincipais', {
+    matches: subPastaMatches.map((s) => s.name),
+    count: subPastaMatches.length
+  });
+  // FALLBACK: Adicionar TODAS as demais subpastas do MÊS (menos Importados) como candidatas —
+  // garante que pastas com nomes não padronizados (ex.: "Relatórios", "SISBR mensal", "Por órgão" etc) também sejam vasculhadas.
+  for (const c of mcKids) {
+    if (!c.folder) continue;
+    const cName = String(c.name ?? '').trim();
+    if (!cName) continue;
+    const cNameNorm = normalizeNameForMatch(cName);
+    const isImportadosFilter = cNameNorm === 'importados' || cNameNorm.endsWith(' importados') || cNameNorm.startsWith('importados ');
+    const jaVisto = seenSubPastaIds.has(String(c.id));
+    if (isImportadosFilter) {
+      tr('subpastaFallbackBloqueadaImportados', { name: cName, normName: cNameNorm });
+      continue;
+    }
+    if (jaVisto) {
+      continue;
+    }
+    seenSubPastaIds.add(String(c.id));
+    subPastaMatches.push({ id: String(c.id), name: cName });
+    tr('subpastaAdicionadaFallback', {
+      name: cName,
+      normName: cNameNorm,
+      totalAteAgora: subPastaMatches.length
     });
   }
-  tr('final', { found: out.length, files: out.map((x) => x.name).slice(0, 5) });
+  tr('subpastaMatchesFinal', {
+    total: subPastaMatches.length,
+    nomes: subPastaMatches.map((s) => s.name)
+  });
+  const targetIds: Array<{ id: string; path: string }> = [];
+  if (subPastaMatches.length === 0) {
+    targetIds.push({ id: monthId, path: monthPath });
+    tr('extratoFolderFallback', { reason: 'nenhuma subpasta encontrada no mês; usando mês diretamente.', targetPath: monthPath });
+  } else {
+    for (const sp of subPastaMatches) {
+      targetIds.push({ id: sp.id, path: `${monthPath}/${sp.name}` });
+      tr('extratoFolderOk', { extratoName: sp.name, extratoIdPrefix: String(sp.id || '').slice(0, 8), targetPath: `${monthPath}/${sp.name}` });
+    }
+  }
+
+  // ====== PASSO 5: Coletar planilhas (E PDFs SISBR) de TODAS pastas-alvo ======
+  // (RECUSÃO CONTROLADA: máximo 3 níveis — pasta-alvo / órgão / Importados)
+  // PDF SÓ É ACEITO SE pathPrefix (caminho da pasta) pertencer ao SISBR. Demais fluxos = só Excel.
+  const pushIfExcel = (f: { id?: unknown; name?: unknown; lastModifiedDateTime?: unknown; file?: unknown; folder?: unknown }, pathPrefix: string, parentIdStr: string): boolean => {
+    if (!f.file) return false;
+    const fname = String(f.name ?? '');
+    if (!isDocOuPdfSeSisbr(fname, pathPrefix)) return false;
+    out.push({
+      id: String(f.id),
+      name: fname,
+      lastModifiedDateTime: f.lastModifiedDateTime as string | undefined,
+      folderPath: pathPrefix,
+      parentId: parentIdStr,
+    });
+    tr('passo5ItemInserido', {
+      targetPath: pathPrefix,
+      arquivoNome: fname,
+      totalInseridosAteAgora: out.length
+    });
+    return true;
+  };
+  for (const target of targetIds) {
+    const finals = await safeListChildren(target.id);
+    tr('passo5ConteudoPastaAlvo', {
+      targetPath: target.path,
+      targetIdPrefix: String(target.id || '').slice(0, 8),
+      totalItems: finals.length,
+      items: finals.map((ff, i) => ({
+        idx: i,
+        name: String(ff.name ?? ''),
+        isFolder: !!ff.folder,
+        isFile: !!ff.file,
+        isDocRegex: isDoc(String(ff.name ?? '')),
+        isSisbrPdfPermitido: isDocOuPdfSeSisbr(String(ff.name ?? ''), target.path),
+        normName: normalizeNameForMatch(String(ff.name ?? ''))
+      }))
+    });
+    for (const f of finals) {
+      if (f.file) {
+        // NÍVEL 1 — arquivo direto na pasta-alvo
+        const added = pushIfExcel(f, target.path, String(target.id));
+        if (!added) {
+          tr('passo5ItemPulado', {
+            targetPath: target.path,
+            itemName: String(f.name ?? ''),
+            isFolder: !!f.folder,
+            isFile: !!f.file,
+            razoes: ['nao_bate_regex_xlsx_xlsm_xls']
+          });
+        }
+        continue;
+      }
+      if (f.folder) {
+        // NÍVEL 2 — SUBPASTA DENTRO da pasta-alvo.
+        // 2 casos:
+        //   CASO A) subpasta = "Importados" (diretamente na pasta-alvo tipo Extrato Recurso) → desce e procura Excel dentro.
+        //   CASO B) subpasta = órgão (TRE, TRT, ADFEGO etc) → desce e depois, se não achar Excel, desce "Importados" NÍVEL 3.
+        const subName = String(f.name ?? '').trim();
+        const subNameNorm = normalizeNameForMatch(subName);
+        const isImportadosDireto = subNameNorm === 'importados' || subNameNorm.endsWith(' importados') || subNameNorm.startsWith('importados ');
+        const subPath = `${target.path}/${subName}`;
+        const subId = String(f.id);
+        if (isImportadosDireto) {
+          // CASO A: IGNORAR pasta Importados (TODAS as pastas, ordem explícita usuário)
+          // Não desce, não lê arquivos dentro. Pula totalmente.
+          const subKidsPreview = await safeListChildren(subId);
+          tr('passo5IgnoradoImportadosNivel2', {
+            targetPath: target.path,
+            subpasta: subName,
+            subpastaPath: subPath,
+            totalItensPulos: subKidsPreview.length,
+            motivoIgnorar: 'usuario_ordem_ignorar_pasta_importados_todas_pastas'
+          });
+          continue;
+        }
+        // CASO B: subpasta órgão (TRE / TRT / ADFEGO / etc) dentro da pasta-alvo tipo Relatório Orgão.
+        tr('passo5DescendoSubpastaOrgao', {
+          targetPath: target.path,
+          subpasta: subName,
+          subpastaPath: subPath
+        });
+        const subKids = await safeListChildren(subId);
+        tr('passo5SubpastaOrgaoItensDetalhe', {
+          subpastaPath: subPath,
+          totalItensSubpasta: subKids.length,
+          itens: subKids.map((sk, idx) => ({
+            idx,
+            name: String(sk.name ?? ''),
+            isFolder: !!sk.folder,
+            isFile: !!sk.file,
+            isDocRegex: isDoc(String(sk.name ?? ''))
+          }))
+        });
+        let subAdded = 0;
+        for (const sf of subKids) {
+          if (sf.file) {
+            const ok = pushIfExcel(sf, subPath, subId);
+            if (ok) subAdded++;
+          }
+        }
+        // ====== NÍVEL 3 (RECUSÃO FINAL): se subpasta órgão NÃO tem Excel no N2,
+        //        desce 1 nível em pastas internas (normalmente "Importados") —
+        //        é a estrutura padrão usada no SharePoint (9 pastas órgão → /Importados/*.xlsx)
+        //        ===> EXCEÇÃO USUÁRIO EXPLÍCITA: IGNORAR pasta Importados em TODAS as pastas,
+        //            por isso, se l3Name normalizado for "Importados", pula sem ler.
+        if (subAdded === 0) {
+          const level3Folders = subKids.filter((x) => x.folder) as Array<typeof subKids[number]>;
+          for (const l3f of level3Folders) {
+            const l3Name = String(l3f.name ?? '').trim();
+            const l3NameNorm = normalizeNameForMatch(l3Name);
+            const isL3Importados = l3NameNorm === 'importados' || l3NameNorm.endsWith(' importados') || l3NameNorm.startsWith('importados ');
+            const l3Id = String(l3f.id);
+            const l3Path = `${subPath}/${l3Name}`;
+            if (isL3Importados) {
+              tr('passo5IgnoradoImportadosNivel3', {
+                subpastaOrgaoPath: subPath,
+                nivel3Nome: l3Name,
+                nivel3Path: l3Path,
+                motivoIgnorar: 'usuario_ordem_ignorar_pasta_importados_todas_pastas'
+              });
+              continue;
+            }
+            tr('passo5DescendoNivel3', {
+              subpastaOrgaoPath: subPath,
+              nivel3Nome: l3Name,
+              nivel3Path: l3Path,
+              motivo: 'nenhum_excel_encontrado_nivel2'
+            });
+            const l3Kids = await safeListChildren(l3Id);
+            let l3Added = 0;
+            for (const l3Item of l3Kids) {
+              if (l3Item.file) {
+                const ok = pushIfExcel(l3Item, l3Path, l3Id);
+                if (ok) { l3Added++; subAdded++; }
+              }
+            }
+            tr('passo5Nivel3Concluido', {
+              nivel3Path: l3Path,
+              totalItens: l3Kids.length,
+              excelAdicionadosNivel3: l3Added
+            });
+          }
+        }
+        tr('passo5SubpastaOrgaoConcluida', {
+          subpastaPath: subPath,
+          totalItensSubpasta: subKids.length,
+          excelAdicionados: subAdded
+        });
+        continue;
+      }
+    }
+  }
+  tr('final', { found: out.length, files: out.map((x) => x.name).slice(0, 5), targetsCount: targetIds.length });
   return out;
 }
 
@@ -4373,7 +4585,7 @@ async function readExtratoPdfTable(
   return { headers, rows: merged };
 }
 
-async function readRelatorioTable(fileName: string, file: Buffer): Promise<{
+export async function readRelatorioTable(fileName: string, file: Buffer): Promise<{
   headers: string[];
   rows: Array<Record<string, unknown>>;
 }> {
@@ -4386,25 +4598,196 @@ async function readRelatorioTable(fileName: string, file: Buffer): Promise<{
   const pdfParse = await getPdfParse();
   const parsed = await pdfParse(file);
   const text = String(parsed.text ?? '');
+  // Preserva TABs para separar Atividade (opcional) e CPF nas linhas cliente/operacao.
+  // Só colapsa ESPAÇOS consecutivos (2+) em 1 único espaço, mantendo \t intacto.
   const lines = text
     .split(/\r?\n/g)
-    .map((l) => l.trim().replace(/\s+/g, ' '))
+    .map((l) => l.trim().replace(/[ ]{2,}/g, ' '))
     .filter(Boolean)
-    .filter((l) => !/opera[cç][aã]o/i.test(l) || !/parcela|valor/i.test(l));
+    .filter((l) => !(/opera[cç][aã]o/i.test(l) && /parcela|valor/i.test(l)));
+
+  // ============================================================================
+  // SISBR PDF: PARSER POSICIONAL (REGEX FORTE PRIORIDADE MÁXIMA)
+  // Padrão oficial SISBR "Relatório de Parcelas a Vencer" 25/08/2026 (TRE-GO, TRT, etc)
+  // ESTRUTURA LINHAS:
+  //   TOPO: EMPRESA:\n1004 - XXX\n45039 - TRIBUNAL REGIONAL... ÓRGÃO: → extrai EMPRESA
+  //         PERÍODO: 01/08/2026 31/08/2026 → Copetencia = MM/YYYY
+  //         "Relatório de Parcelas a Vencer DD/MM/YYYY" → vencimentoDefault (operações de 10 campos)
+  //   LINHA CLIENTE: <Cliente HIFEN-DV> <Matrícula(digitos)> <Nome> <Tel(digitos)> [\t <Atividade> ] \t <CPF>
+  //                  Atividade é OPCIONAL (ex: TRE-GO cliente 2/3 não tem)
+  //   LINHA OPERAÇÃO (11 campos, COM Vencimento): <Op> <Parcela> <Mod> <VenctoOp> <TxJ> <Venc> <VOp> <VParc> <VJur> <Val> <Rend>
+  //   LINHA OPERAÇÃO (10 campos, SEM Vencimento = vencimentoDefault): <Op> <Parcela> <Mod> <VenctoOp> <TxJ> <VOp> <VParc> <VJur> <Val> <Rend>
+  //   PULAR: Total Cliente/Empresa/Cooperativa/Central/Geral, headers repetidos, TOTAIS, EMP-158, -- X of Y --
+  // ============================================================================
+  try {
+    const sisbrHeaderRe = /(?:SISBR\s+2\.0|Relatório\s+de\s+Parcelas\s+a\s+Vencer)/;
+    if (sisbrHeaderRe.test(text)) {
+      // ---------------- EMPRESA ----------------
+      let empresaHeader = '';
+      const orgaoRe = /(?:^|\n)\s*([^\n]{0,200}?\d{3,6}\s*-\s*[^\n]{0,200}?)\s*ÓRGÃO\s*:/s;
+      const mOrgao = text.match(orgaoRe);
+      if (mOrgao && mOrgao[1]) {
+        empresaHeader = mOrgao[1].replace(/\s+/g, ' ').trim();
+      }
+      if (!empresaHeader) {
+        const mEmp = text.match(/EMPRESA\s*:\s*\n([^\n]+)\s*\n([^\n]+)/s);
+        if (mEmp && mEmp[2]) empresaHeader = mEmp[2].replace(/\s+/g, ' ').trim();
+      }
+      if (!empresaHeader) {
+        empresaHeader = fileName.replace(/\.pdf$/i, '').trim();
+      }
+      // ---------------- COPETENCIA (MM/YYYY) ----------------
+      let copetencia = '';
+      const perRe = /PERÍODO\s*:\s*(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/;
+      const mPer = text.match(perRe);
+      if (mPer && mPer[2]) {
+        const parts = mPer[2].split('/'); if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
+      } else if (mPer && mPer[1]) {
+        const parts = mPer[1].split('/'); if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
+      }
+      // ---------------- VENCIMENTO DEFAULT (para opRe10 = 10 campos sem Vencimento) ----------------
+      // Extrai de "Relatório de Parcelas a Vencer 25/08/2026"
+      let vencimentoDefault = '';
+      const venDefRe = /Relatório\s+de\s+Parcelas\s+a\s+Vencer\s+(\d{2}\/\d{2}\/\d{4})/;
+      const mVenDef = text.match(venDefRe);
+      if (mVenDef && mVenDef[1]) vencimentoDefault = mVenDef[1].trim();
+      // Fallback: data final do PERÍODO se não achar no título
+      if (!vencimentoDefault && mPer && mPer[2]) {
+        const parts = mPer[2].split('/');
+        if (parts.length === 3) vencimentoDefault = `25/${parts[1]}/${parts[2]}`;
+      }
+      // ---------------- REGEX LINHAS ----------------
+      // Op 11 campos (COM Vencimento explícito na 6ª posição):
+      const opRe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
+      // Op 10 campos (SEM Vencimento → usa vencimentoDefault): Vencimento é omitido da 6ª posição
+      const opRe10 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
+      // Cliente COM Atividade (PESSOA FISICA / PESSOA JURIDICA / OUTROS) entre TABS:
+      const cliReComAtiv = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
+      // Cliente SEM Atividade (só TAB para CPF, sem campo intermediário):
+      const cliReSemAtiv = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
+      const skipRe = /^\s*(Total\s+(Cliente|Empresa|Cooperativa|Central|Geral)\s*:|CENTRAL\s*:|EMPRESA\s*:|ÓRGÃO\s*:|COOPERATIVA\s*:|Hora\s+Emissão\s*:|Data\s+Emissão\s*:|Data\s+Processamento\s*:|PERÍODO\s*:|SISBR\s+2\.0|Relatório\s+de\s+Parcelas|Matrícula\s*$|Valor\s+Juros\s+Valorização|Atividade\s*$|Valor\s+Operação\s*$|Telefone\s*$|Tx\.\s*Juros|Vencto\.\s*Operação|Operação\s*$|Cliente\s*$|Parcela\s+Valor\s+Parcela|Nome\s*$|Rendas\s+Apropriar|Vencimento\s*$|CPF\s*$|\*\s+parcela\s+em\s+carência|EMP-158\s+Pag\.\s*:|--\s+\d+\s+of\s+\d+\s+--|Total\s+Geral\s*:)/i;
+      type C = { Cliente: string; Matrícula: string; Nome: string; Telefone: string; Atividade: string; CPF: string };
+      let currentClient: C | null = null;
+      const resultRows: Array<Record<string, unknown>> = [];
+      const resultHeaders = [
+        'EMPRESA', 'Cliente', 'Matrícula', 'CPF', 'Nome', 'Atividade', 'Telefone',
+        'Operação', 'Modalidade', 'Vencto. Operação', 'Tx. Juros', 'Parcela', 'Vencimento',
+        'Valor Operação', 'Valor Parcela', 'Valor Juros', 'Valorização', 'Rendas Apropriar', 'Copetencia',
+      ];
+      for (const l of lines) {
+        const ll = l.trim();
+        if (!ll) continue;
+        if (skipRe.test(ll)) continue;
+        // ----- Tenta linha cliente (primeiro com atividade, depois sem) -----
+        let cM = ll.match(cliReComAtiv);
+        if (cM) {
+          currentClient = {
+            Cliente: cM[1],
+            Matrícula: cM[2],
+            Nome: cM[3].replace(/\s+/g, ' ').trim(),
+            Telefone: cM[4],
+            Atividade: (cM[5] || '').toUpperCase().replace(/\s+/g, ' ').trim(),
+            CPF: cM[6],
+          };
+          continue;
+        }
+        cM = ll.match(cliReSemAtiv);
+        if (cM) {
+          currentClient = {
+            Cliente: cM[1],
+            Matrícula: cM[2],
+            Nome: cM[3].replace(/\s+/g, ' ').trim(),
+            Telefone: cM[4],
+            Atividade: '',
+            CPF: cM[5],
+          };
+          continue;
+        }
+        // ----- Tenta linha operação 11 campos (Vencimento explícito) -----
+        const oM11 = ll.match(opRe11);
+        if (oM11) {
+          resultRows.push({
+            EMPRESA: empresaHeader,
+            Cliente: currentClient?.Cliente ?? '',
+            Matrícula: currentClient?.Matrícula ?? '',
+            CPF: currentClient?.CPF ?? '',
+            Nome: currentClient?.Nome ?? '',
+            Atividade: currentClient?.Atividade ?? '',
+            Telefone: currentClient?.Telefone ?? '',
+            Operação: oM11[1],
+            Modalidade: oM11[3],
+            'Vencto. Operação': oM11[4],
+            'Tx. Juros': oM11[5],
+            Parcela: oM11[2],
+            Vencimento: oM11[6],
+            'Valor Operação': oM11[7],
+            'Valor Parcela': oM11[8],
+            'Valor Juros': oM11[9],
+            Valorização: oM11[10],
+            'Rendas Apropriar': oM11[11],
+            Copetencia: copetencia,
+          });
+          continue;
+        }
+        // ----- Tenta linha operação 10 campos (Vencimento = vencimentoDefault) -----
+        const oM10 = ll.match(opRe10);
+        if (oM10) {
+          resultRows.push({
+            EMPRESA: empresaHeader,
+            Cliente: currentClient?.Cliente ?? '',
+            Matrícula: currentClient?.Matrícula ?? '',
+            CPF: currentClient?.CPF ?? '',
+            Nome: currentClient?.Nome ?? '',
+            Atividade: currentClient?.Atividade ?? '',
+            Telefone: currentClient?.Telefone ?? '',
+            Operação: oM10[1],
+            Modalidade: oM10[3],
+            'Vencto. Operação': oM10[4],
+            'Tx. Juros': oM10[5],
+            Parcela: oM10[2],
+            Vencimento: vencimentoDefault,
+            'Valor Operação': oM10[6],
+            'Valor Parcela': oM10[7],
+            'Valor Juros': oM10[8],
+            Valorização: oM10[9],
+            'Rendas Apropriar': oM10[10],
+            Copetencia: copetencia,
+          });
+          continue;
+        }
+      }
+      if (resultRows.length > 0) return { headers: resultHeaders, rows: resultRows };
+    }
+  } catch (_eSisbrPos) {
+    try { safeLogError('readRelatorioTable SISBR positional regex parser', _eSisbrPos); } catch { /* ignore */ }
+  }
 
   const headers = ['Operação', 'Vencimento', 'Parcela', 'Valor Operação'];
-  const rows: Array<Record<string, unknown>> = [];
+  let rows: Array<Record<string, unknown>> = [];
   const moneyRe =
-    /\b\d{1,3}(?:\.\d{3})*,\d{2}\b|\b\d+,\d{2}\b|\b\d+\.\d{2}\b/g;
-  const dateRe = /\b(\d{1,2}\/\d{1,2}\/\d{2,4})\b/;
-  const opRe = /\b\d{6,}\b/;
+    /R\$\s*\d{1,3}(?:\.\d{3})*,\d{2}|R\$\s*\d+,\d{2}|R\$\s*\d+\.\d{2}|\b\d{1,3}(?:\.\d{3})*,\d{2}\b|\b\d+,\d{2}\b|\b\d+\.\d{2}\b/g;
+  const dateRe =
+    /\b(\d{1,2}\/\d{1,2}\/\d{2,4})\b|\b(\d{1,2}[-_\. ](?:janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez|january|february|march|april|june|july|august|september|october|november|december)[-_\. ]\d{2,4})\b/i;
+  const opRe = /\b\d{2,6}-\d{1,2}\b|\b\d{3,}\b/;
 
   const extractMoney = (s: string): string | null => {
     const matches = s.match(moneyRe);
     if (!matches || matches.length === 0) return null;
-    const raw = matches[matches.length - 1];
+    const raw = matches[matches.length - 1].replace(/R\$\s*/i, '').trim();
+    if (!raw) return null;
     if (raw.includes(',')) return raw;
     return raw.replace('.', ',');
+  };
+
+  const extractAllMoneys = (s: string): string[] => {
+    const matches = s.match(moneyRe);
+    if (!matches || matches.length === 0) return [];
+    return matches.map((m) => {
+      const raw = m.replace(/R\$\s*/i, '').trim();
+      if (!raw) return '';
+      if (raw.includes(',')) return raw;
+      return raw.replace('.', ',');
+    }).filter(Boolean);
   };
 
   const extractOperation = (s: string): string | null => {
@@ -4414,7 +4797,44 @@ async function readRelatorioTable(fileName: string, file: Buffer): Promise<{
 
   const extractDate = (s: string): string | null => {
     const m = dateRe.exec(s);
-    return m ? m[1] : null;
+    if (!m) return null;
+    return m[1] ?? m[2] ?? null;
+  };
+
+  const extractFallbackFromRawText = (
+    allTextLines: string[],
+  ): Array<Record<string, unknown>> => {
+    const out: Array<Record<string, unknown>> = [];
+    let buf = '';
+    const pushFromBuf = (raw: string) => {
+      const line = raw.trim().replace(/\s+/g, ' ');
+      const moneys = extractAllMoneys(line);
+      if (moneys.length === 0) return;
+      const op = extractOperation(line);
+      const venc = extractDate(line);
+      const mainValue = moneys[moneys.length - 1];
+      if (!mainValue) return;
+      out.push({
+        Operação: op ?? '',
+        Vencimento: venc ?? '',
+        Parcela: mainValue,
+        'Valor Operação': mainValue,
+      });
+    };
+    for (const l of allTextLines) {
+      if (/^\s*$/.test(l)) { if (buf.trim().length) { pushFromBuf(buf); buf = ''; } continue; }
+      const hasMoney = /\d,\d{2}|\d\.\d{2}|R\$/i.test(l);
+      if (hasMoney && buf.trim().length === 0 && extractAllMoneys(l).length >= 1) {
+        pushFromBuf(l);
+        buf = '';
+      } else if (hasMoney || /\d{3,}/.test(l) || /\/\d{2,4}/.test(l)) {
+        buf = `${buf} ${l}`.trim();
+      } else {
+        if (buf.trim().length) { pushFromBuf(buf); buf = ''; }
+      }
+    }
+    if (buf.trim().length) pushFromBuf(buf);
+    return out;
   };
 
   let carry = '';
@@ -4429,9 +4849,9 @@ async function readRelatorioTable(fileName: string, file: Buffer): Promise<{
       continue;
     }
 
-    if (op && value) {
+    if (value) {
       rows.push({
-        Operação: op,
+        Operação: op ?? '',
         Vencimento: venc ?? '',
         Parcela: value,
         'Valor Operação': value,
@@ -4444,12 +4864,111 @@ async function readRelatorioTable(fileName: string, file: Buffer): Promise<{
   }
 
   if (rows.length === 0) {
-    throw new Error(
-      'Relatório em PDF: não foi possível extrair linhas (layout do arquivo pode ter mudado).',
-    );
+    const fb = extractFallbackFromRawText(lines);
+    if (fb.length > 0) rows = fb;
+  }
+
+  // Fallback final de ALL-MONEYS (antes gerava 0/0 com dinheiro em Parcela; DESATIVADO por
+  // GERAR_TOTAIS como se fossem linhas. Só usar em cenários EXTREMOS onde nem carry nem raw
+  // funcionaram. Se você chegou aqui com SISBR oficial, significa que o regex posicional acima
+  // precisa ser ajustado, NÃO disparar este fallback.
+  if (false && rows.length === 0 && text.trim().length > 0) {
+    const allMoneys = extractAllMoneys(text.replace(/\r?\n/g, ' \n '));
+    if (allMoneys.length > 0) {
+      for (let i = 0; i < allMoneys.length; i++) {
+        rows.push({
+          Operação: '',
+          Vencimento: '',
+          Parcela: allMoneys[i],
+          'Valor Operação': allMoneys[i],
+        });
+      }
+    }
   }
 
   return { headers, rows };
+}
+
+export async function debugLocalSisbrPdfFile(
+  filePathAbs: string,
+): Promise<{
+  ok: boolean;
+  filePath: string;
+  fileExists: boolean;
+  fileName: string;
+  fileSizeBytes: number | null;
+  pdfText: string | null;
+  pdfTextLength: number;
+  extractResult: {
+    headers: string[];
+    rows: Array<Record<string, unknown>>;
+  } | null;
+  extractRowsCount: number;
+  headersFirst30: Array<{ key: string; sampleRow0: unknown; sampleRow1: unknown }>;
+  rowsFirst20: Array<Record<string, unknown>>;
+  allMoneysCount: number;
+  allMoneysFirst30: string[];
+  error?: string;
+}> {
+  type R = Awaited<ReturnType<typeof debugLocalSisbrPdfFile>>;
+  const result: R = {
+    ok: true,
+    filePath: filePathAbs,
+    fileExists: false,
+    fileName: path.basename(filePathAbs),
+    fileSizeBytes: null,
+    pdfText: null,
+    pdfTextLength: 0,
+    extractResult: null,
+    extractRowsCount: 0,
+    headersFirst30: [],
+    rowsFirst20: [],
+    allMoneysCount: 0,
+    allMoneysFirst30: [],
+  };
+  try {
+    if (!fs.existsSync(filePathAbs)) {
+      result.ok = false;
+      result.error = `Arquivo não encontrado em ${filePathAbs}`;
+      return result;
+    }
+    result.fileExists = true;
+    const st = fs.statSync(filePathAbs);
+    result.fileSizeBytes = st.size;
+    const buf = fs.readFileSync(filePathAbs);
+    const parseFn = await getPdfParse();
+    const parsed = await parseFn(buf);
+    const text = typeof parsed?.text === 'string' ? parsed.text : '';
+    result.pdfText = text.slice(0, 12000);
+    result.pdfTextLength = text.length;
+    const moneyRe = /(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d{1,2})/g;
+    const moneyMatches = Array.from(text.matchAll(moneyRe) || []).map((m) => m[0]);
+    result.allMoneysCount = moneyMatches.length;
+    result.allMoneysFirst30 = moneyMatches.slice(0, 30);
+    const extracted = await readRelatorioTable(result.fileName, buf);
+    result.extractResult = extracted;
+    result.extractRowsCount = extracted.rows.length;
+    result.rowsFirst20 = extracted.rows.slice(0, 20).map((r) => {
+      const out: Record<string, unknown> = {};
+      const keys = Object.keys(r);
+      for (const k of keys.slice(0, 12)) {
+        const v = r[k];
+        if (typeof v === 'string' && v.length > 80) out[k] = v.slice(0, 80) + `...(${v.length} chars)`;
+        else out[k] = v;
+      }
+      return out;
+    });
+    result.headersFirst30 = extracted.headers.slice(0, 30).map((h) => ({
+      key: h,
+      sampleRow0: extracted.rows[0]?.[h] ?? null,
+      sampleRow1: extracted.rows[1]?.[h] ?? null,
+    }));
+    return result;
+  } catch (e) {
+    result.ok = false;
+    result.error = e instanceof Error ? e.message : String(e ?? 'Erro desconhecido em debugLocalSisbrPdfFile');
+    return result;
+  }
 }
 
 async function openDatabase(dbPath: string): Promise<Database> {
@@ -6329,17 +6848,49 @@ function ensureDefaultLearningProfiles(db: Database) {
       moveToImportadosSubfolderAfterImport: true,
     },
   });
-  // ========= REGRA OFICIAL GRAVADA em 2026-08-19 — RELATÓRIOS (Relatório de Órgão / Sisbr) =========
-  //   [S1] Pasta alvo: Relatório(s) de Órgão / Relatório Orgão / Sisbr.
-  //   [S2] Qualquer arquivo .xlsx/.xlsm/.xls aceito; flexible columns schema (sem strict whitelist).
-  //   [S3] Anti-duplicata + BFS pula Importados + pós-insert move opcional.
+  // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — RELATÓRIOS SISBR (Relatório de Parcelas a Vencer · PDF + Excel) =========
+  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra substitui a versão anterior de 19/08 (que aceitava apenas Excel).
+  // Requisitos confirmados e VALIDADOS EM PRODUÇÃO 25/08/2026 22:10 BRT pelo usuário via front (Importar Manual):
+  //   [S0] Formato fonte = SISBR PDF "Relatório de Parcelas a Vencer DD/MM/YYYY" (posicional 2 linhas por bloco Cliente + Operação).
+  //        Fallback: Excel .xlsx/.xlsm/.xls continua aceito (SISBR pode enviar Excel em meses alternativos).
+  //   [S1] Parser POSICIONAL D5 (readRelatorioTable L4588-L4763) — REGRA OBRIGATÓRIA PARA NÃO GERAR COLUNAS ERRADAS:
+  //        (i) PRESERVA TABs entre Atividade (opcional) · CPF (regex [ ]{2,} em vez de \\s+).
+  //        (ii) vencimentoDefault EXTRAÍDO DO TÍTULO do PDF → fallback para OPERAÇÕES de 10 CAMPOS (SEM Vencimento explícito).
+  //        (iii) 2 variações CLIENTE (cliReComAtiv / cliReSemAtiv): Atividade OPCIONAL.
+  //        (iv) 2 variações OPERAÇÃO (opRe11 / opRe10): 11 campos (COM Vencimento 6ª posição) OU 10 campos (usa vencimentoDefault).
+  //        (v) Interpolação 1 Cliente ↔ N Operações (carry forward Cliente entre linhas operação).
+  //        (vi) skipRe obrigatório: TOTAIS / TOTAL Cliente / TOTAL Empresa / TOTAL Cooperativa / TOTAL Central / TOTAL Geral /
+  //             cabeçalhos repetidos / "* parcela em carência" / "EMP-158 Pag.:" / "-- X of Y --".
+  //        (vii) Fallback carry antigo intacto para relatórios NÃO SISBR (compatibilidade 100%).
+  //        (viii) Fallback fulltext "dinheiro em Parcela" DESATIVADO (RCA20 — evita valores monetários no campo Parcela).
+  //   [S2] Pipeline transformação (ver blocos kindLower === 'relatorio'):
+  //        (a) target_table = relatorio_consignado (20 colunas oficiais: EMPRESA, Cliente, Matrícula, CPF, Nome, Atividade,
+  //            Telefone, Operação, Modalidade, "Vencto. Operação", "Tx. Juros", Parcela, Vencimento, "Valor Operação",
+  //            "Valor Parcela", "Valor Juros", Valorização, "Rendas Apropriar", Copetencia, __source_file).
+  //        (b) Copetencia = MÊS DO ARQUIVO + 1 (convenção RCAs / Lógica Competência. Ex: arquivo Julho → 08/2026).
+  //            Fallback = campo "PERÍODO: D1 D2" do PDF (segunda data → mês/ano).
+  //        (c) EMPRESA = extraído do cabeçalho "EMPRESA:" / "[4XXXX - NOME DO ÓRGÃO] ÓRGÃO:" topo do PDF.
+  //   [S3] Idempotência 2 camadas (AMBAS ativadas via checkDuplicateContent=true):
+  //        (CAMADA-1) imported_row_hashes kind=learning_profile:relatorio_consignado (hash por LINHA).
+  //        (CAMADA-2) consignado_app_config chaves imported_file_sha256::v1::{sha256} (hash do ARQUIVO INTEIRO).
+  //   [S4] Pós-insert OK: move arquivo para subpasta "Importados" da mesma pasta pai (moveToImportadosSubfolderAfterImport=true).
+  //   [S5] Ignorar subpasta "Importados" SEMPRE (qualquer nível, case insensitive) — NÃO desce para vasculhar.
+  //   [S6] RC19 regra ERRO: se insertedRows=0 E skippedRows=0 → outcome=failed (email notificação failed).
   upsertLearningProfile(db, {
     id: 'relatorio_orgao_sisbr',
     kind: 'relatorio',
     matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
-    fileNameRegex: '.*\\.(xlsx|xlsm|xls)$',
-    targetTable: 'relatorios',
+    fileNameRegex: '.*\\.(pdf|xlsx|xlsm|xls)$',
+    targetTable: 'relatorio_consignado',
     options: {
+      isRelatorioSisbrDefinitiveProfile: true,
+      profileVersion: '2026-08-25_D5_RCAs1-21',
+      sisbrParser: 'posicional_D5',
+      sisbrVencimentoDefaultFromTitle: true,
+      sisbrKeepTabsForAtividade: true,
+      sisbr2VariantsCliente: true,
+      sisbr2VariantsOperacao: true,
+      sisbrSkipTotalsStrict: true,
       mode: 'append',
       folderCandidates: [
         'Relatórios de Órgão',
@@ -25821,6 +26372,9 @@ function escapeHtml(value: string): string {
 function getEmailLogoDataUri(): string | null {
   try {
     const candidates = [
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
       path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
       path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
       path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
@@ -25829,7 +26383,9 @@ function getEmailLogoDataUri(): string | null {
     if (!p) return null;
     const buf = fs.readFileSync(p);
     if (!buf || buf.length === 0) return null;
-    return `data:image/png;base64,${buf.toString('base64')}`;
+    const ext = String(path.extname(p) ?? '.png').replace(/^\./, '').toLowerCase() || 'png';
+    const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/png';
+    return `data:${mime};base64,${buf.toString('base64')}`;
   } catch {
     return null;
   }
@@ -25844,7 +26400,9 @@ function buildEmailTemplateHtml(opts: {
   const subtitle = escapeHtml(String(opts.subtitle ?? '').trim());
   const title = escapeHtml(String(opts.title ?? 'Portal Administrativo').trim() || 'Portal Administrativo');
   const logoDataUri = getEmailLogoDataUri();
-  const headerBg = '#003641';
+  const headerBg = '#ffffff';
+  const topBarColor = '#003641';
+  const bottomBarColor = '#00ae9d';
   return `<!doctype html>
 <html>
   <head>
@@ -25860,30 +26418,30 @@ function buildEmailTemplateHtml(opts: {
             </div>`
           : ''
       }
-      <div style="background: linear-gradient(135deg, ${headerBg} 0%, #0b4b58 100%); padding: 18px 24px 16px; border-bottom: 4px solid #00ae9d;">
+      <div style="background: ${headerBg}; border-top: 6px solid ${topBarColor}; border-bottom: 4px solid ${bottomBarColor}; padding: 18px 24px 16px;">
         <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse: collapse;">
           <tr>
-            <td align="left" valign="middle" style="width: 160px; white-space: nowrap;">
+            <td align="left" valign="middle" style="width: 180px; white-space: nowrap;">
               ${
                 logoDataUri
-                  ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height: 28px; background-color: rgba(255,255,255,0.04); padding: 4px 8px; border-radius: 6px; display: block;">`
-                  : '<span style="color:white; font-weight:bold;">SICOOB Juriscred</span>'
+                  ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height: 36px; background-color: #f1f5f9; padding: 4px 10px; border-radius: 8px; display: block;">`
+                  : '<span style="color:#0f172a; font-weight:900; font-size:18px;">SICOOB Juriscred</span>'
               }
             </td>
             <td align="center" valign="middle" style="padding:0 12px;">
-              <div style="font-size:24px;font-weight:800;letter-spacing:-0.02em;line-height:1.1;color:#000000;">${title}</div>
-              <div style="font-size:13px;margin-top:6px;line-height:1.35;color:#dbe7ea;">${subtitle}</div>
+              <div style="font-size:26px;font-weight:900;letter-spacing:-0.02em;line-height:1.15;color:#0f172a;">${title}</div>
+              <div style="font-size:13px;margin-top:8px;line-height:1.45;color:#334155;font-weight:600;">${subtitle}</div>
             </td>
-            <td style="width: 160px;">&nbsp;</td>
+            <td style="width: 180px;">&nbsp;</td>
           </tr>
         </table>
       </div>
 
-      <div style="padding: 28px; color: #334155; line-height: 1.65; background:#ffffff;">
+      <div style="padding: 28px; color: #0f172a; line-height: 1.65; background:#ffffff;">
         ${String(opts.contentHtml ?? '')}
       </div>
 
-      <div style="background-color: #f8fafc; border-top:1px solid #e2e8f0; padding: 18px 15px; text-align: center; font-size: 12px; color: #64748b; line-height:1.6;">
+      <div style="background-color: #f8fafc; border-top:1px solid #e2e8f0; padding: 18px 15px; text-align: center; font-size: 12px; color: #334155; line-height:1.6; font-weight:600;">
         © 2026 Sicoob Juriscred • Portal Administrativo<br>
         Desenvolvido Por: Departamento de Tecnologia da Informação - Juriscred<br>
         E-mail automático - Por favor não responder.
@@ -25951,6 +26509,162 @@ function getPortalAdministrativoPublicBaseUrl(): string {
       'https://172.30.0.9:8444',
   ).trim();
   return raw.replace(/\/+$/g, '');
+}
+
+async function sendImportFinishedEmailNotification(input: {
+  notificationTo: string | string[] | null | undefined;
+  forceKind: string | null | undefined;
+  folderUrlPreview: string | null | undefined;
+  outcome: 'success' | 'partial' | 'failed' | 'cancelled';
+  totalFilesScanned: number;
+  totalFilesMatched: number;
+  totalRowsInserted: number;
+  totalRowsSkipped: number;
+  importedFiles: Array<{
+    fileName: string;
+    targetTable: string;
+    kind: string;
+    profileId: string;
+    insertedRows: number;
+    skippedRows: number;
+  }>;
+  errorMessage?: string | null;
+  mode?: string | null;
+}): Promise<{ attempted: boolean; sent: boolean; to: string[]; error?: string | null }> {
+  const out = { attempted: false, sent: false, to: [] as string[], error: null as string | null };
+  try {
+    const recipients = splitEmailRecipients(input.notificationTo);
+    out.to = recipients;
+    if (recipients.length === 0) {
+      out.error = 'Nenhum destinatário de notificação configurado.';
+      return out;
+    }
+    out.attempted = true;
+    const tenantId = String(process.env.AZURE_TENANT_ID ?? '').trim();
+    const clientId = String(process.env.AZURE_CLIENT_ID ?? '').trim();
+    const clientSecret = String(process.env.AZURE_CLIENT_SECRET ?? '').trim();
+    const notificationFrom = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+    if (!tenantId || !clientId || !clientSecret || !notificationFrom) {
+      out.error = 'Configuração de Graph/e-mail incompleta (tenantId/clientId/clientSecret/from).';
+      return out;
+    }
+    let token = '';
+    try { token = await getGraphToken({ tenantId, clientId, clientSecret }); }
+    catch (e) { out.error = `Falha ao obter token Graph: ${e instanceof Error ? e.message : String(e)}`; return out; }
+    if (!token) { out.error = 'Token Graph vazio.'; return out; }
+
+    const outcomeLabel: Record<string, { title: string; sub: string; accent: string }> = {
+      success:   { title: 'Importação concluída com sucesso',     sub: 'Todos os arquivos foram processados.',                       accent: '#166534' },
+      partial:   { title: 'Importação concluída parcialmente',    sub: 'Alguns arquivos tiveram linhas puladas ou processadas.',     accent: '#92400e' },
+      failed:    { title: 'Falha na importação',                   sub: 'Ocorreu um erro durante o processamento dos arquivos.',     accent: '#991b1b' },
+      cancelled: { title: 'Importação cancelada',                  sub: 'A operação foi cancelada antes da conclusão.',              accent: '#475569' },
+    };
+    const display = outcomeLabel[input.outcome] ?? outcomeLabel.failed;
+    const forceKindDisplay = String(input.forceKind ?? 'Não especificado').trim() || 'Não especificado';
+    const modeDisplay = String(input.mode ?? 'append').trim() || 'append';
+    const folderShort = String(input.folderUrlPreview ?? '').trim().slice(0, 180);
+    const isOk = input.totalRowsInserted > 0 && !input.errorMessage;
+    const effectiveOutcome = input.outcome === 'success' ? (isOk ? 'success' : (input.totalRowsSkipped > 0 ? 'partial' : 'success')) : input.outcome;
+
+    const tableRowsHtml = input.importedFiles.length > 0
+      ? `<table width="100%" cellpadding="8" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px;color:#0f172a;background:#ffffff;border:1px solid #cbd5e1;border-radius:14px;overflow:hidden;">
+          <thead>
+            <tr style="background:#0f172a;color:#f8fafc;">
+              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Arquivo</th>
+              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Tabela</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Inseridas</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Puladas</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${input.importedFiles.map((f, i) => {
+              const insOk = Number(f.insertedRows || 0) > 0;
+              const skip = Number(f.skippedRows || 0);
+              const statusLabel = insOk ? (skip > 0 ? 'Processado parcial' : 'Importado') : (skip > 0 ? 'Pulado' : 'Sem alterações');
+              const statusColor = insOk ? (skip > 0 ? '#92400e' : '#14532d') : (skip > 0 ? '#991b1b' : '#334155');
+              const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+              return `<tr style="background:${rowBg};color:#0f172a;">
+                <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;word-break:break-all;font-weight:600;">${escapeHtml(f.fileName)}</td>
+                <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;">${escapeHtml(f.targetTable || f.kind || '-')}</td>
+                <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#0f766e;">${f.insertedRows ?? 0}</td>
+                <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#9a3412;">${f.skippedRows ?? 0}</td>
+                <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:${statusColor};">${statusLabel}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`
+      : `<div style="padding:16px 18px;border-radius:12px;background:#fef2f2;border:1px dashed #fca5a5;color:#991b1b;font-size:13px;font-weight:600;">Nenhum arquivo foi processado nesta execução.</div>`;
+
+    const summaryHtml = `
+      <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin:0 0 22px;">
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;color:#1e3a8a;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;">Arquivos varridos</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalFilesScanned}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;color:#0f766e;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;">Compatíveis</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalFilesMatched}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;color:#14532d;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;">Linhas inseridas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalRowsInserted}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;color:#92400e;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;">Linhas puladas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalRowsSkipped}</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:12px;margin:0 0 26px;">
+        <div style="padding:16px 18px;border-radius:14px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px;color:#334155;">Tipo de importação</div>
+          <div style="font-weight:900;font-size:16px;color:#0f172a;">${escapeHtml(forceKindDisplay)}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px;color:#334155;">Modo</div>
+          <div style="font-weight:900;font-size:16px;color:#0f172a;">${escapeHtml(modeDisplay)}</div>
+        </div>
+      </div>
+      ${folderShort
+        ? `<div style="margin:0 0 22px;padding:14px 16px;border-radius:12px;background:#f1f5f9;border:1px solid #cbd5e1;color:#0f172a;font-size:12.5px;line-height:1.6;word-break:break-all;font-weight:600;">
+            <b style="color:#0f172a;">Origem (SharePoint):</b><br>${escapeHtml(folderShort)}
+          </div>`
+        : ''
+      }
+      ${input.errorMessage
+        ? `<div style="margin:0 0 22px;padding:16px 18px;border-radius:14px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;line-height:1.6;font-weight:600;">
+            <div style="font-weight:900;font-size:15px;margin-bottom:8px;">Erro reportado</div>
+            <div style="font-size:13px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(String(input.errorMessage).slice(0, 4000))}</div>
+          </div>`
+        : ''
+      }
+      <div style="margin:0 0 16px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">Detalhamento por arquivo</div>
+      ${tableRowsHtml}`;
+
+    const html = buildEmailTemplateHtml({
+      title: display.title,
+      subtitle: `${display.sub} • ${forceKindDisplay} • ${modeDisplay.toUpperCase()}`,
+      contentHtml: summaryHtml,
+      introHtml: `<div style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${effectiveOutcome === 'success' ? 'Sucesso' : effectiveOutcome === 'partial' ? 'Parcial' : effectiveOutcome === 'failed' ? 'Falha' : 'Cancelado'}</div>`,
+    });
+    const dataIso = new Date().toISOString().replace('T', ' ').slice(0, 16);
+    const subject = `[Portal Administrativo] Importação ${effectiveOutcome === 'success' ? 'OK' : effectiveOutcome === 'failed' ? 'FALHA' : effectiveOutcome === 'partial' ? 'PARCIAL' : 'CANCELADA'} • ${forceKindDisplay} (${dataIso})`;
+    await sendGraphMail({
+      token,
+      from: notificationFrom,
+      to: recipients,
+      subject,
+      html,
+      importance: effectiveOutcome === 'success' ? 'normal' : 'high',
+    });
+    out.sent = true;
+    return out;
+  } catch (e) {
+    out.attempted = out.attempted || true;
+    out.sent = false;
+    out.error = e instanceof Error ? e.message : String(e ?? 'Falha desconhecida ao enviar notificação.');
+    return out;
+  }
 }
 
 function buildConciliacaoPorDataValidationLink(token: string): string {
@@ -27627,6 +28341,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   folderUrl: string;
   forceKind?: string;
   forceMode?: 'append' | 'replace';
+  notificationTo?: string | string[];
 }, ctxOpts?: {
   onProgressHook?: (partial: { importedFiles: unknown[]; totalFilesScanned?: number; totalFilesMatched?: number; totalRowsInserted?: number; totalRowsSkipped?: number; snapshotPath?: string }) => void;
   cancellationRequested?: () => boolean;
@@ -27645,6 +28360,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   totalFilesMatched: number;
   totalRowsInserted: number;
   totalRowsSkipped: number;
+  notificationEmail?: { attempted: boolean; sent: boolean; to: string[]; error?: string | null };
   // Campos para front-end (CreditoPage.tsx):
   mode: 'append' | 'replace';
   tableName: string | null;
@@ -27811,12 +28527,27 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     });
   }
   // #endregion
+  const SPECIFIC_TARGET_EXCLUDES_PROFILES_AMPLIFICATION = (() => {
+    const k = String(forceKindLower ?? '').trim().toLowerCase();
+    if (!k) return false;
+    if (k === 'both') return false;
+    if (['extratos', 'relatorio'].includes(k)) return true;
+    if (ORGAO_KINDS.has(k)) return true;
+    return false;
+  })();
+
   const triggerAdfegoExpansionEarlyForDb =
-    forceKindLower === 'recurso_adfego' ||
-    profiles.some((p) => String(p?.kind ?? '').toLowerCase() === 'recurso_adfego') ||
-    isOrgaoKind(forceKindLower);
-  const forceKindExtratos = forceKindLower === 'extratos' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'extratos');
-  const forceKindRelatorio = forceKindLower === 'relatorio' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'relatorio');
+    (SPECIFIC_TARGET_EXCLUDES_PROFILES_AMPLIFICATION
+      ? (forceKindLower === 'recurso_adfego' || isOrgaoKind(forceKindLower))
+      : (forceKindLower === 'recurso_adfego' ||
+        profiles.some((p) => String(p?.kind ?? '').toLowerCase() === 'recurso_adfego') ||
+        isOrgaoKind(forceKindLower)));
+  const forceKindExtratos = SPECIFIC_TARGET_EXCLUDES_PROFILES_AMPLIFICATION
+    ? forceKindLower === 'extratos'
+    : (forceKindLower === 'extratos' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'extratos'));
+  const forceKindRelatorio = SPECIFIC_TARGET_EXCLUDES_PROFILES_AMPLIFICATION
+    ? forceKindLower === 'relatorio'
+    : (forceKindLower === 'relatorio' || profiles.some((p) => String(p?.kind ?? '').trim().toLowerCase() === 'relatorio'));
 
   if (triggerAdfegoExpansionEarlyForDb && !folderUrl) {
     folderUrl = fallbackDbUrl;
@@ -27982,14 +28713,25 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 /* ignore expansion errors here — will try below methods */
               }
 
-              // NOVO: DRIVE-LEVEL expansion para EXTRATOS também (quando resolveDirect falhou mas tipo=Extratos)
-              if (candidates.length <= 0 && forceKindExtratos) {
+              // NOVO: DRIVE-LEVEL expansion para EXTRATOS e RELATÓRIO também (quando resolveDirect falhou)
+              if (candidates.length <= 0 && (forceKindExtratos || forceKindRelatorio)) {
                 try {
+                  const defaultSubfolders: string[] = [];
+                  if (forceKindExtratos) {
+                    defaultSubfolders.push('Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso');
+                  }
+                  if (forceKindRelatorio) {
+                    defaultSubfolders.push('Relatórios de Órgão', 'Relatório de Órgão', 'Relatorios de Orgao', 'Relatorio de Orgao',
+                      'Relatórios Orgão', 'Relatório Orgão', 'Relatorios Orgao', 'Relatorio Orgao',
+                      'Relatório Sisbr', 'Relatorios Sisbr', 'Relatório SISBR', 'Sisbr', 'SISBR', 'sisbr');
+                  }
                   const extratosExpanded = await expandRecursoExtratosAnoMesCorrenteCandidates({
                     token: accessToken,
                     driveId: driveIdForExpansion,
-                    baseFolderId: driveIdForExpansion, // quando não temos folderId, a função usa baseFolderId como "raiz" mas primeiro descende para Recuperação de Crédito
+                    baseFolderId: driveIdForExpansion,
                     basePath: parsedUrl.restPath || 'Recuperação de Crédito',
+                    subfolderCandidates: defaultSubfolders,
+                    permitirPdfSisbr: forceKindRelatorio,
                   });
                   for (const e of extratosExpanded) {
                     totalFilesScanned += 1;
@@ -28140,13 +28882,33 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
     }
 
-    if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder && forceKindExtratos) {
+    if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder && (forceKindExtratos || forceKindRelatorio)) {
       try {
+        const defaultSubfoldersForDef: string[] = [];
+        if (forceKindExtratos) {
+          defaultSubfoldersForDef.push('Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso');
+        }
+        if (forceKindRelatorio) {
+          defaultSubfoldersForDef.push('Relatórios de Órgão', 'Relatório de Órgão', 'Relatorios de Orgao', 'Relatorio de Orgao',
+            'Relatórios Orgão', 'Relatório Orgão', 'Relatorios Orgao', 'Relatorio Orgao',
+            'Relatório Sisbr', 'Relatorios Sisbr', 'Relatório SISBR', 'Sisbr', 'SISBR', 'sisbr');
+          // Se tiver um learning profile para relatorio no BD com folderCandidates customizado, usa também (redundância segura)
+          try {
+            const profileRelatorio = profiles.find((p) => String(p.kind ?? '').trim().toLowerCase() === 'relatorio');
+            if (profileRelatorio?.resolvedOptions && Array.isArray((profileRelatorio.resolvedOptions as { folderCandidates?: string[] }).folderCandidates)) {
+              for (const fc of (profileRelatorio.resolvedOptions as { folderCandidates: string[] }).folderCandidates) {
+                if (typeof fc === 'string' && fc.trim()) defaultSubfoldersForDef.push(fc.trim());
+              }
+            }
+          } catch { /* ignore */ }
+        }
         const expanded = await expandRecursoExtratosAnoMesCorrenteCandidates({
           token: accessToken,
           driveId,
           baseFolderId: rootFolderId,
           basePath: String(resolved?.folderPath ?? resolvedItemName ?? '').trim(),
+          subfolderCandidates: defaultSubfoldersForDef,
+          permitirPdfSisbr: forceKindRelatorio,
         });
         for (const e of expanded) {
           totalFilesScanned += 1;
@@ -28158,9 +28920,9 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     }
 
     if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder) {
-      // ===== OTIMIZAÇÃO VELOCIDADE: forceKindExtratos (TRE etc) NÃO roda BFS 8 níveis — nossa função dedicada já resolve tudo.
+      // ===== OTIMIZAÇÃO VELOCIDADE: Extratos OU Relatório (SISBR) NÃO roda BFS 8 níveis — nossa função dedicada já resolve tudo.
       // Isso corta 60+ segundos de duração do job.
-      const skipGenericBfs = Boolean(forceKindExtratos) && candidates.length > 0;
+      const skipGenericBfs = (Boolean(forceKindExtratos) || Boolean(forceKindRelatorio)) && candidates.length > 0;
       if (skipGenericBfs) {
         // No-op: já temos candidates da função expandRecursoExtratos. Pula BFS genérico.
       } else {
@@ -28235,7 +28997,20 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             return String(p.file_name_regex || '').trim() === '' ? p : null;
           }
         })
-        .filter((p): p is LearningProfileMatch => Boolean(p));
+        .filter((p): p is LearningProfileMatch => Boolean(p))
+        .filter((p) => {
+          if (!SPECIFIC_TARGET_EXCLUDES_PROFILES_AMPLIFICATION) return true;
+          const expectedKind = (() => {
+            const k = String(forceKindLower ?? '').trim().toLowerCase();
+            if (['extratos'].includes(k)) return ['extratos', 'extrato'];
+            if (['relatorio'].includes(k)) return ['relatorio', 'relatorios'];
+            if (ORGAO_KINDS.has(k)) return [k];
+            return null;
+          })();
+          if (!expectedKind) return true;
+          const pk = String(p.kind ?? '').trim().toLowerCase();
+          return expectedKind.some((ek) => pk === ek || pk.startsWith(ek));
+        });
 
       let profile: LearningProfileMatch | null = matchingProfiles[0] ?? null;
 
@@ -28253,6 +29028,40 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             target_table: 'extratos',
             options_json: '{}',
             resolvedOptions: {},
+          };
+        }
+      }
+
+      // Profile virtual: se Tipo=Relatório e arquivo é planilha mas não tem Learning Profile salvo no BD,
+      // aceita mesmo assim (insert de relatório é flexível).
+      // REGRA ESPECIAL SISBR: também aceita .pdf se a pasta (folderPath) contiver "sisbr" normalizado.
+      if (!profile && forceKindRelatorio) {
+        const fNameLower = String(file.name ?? '').trim().toLowerCase();
+        const isDocForce = /\.(xlsx|xlsm|xls)$/i.test(fNameLower);
+        let isSisbrPdfForce = false;
+        if (!isDocForce && isPdfFile(String(file.name ?? ''))) {
+          const k = normalizeNameForMatch(String((file as any).folderPath ?? ''));
+          if (k.includes('sisbr') || k.includes('relatorio sisbr')) {
+            isSisbrPdfForce = true;
+          }
+        }
+        if (isDocForce || isSisbrPdfForce) {
+          profile = {
+            id: `__virtual_relatorio_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+            kind: 'relatorio',
+            match_url_contains: '',
+            file_name_regex: '.*',
+            target_table: 'relatorio_consignado',
+            options_json: '{}',
+            resolvedOptions: {
+              __sisbrVirtual: isSisbrPdfForce,
+              moveToImportadosSubfolderAfterImport: true,
+              ignoreImportados: true,
+              checkDuplicateContent: true,
+              extractCompetenciaFromTopHeader: true,
+              strictColumnWhitelist: null,
+              strictColumnMinMatches: 0,
+            },
           };
         }
       }
@@ -28375,7 +29184,11 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           : null;
       const strictMinMatches = Number(profile.resolvedOptions?.strictColumnMinMatches ?? 5) || 0;
       const extractCompet = Boolean(profile.resolvedOptions?.extractCompetenciaFromTopHeader ?? false);
-      const moveToImportados = Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? false);
+      // Mover para Importados: default TRUE quando kind=relatorio (regra oficial), a menos que explicitamente desativado via resolvedOptions.
+      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra';
+      const moveToImportados = profile.resolvedOptions?.moveToImportadosSubfolderAfterImport === false
+        ? false
+        : Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? moveToImportadosDefaultForKind);
 
       // Ignore CSV case: only XLS/XLSX
       if (/\.csv$/i.test(file.name)) {
@@ -28392,12 +29205,56 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         continue;
       }
 
-      const parsed = readSheetTable(buffer, profile.kind);
-      let headersToImport: string[] = parsed.headers;
-      let rowsToImport: Array<Record<string, unknown>> = parsed.rows;
+      // ============================================================
+      // SWITCH EXCLUSIVO SISBR PDF — SOMENTE aqui, sem impactar outros fluxos:
+      // Condição de ativação (TODAS): kind=relatorio AND arquivo=PDF AND (pasta com "sisbr" OU perfil BD=relatorio_orgao_sisbr)
+      // Qualquer outro caso → Excel via SheetJS readSheetTable.
+      // ============================================================
+      const temSisbrNaPasta: boolean = (() => {
+        const k = normalizeNameForMatch(String((file as any).folderPath ?? ''));
+        return k.includes('sisbr') || k.includes('relatorio sisbr');
+      })();
+      const perfilSisbrExplicito = profile.id === 'relatorio_orgao_sisbr' || Boolean((profile.resolvedOptions as any)?.__sisbrVirtual);
+      const ehPdfReal: boolean = (() => {
+        if (isPdfFile(String(file.name ?? ''))) return true;
+        const magic = buffer.indexOf(Buffer.from('%PDF'));
+        return magic !== -1 && magic < 1024;
+      })();
+      const usarParserPdfSisbr = kindLower === 'relatorio' && ehPdfReal && (temSisbrNaPasta || perfilSisbrExplicito);
+
+      const parsedFinal: {
+        headers: string[];
+        rows: Array<Record<string, unknown>>;
+        extractedCompetenciaMmAaaa: string | null;
+        topHeaderLines: string[];
+      } = usarParserPdfSisbr
+        ? (() => {
+            // IIFE async não é necessário aqui abaixo, pois já estamos num escopo async com await.
+            // No entanto, para satisfazer TypeScript sem asserção bruta, montamos inline:
+            // (será sobreescrito abaixo com await para evitar Promises não resolvidas)
+            return {
+              headers: [],
+              rows: [],
+              extractedCompetenciaMmAaaa: null as string | null,
+              topHeaderLines: [] as string[],
+            };
+          })()
+        : readSheetTable(buffer, profile.kind);
+
+      // Resolver definitivamente (escopo já é async):
+      if (usarParserPdfSisbr) {
+        const pdf = await readRelatorioTable(String(file.name ?? ''), buffer);
+        (parsedFinal as any).headers = pdf.headers;
+        (parsedFinal as any).rows = pdf.rows;
+        (parsedFinal as any).extractedCompetenciaMmAaaa = null;
+        (parsedFinal as any).topHeaderLines = [];
+      }
+
+      let headersToImport: string[] = parsedFinal.headers;
+      let rowsToImport: Array<Record<string, unknown>> = parsedFinal.rows;
       let competFromHeader: string | null = null;
       if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
-        competFromHeader = extractCompet ? (parsed.extractedCompetenciaMmAaaa ?? null) : null;
+        competFromHeader = extractCompet ? (parsedFinal.extractedCompetenciaMmAaaa ?? null) : null;
         // Competência fallback de path (2026/Julho → 07/2026)
         if (!competFromHeader && typeof file.folderPath === 'string' && file.folderPath.length > 0) {
           const fp = String(file.folderPath).replace(/\\/g, '/');
@@ -28418,7 +29275,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
           const whitelistNorm = strictWhitelist.map((w) => ({ orig: w, norm: norm(w) }));
           const matchedBySource: Array<{ sourceHeader: string; targetHeader: string }> = [];
-          for (const h of parsed.headers) {
+          for (const h of parsedFinal.headers) {
             const hn = norm(h);
             const hit = whitelistNorm.find((w) => w.norm === hn || (hn && w.norm && (w.norm.startsWith(hn) || hn.startsWith(w.norm)) && Math.abs(w.norm.length - hn.length) <= 5));
             if (hit) matchedBySource.push({ sourceHeader: h, targetHeader: hit.orig });
@@ -28431,11 +29288,11 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               kind: profile.kind,
               profileId: profile.id,
               insertedRows: 0,
-              skippedRows: parsed.rows.length,
-              headers: parsed.headers,
+              skippedRows: parsedFinal.rows.length,
+              headers: parsedFinal.headers,
               skippedReason: `strict_whitelist_matches=${matchedBySource.length} < ${strictMinMatches}`,
             });
-            totalRowsSkipped += parsed.rows.length;
+            totalRowsSkipped += parsedFinal.rows.length;
             {
               const __dbg = __dbg_loaded({ env: true });
               __dbg.report('E/H5', 'import-consignado.ts:post-parse', 'E:arquivo pulado (strict whitelist não bateu)', {
@@ -28443,7 +29300,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 matches: matchedBySource.length,
                 required: strictMinMatches,
                 matchedPreview: matchedBySource.slice(0, 12),
-                headersPreview: parsed.headers.slice(0, 20),
+                headersPreview: parsedFinal.headers.slice(0, 20),
               });
             }
             continue;
@@ -28452,7 +29309,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           const sourceToTarget = new Map<string, string>();
           for (const m of matchedBySource) sourceToTarget.set(m.sourceHeader, m.targetHeader);
           const finalRowsRaw: Array<Record<string, unknown>> = [];
-          for (const src of parsed.rows) {
+          for (const src of parsedFinal.rows) {
             const outRow: Record<string, unknown> = {};
             for (const targetCol of finalHeaders) outRow[targetCol] = null;
             for (const srcKey of Object.keys(src)) {
@@ -28488,7 +29345,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             return badCount >= 2;
           };
           try {
-            const topLines = Array.isArray((parsed as any).topHeaderLines) ? (parsed as any).topHeaderLines as string[] : [];
+            const topLines = Array.isArray((parsedFinal as any).topHeaderLines) ? (parsedFinal as any).topHeaderLines as string[] : [];
             const allText = topLines.join('\n');
             const strip = (s: string) => String(s ?? '').replace(/\s+/g, ' ').trim();
             const firstNotEmpty = (arr: string[]) => {
@@ -28876,7 +29733,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           rowsToImport = finalRows;
         } else if (extractCompet && competFromHeader) {
           // Sem whitelist mas com competência a partir do header: injeta em todas as linhas.
-          rowsToImport = parsed.rows.map((r) => ({ ...r, Copetencia: competFromHeader }));
+          rowsToImport = parsedFinal.rows.map((r) => ({ ...r, Copetencia: competFromHeader }));
           if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
         }
       }
@@ -29018,8 +29875,8 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           table: tableName,
           mode: modeOverride,
           checkDup,
-          rowsInSheet: parsed.rows.length,
-          columns: parsed.headers.length,
+          rowsInSheet: parsedFinal.rows.length,
+          columns: parsedFinal.headers.length,
           importedHeaders: headersToImport.length,
           importedRows: rowsToImport.length,
           insertedRows: res.insertedRows,
@@ -29034,7 +29891,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 }
               : null,
           moveToImportados: (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'extratos' || kindLower === 'relatorio') ? { requested: moveToImportados, result: moveResult } : null,
-          headersPreview: parsed.headers.slice(0, 12),
+          headersPreview: parsedFinal.headers.slice(0, 12),
           importedHeadersPreview: headersToImport.slice(0, 12),
         });
       }
@@ -29047,8 +29904,33 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         profileId: profile.id,
         insertedRows: res.insertedRows,
         skippedRows: res.skippedRows,
-        headers: parsed.headers,
+        headers: parsedFinal.headers,
+        skippedReason:
+          res.insertedRows === 0 && res.skippedRows === 0
+            ? (
+                parsedFinal.rows.length === 0
+                  ? `Nenhuma linha extraída do arquivo. Parser retornou 0 linhas (layout incompatível ou vazio). Headers detectados: ${parsedFinal.headers.length ? parsedFinal.headers.slice(0, 8).join(' | ') : 'nenhum'}`
+                  : `Parser retornou ${parsedFinal.rows.length} linhas, mas nenhuma inserida nem pulada. Causa provável: linhas vazias, duplicatas pré-processadas, ou colunas não compatíveis.`
+              )
+            : undefined,
       });
+      if (res.insertedRows === 0 && res.skippedRows === 0) {
+        const __dbg = __dbg_loaded({ env: true });
+        __dbg.report('E/H5-ZERO', 'import-consignado.ts:per-file', 'E:arquivo sem inseridas nem puladas (0/0 = ERRO)', {
+          fileName: file.name,
+          parsedHeadersLength: parsedFinal.headers.length,
+          parsedRowsLength: parsedFinal.rows.length,
+          headersPreview: parsedFinal.headers.slice(0, 10),
+          rowsPreview: parsedFinal.rows.slice(0, 3).map((r) => {
+            const keys = Object.keys(r);
+            const out: Record<string, unknown> = {};
+            for (const k of keys.slice(0, 6)) out[k] = typeof r[k] === 'string' ? String(r[k]).slice(0, 40) : r[k];
+            return out;
+          }),
+          rowsToImportLength: (typeof rowsToImport !== 'undefined' && Array.isArray(rowsToImport)) ? rowsToImport.length : null,
+          headersToImportLength: (typeof headersToImport !== 'undefined' && Array.isArray(headersToImport)) ? headersToImport.length : null,
+        });
+      }
       totalRowsInserted += res.insertedRows;
       totalRowsSkipped += res.skippedRows;
       if (fileContentSha256) {
@@ -29117,12 +29999,76 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           skippedNoCpf: 0,
         }]
       : [];
+    let notificationEmail: { attempted: boolean; sent: boolean; to: string[]; error?: string | null } | undefined = undefined;
+    try {
+      // Regra oficial do usuário: se nenhuma linha inserida E nenhuma pulada = ERRO, não sucesso.
+      const allZero = totalRowsInserted === 0 && totalRowsSkipped === 0;
+      let outcome: 'success' | 'partial' | 'failed' = 'success';
+      if (allZero) outcome = 'failed';
+      else if (totalRowsInserted > 0 && totalRowsSkipped === 0) outcome = 'success';
+      else if (totalRowsInserted > 0 || totalRowsSkipped > 0) outcome = 'partial';
+      const zeroFilesList = allZero
+        ? importedFiles
+            .filter((f) => Number(f.insertedRows || 0) === 0 && Number(f.skippedRows || 0) === 0)
+            .map((f) => f.fileName)
+            .slice(0, 5)
+            .join(', ')
+        : '';
+      if (allZero) {
+        const errMsg = `Erro: nenhuma linha inserida nem pulada (0/0) em todos os arquivos compatíveis (${totalFilesMatched}).`
+          + (zeroFilesList ? ` Arquivos: ${zeroFilesList}.` : '')
+          + ` Parser retornou 0 linhas nos arquivos. Verifique o formato/layout dos arquivos (PDF deve ter tabelas com valores monetários e datas).`;
+        try {
+          notificationEmail = await sendImportFinishedEmailNotification({
+            notificationTo: opts?.notificationTo,
+            forceKind: opts?.forceKind ?? forceKindLower,
+            folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
+            outcome: 'failed',
+            totalFilesScanned,
+            totalFilesMatched,
+            totalRowsInserted,
+            totalRowsSkipped,
+            importedFiles,
+            errorMessage: errMsg,
+            mode: modeLabel,
+          });
+        } catch (eNotify) {
+          notificationEmail = {
+            attempted: true,
+            sent: false,
+            to: splitEmailRecipients(opts?.notificationTo),
+            error: eNotify instanceof Error ? eNotify.message : String(eNotify ?? 'Erro ao enviar notificação.'),
+          };
+        }
+        throw new Error(errMsg);
+      }
+      notificationEmail = await sendImportFinishedEmailNotification({
+        notificationTo: opts?.notificationTo,
+        forceKind: opts?.forceKind ?? forceKindLower,
+        folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
+        outcome,
+        totalFilesScanned,
+        totalFilesMatched,
+        totalRowsInserted,
+        totalRowsSkipped,
+        importedFiles,
+        mode: modeLabel,
+      });
+    } catch (eNotify) {
+      notificationEmail = {
+        attempted: true,
+        sent: false,
+        to: splitEmailRecipients(opts?.notificationTo),
+        error: eNotify instanceof Error ? eNotify.message : String(eNotify ?? 'Erro ao enviar notificação.'),
+      };
+    }
     return {
       importedFiles,
       totalFilesScanned,
       totalFilesMatched,
       totalRowsInserted,
       totalRowsSkipped,
+      notificationEmail,
       mode: modeLabel,
       tableName: targetTableNameRef.value || null,
       rows: totalRowsInserted,
@@ -29156,6 +30102,21 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       });
     }
     // #endregion
+    try {
+      await sendImportFinishedEmailNotification({
+        notificationTo: opts?.notificationTo,
+        forceKind: opts?.forceKind ?? forceKindLower,
+        folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
+        outcome: 'failed',
+        totalFilesScanned,
+        totalFilesMatched,
+        totalRowsInserted,
+        totalRowsSkipped,
+        importedFiles,
+        errorMessage: e instanceof Error ? e.message : String(e ?? 'Falha desconhecida na importação.'),
+        mode: modeLabel,
+      });
+    } catch { /* ignore notification errors on failure path */ }
     throw wrapGraphAutomationError(
       e instanceof Error ? e : new Error(String(e ?? 'Falha desconhecida na importação via SharePoint.')),
     );
@@ -29170,6 +30131,21 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     } catch {
       /* ignore */
     }
+    try {
+      await sendImportFinishedEmailNotification({
+        notificationTo: opts?.notificationTo,
+        forceKind: opts?.forceKind ?? '',
+        folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
+        outcome: 'failed',
+        totalFilesScanned,
+        totalFilesMatched,
+        totalRowsInserted,
+        totalRowsSkipped,
+        importedFiles,
+        errorMessage: topErr instanceof Error ? topErr.message : String(topErr ?? 'Erro desconhecido na importação.'),
+        mode: modeLabel,
+      });
+    } catch { /* ignore notification errors on top failure path */ }
     throw topErr instanceof Error ? topErr : new Error(String(topErr ?? 'Erro desconhecido na importação.'));
   } finally {
     try {
@@ -29304,12 +30280,32 @@ export async function debugExpandRecursoExtratos(opts: {
       return outBase;
     }
 
+    const forceKindExtratos = forceKindLower === 'extratos' || forceKindLower.startsWith('extrato');
+    const forceKindRelatorio = forceKindLower === 'relatorio' || forceKindLower.startsWith('relator') || forceKindLower === 'sisbr';
+    const subfolderCandidatesForDebug: string[] = [];
+    if (forceKindExtratos) {
+      subfolderCandidatesForDebug.push('Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso');
+    }
+    if (forceKindRelatorio) {
+      subfolderCandidatesForDebug.push('Relatórios de Órgão', 'Relatório de Órgão', 'Relatorios de Orgao', 'Relatorio de Orgao',
+        'Relatórios Orgão', 'Relatório Orgão', 'Relatorios Orgao', 'Relatorio Orgao',
+        'Relatório Sisbr', 'Relatorios Sisbr', 'Relatório SISBR', 'Sisbr', 'SISBR', 'sisbr',
+        'Relatórios', 'Relatório');
+    }
+    // Se nenhum dos dois for especificado (padrão), usar os dois)
+    if (subfolderCandidatesForDebug.length === 0) {
+      subfolderCandidatesForDebug.push('Extrato Recurso', 'Relatório de Órgão', 'Relatório SISBR', 'Relatório Sisbr', 'SISBR', 'Relatórios de Órgão');
+    }
+
+    const permitirPdfSisbrDebug = forceKindRelatorio;
     const candidates = await expandRecursoExtratosAnoMesCorrenteCandidates({
       token: accessToken,
       driveId,
       baseFolderId,
       basePath,
+      subfolderCandidates: subfolderCandidatesForDebug,
       __trace: (step, data) => trPush(`ex.${step}`, data),
+      permitirPdfSisbr: permitirPdfSisbrDebug,
     });
     outBase.candidates = candidates;
     outBase.len = candidates.length;
@@ -29379,8 +30375,10 @@ export async function debugOneshotTreImportSync(opts: { folderUrl?: string; forc
     if (!driveId) { out.error = 'Sem driveId'; return out; }
 
     // Expand candidates
+    const permitirPdfSisbrOneshot = forceKindLower.startsWith('relator') || forceKindLower === 'sisbr';
     const candidates = await expandRecursoExtratosAnoMesCorrenteCandidates({
       token: accessToken, driveId, baseFolderId, basePath,
+      permitirPdfSisbr: permitirPdfSisbrOneshot,
     });
     out.candidatesLen = candidates.length;
     out.candidatesPreview = candidates.slice(0, 5).map(c => ({ name: c.name, path: c.folderPath.slice(0, 80) }));
@@ -29483,6 +30481,8 @@ export async function runImportConsignado(opts: {
   executed: true;
   summary: Record<string, unknown>;
   resultsPerKind: Record<string, ReturnType<typeof importByLearningProfileFromFolderUrl>>;
+  notificationEmail?: { attempted: boolean; sent: boolean; to: string[]; error?: string | null };
+  notificationEmailsByKind?: Record<string, { attempted: boolean; sent: boolean; to: string[]; error?: string | null }>;
 }> {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
@@ -29555,6 +30555,7 @@ export async function runImportConsignado(opts: {
         folderUrl: rootUrl,
         forceKind: k.kind,
         forceMode: String(opts.mode || 'append') === 'replace' ? 'replace' : 'append',
+        notificationTo: opts.notificationTo,
       }, {
         onProgressHook: (p) => {
           if (ctxOpts?.onProgressHook) {
@@ -29620,6 +30621,16 @@ export async function runImportConsignado(opts: {
       };
     }
   }
+  const notificationEmailsByKind: Record<string, { attempted: boolean; sent: boolean; to: string[]; error?: string | null }> = {};
+  let primaryNotificationEmail: { attempted: boolean; sent: boolean; to: string[]; error?: string | null } | undefined = undefined;
+  const kindKeys = Object.keys(resultsPerKind);
+  for (const k of kindKeys) {
+    const rr = resultsPerKind[k];
+    if (rr && typeof rr === 'object' && (rr as any).notificationEmail) {
+      notificationEmailsByKind[k] = (rr as any).notificationEmail;
+      if (!primaryNotificationEmail) primaryNotificationEmail = (rr as any).notificationEmail;
+    }
+  }
   return {
     executed: true,
     summary: {
@@ -29640,6 +30651,8 @@ export async function runImportConsignado(opts: {
       },
     },
     resultsPerKind,
+    notificationEmail: primaryNotificationEmail,
+    notificationEmailsByKind,
   };
 }
 

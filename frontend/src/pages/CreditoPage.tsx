@@ -6449,7 +6449,19 @@ export default function CreditoPage() {
                         const filesMatched = Number(lp?.totalFilesMatched ?? 0)
                         const rowsInserted = Number(lp?.totalRowsInserted ?? 0)
                         const rowsSkipped = Number(lp?.totalRowsSkipped ?? 0)
-                        const baseForProgress = Math.max(100, filesMatched * 100 + rowsInserted + rowsSkipped)
+                        const progressFiles = Array.isArray(lp?.progressFiles) ? lp!.progressFiles! : []
+                        const totalProcessar = Math.max(1, filesMatched > 0 ? filesMatched : filesScanned)
+                        const filesProcessedOK = progressFiles.filter(
+                          (pf) => pf.status === 'done' || pf.status === 'error',
+                        ).length
+                        const pctVarrer =
+                          totalProcessar === 0
+                            ? 0
+                            : Math.min(1, filesScanned / totalProcessar)
+                        const pctArquivos =
+                          totalProcessar === 0
+                            ? 0
+                            : Math.min(1, filesProcessedOK / totalProcessar)
                         const progressRaw =
                           status === 'queued'
                             ? 6
@@ -6457,12 +6469,20 @@ export default function CreditoPage() {
                               ? 100
                               : status === 'failed' || status === 'cancelled'
                                 ? 98
-                                : Math.min(
-                                    95,
-                                    12 + Math.round((((filesScanned + 1) * 18 + (rowsInserted + rowsSkipped)) * 80) / baseForProgress),
-                                  )
+                                : (() => {
+                                    const pesoInit = 8
+                                    const pesoVarrer = 22
+                                    const pesoArquivos = 57
+                                    const pesoFinalizacao = 13
+                                    let p = pesoInit
+                                    p += pesoVarrer * pctVarrer
+                                    p += pesoArquivos * pctArquivos
+                                    const temLinhas = rowsInserted + rowsSkipped > 0
+                                    if (temLinhas && pctArquivos > 0.92) p += pesoFinalizacao
+                                    else if (temLinhas) p += pesoFinalizacao * 0.35
+                                    return Math.max(8, Math.min(95, Math.round(p)))
+                                  })()
                         const progressPct = Math.max(4, Math.min(100, progressRaw))
-                        const progressFiles = Array.isArray(lp?.progressFiles) ? lp!.progressFiles! : []
                         return (
                           <>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
