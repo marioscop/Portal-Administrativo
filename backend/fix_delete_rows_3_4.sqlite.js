@@ -1,0 +1,20 @@
+const initSqlJs = require('sql.js');
+const fs = require('fs');
+const path = require('path');
+(async () => {
+  const SQL = await initSqlJs();
+  const sqlitePath = path.resolve(__dirname, 'data', 'consignado.sqlite');
+  const bak = sqlitePath + '.pre_job4_fix_final_' + Date.now() + '.sqlite';
+  fs.copyFileSync(sqlitePath, bak);
+  console.log('✅ Backup prévio salvo:', bak);
+  const db = new SQL.Database(fs.readFileSync(sqlitePath));
+  console.log('Antes COUNT Recurso TRT=', db.exec('SELECT COUNT(*) FROM "Recurso TRT";')[0].values[0][0], 'MAX rowid=', db.exec('SELECT MAX(rowid) FROM "Recurso TRT";')[0].values[0][0]);
+  const d = db.prepare(`DELETE FROM "Recurso TRT" WHERE rowid=3 OR rowid=4;`); d.step(); d.free();
+  const d1 = db.prepare(`DELETE FROM imported_row_hashes WHERE kind LIKE '%TRT%' OR kind LIKE '%Recurso TRT%';`); d1.step(); d1.free();
+  const d2 = db.prepare(`DELETE FROM consignado_app_config WHERE CAST(value AS TEXT) LIKE '%TRT-JULHO%' OR "key" LIKE '%file_hash%' OR "key" LIKE '%sha256%';`); d2.step(); d2.free();
+  const fb = db.export();
+  fs.writeFileSync(sqlitePath, Buffer.from(fb));
+  db.close();
+  console.log('Depois COUNT=', (new SQL.Database(fs.readFileSync(sqlitePath))).exec('SELECT COUNT(*) FROM "Recurso TRT";')[0].values[0][0], '(esperado 2).');
+  console.log('SQLite salvo=', sqlitePath, '=', fb.byteLength,'bytes.');
+})();

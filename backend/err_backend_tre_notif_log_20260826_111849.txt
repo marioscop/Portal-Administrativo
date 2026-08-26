@@ -1,0 +1,24 @@
+(node:2772) Warning: Setting the NODE_TLS_REJECT_UNAUTHORIZED environment variable to '0' makes TLS connections and HTTPS requests insecure by disabling certificate verification.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[safe-error][2026-08-26T14:30:34.120Z] addMissingColumnsAndImportRows ALTER TABLE relatorio_consignado ADD COLUMN VALOR :: Error: duplicate column name: VALOR
+Error: duplicate column name: VALOR
+    at e.handleError (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\node_modules\sql.js\dist\sql-wasm.js:90:226)
+    at e.tb (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\node_modules\sql.js\dist\sql-wasm.js:88:472)
+    at addMissingColumnsAndImportRows (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:25498:26)
+    at importByLearningProfileFromFolderUrl (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:27317:31)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async runImportConsignado (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:29360:38)
+    at async C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:31456:25
+    at async run (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:31147:28)
+    at async _ImportJobsManagerSingleton._drain (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:31230:28)
+[safe-error][2026-08-26T14:30:35.921Z] addMissingColumnsAndImportRows ALTER TABLE relatorio_consignado ADD COLUMN VALOR :: Error: duplicate column name: VALOR
+Error: duplicate column name: VALOR
+    at e.handleError (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\node_modules\sql.js\dist\sql-wasm.js:90:226)
+    at e.tb (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\node_modules\sql.js\dist\sql-wasm.js:88:472)
+    at addMissingColumnsAndImportRows (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:25498:26)
+    at importByLearningProfileFromFolderUrl (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:27317:31)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async runImportConsignado (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:29360:38)
+    at async C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:31456:25
+    at async run (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:31147:28)
+    at async _ImportJobsManagerSingleton._drain (C:\Users\mario.junior\OneDrive - Sicoob Juriscred\1.Projetos\33.Portal Administrativo\Portal-Administrativo\backend\dist\consignado\import-consignado.js:31230:28)

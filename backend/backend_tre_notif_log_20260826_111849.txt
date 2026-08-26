@@ -1,0 +1,113 @@
+◇ injected env (12) from .env // tip: ⌘ suppress logs { quiet: true }
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:53 [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:53 [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mThrottlerModule dependencies initialized[39m[38;5;3m +11ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:53 [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +2ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mConsignadoController {/api/consignado}:[39m[38;5;3m +821ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/config, GET} route[39m[38;5;3m +4ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/config, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/occurrences-panorama/send, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/status, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/start, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/finish, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/disconnect, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/graph/users/search, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-expand-extratos, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-oneshot-tre-import, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-local-sisbr, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-oneshot-trt-local, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-oneshot-tre-local, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/import, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/recurso-alego/import, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug/ensure-extratos-relatorios, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/health/drive, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/schedules, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/schedules/:id/toggle, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/schedules/:id/run, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/global-config, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/global-config, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/health/geral, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/failures, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/cleanup-ttl, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs/:jobId, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs/:jobId/cancel, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs/stream/:jobId, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/import/sync, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/modalidades, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/modalidades, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-columns, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-columns, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-depara, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-depara, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-depara/delete, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos-consolidacao-recurso, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos-consolidacao-recurso, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos-consolidacao-recurso/delete, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos/historico1-values, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/recurso-tables, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/relatorio-consolidacao-recurso, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/relatorio-consolidacao-recurso, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/relatorio-consolidacao-recurso/delete, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/extratos, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/meses, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/auditoria, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/extratos/detalhe, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/home-status, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/export.xlsx, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/lista/export.xlsx, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencias/export.xlsx, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencias, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/export.pdf, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/validacao/solicitar, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/validacao/decidir, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/validacao/portal, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/export.xlsx, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/export.pdf, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/clonar-para-sisbr, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencia-context, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/inclusao-servidor-acordo-judicial-tjgo, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/tarifa, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/alterar-orgao-relatorio, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/repactuacao-relatorio, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-ccs-excluir-relatorio, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-processo-judicial-excluir-relatorio, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/nao-possui-recurso, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-fora-vencimento, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-antecipada-via-caixa, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/antecipado-devolvido, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/recurso-judicial-valor-a-menor, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/recurso-recebido-a-menor, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/recurso-recebido-a-maior, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/devolucao-parcial-averbacao, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-recurso-judicial, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/estorno-valores, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/fechar, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/reabrir, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/reenviar-contabilidade, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/desfazer-ocorrencia, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/access/emails, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug/event, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/access/emails, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/conciliacao, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/conciliacao.csv, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/conciliacao.xlsx, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/extratos, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/extratos, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/relatorios, GET} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/relatorios, POST} route[39m[38;5;3m +0ms[39m
+[32m[Nest] 2772  - [39m26/08/2026, 11:18:54 [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +2ms[39m
+[FASE3][bootstrap] setTimeout 7s disparado, chamando bootstrapAutomationSystem()...
+[FASE3][bootstrap] INICIANDO bootstrapAutomationSystem()...
+[FASE3][_ensureDefaultSchedules] ATUALIZADO schedule default id=lot_diario_08h_uteis enabled=true nextRunAt=2026-08-27T11:00:00.000Z
+[FASE3][_attachBootstrapListenersOnce] Listener JobManager.on(*) anexado com sucesso.
+[FASE3][bootstrap] ImportJobsManager.inMem size inicial=0
+[FASE3][bootstrap] CONCLUÍDO com sucesso.
+[FASE3][bootstrap] Resultado bootstrap: ok=true cleanupRemoved=0
+[FASE3][Scheduler] Agendamento habilitado, start() em 5s...
+[FASE3][bootstrap][TTL] cleanupOldJobsTtl concluído: removed=0 checked=42 ttlDias=90
+[FASE3][Scheduler] Iniciando setInterval tick_ms=30000

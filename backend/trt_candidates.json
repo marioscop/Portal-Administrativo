@@ -1,0 +1,1067 @@
+{
+  "status": 201,
+  "data": {
+    "ok": true,
+    "folderUrl": "https://sicoobjuriscredcelgbr.sharepoint.com/sites/PortaldeDocumentosSicoobJuriscred/Documents/Diretoria%20Administrativo/Tecnologia%20da%20Informa%C3%A7%C3%A3o/99-Automa%C3%A7%C3%B5es_TI/9.Recupera%C3%A7%C3%A3o%20de%20Cr%C3%A9dito",
+    "len": 0,
+    "candidates": [],
+    "trace": [
+      {
+        "step": "db",
+        "ts": 1787717214421,
+        "data": {
+          "dbFilePath": "C:\\Users\\mario.junior\\OneDrive - Sicoob Juriscred\\1.Projetos\\33.Portal Administr"
+        }
+      },
+      {
+        "step": "token",
+        "ts": 1787717215321,
+        "data": {
+          "tokenLen": 2663
+        }
+      },
+      {
+        "step": "setup",
+        "ts": 1787717215321,
+        "data": {
+          "folderUrlPreview": "https://sicoobjuriscredcelgbr.sharepoint.com/sites/PortaldeDocumentosSicoobJuriscred/Documents/Diretoria%20Administrativo/Tecnologia%20da%20Informa%C3%A7%C3%A3o/99-Automa%C3%A7%C3%",
+          "forceKindLower": "recurso_trt"
+        }
+      },
+      {
+        "step": "resolvedDirect",
+        "ts": 1787717215675,
+        "data": {
+          "ok": true,
+          "driveIdPrefix": "b!z208Ty",
+          "itemName": "9.Recuperação de Crédito"
+        }
+      },
+      {
+        "step": "parsedUrl",
+        "ts": 1787717215675,
+        "data": {
+          "ok": true,
+          "host": "sicoobjuriscredcelgbr.sharepoint.com",
+          "siteName": "PortaldeDocumentosSicoobJuriscred",
+          "libraryName": "Documents",
+          "restPathPreview": "Diretoria Administrativo/Tecnologia da Informação/99-Automações_TI/9.Recuperação"
+        }
+      },
+      {
+        "step": "finalSetup",
+        "ts": 1787717215675,
+        "data": {
+          "driveIdLen": 66,
+          "baseFolderIdEqDriveId": false,
+          "baseFolderIdLen": 34,
+          "basePathPreview": "9.Recuperação de Crédito"
+        }
+      },
+      {
+        "step": "ex.setup",
+        "ts": 1787717215676,
+        "data": {
+          "alvoAno": "2026",
+          "alvoMes0": 6,
+          "alvoMesNorm": "julho",
+          "alvoMesVariacoes": [
+            "Julho",
+            "julho"
+          ],
+          "cleanedBasePath": "9.Recuperação de Crédito",
+          "baseFolderIdLen": 34,
+          "baseFolderIdEqDriveId": false
+        }
+      },
+      {
+        "step": "ex.startMode",
+        "ts": 1787717215676,
+        "data": {
+          "mode": "folderId",
+          "startIdPrefix": "017U2I3T",
+          "startPath": "9.Recuperação de Crédito"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717215818,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 2
+        }
+      },
+      {
+        "step": "ex.anoOk",
+        "ts": 1787717215819,
+        "data": {
+          "yearName": "2026",
+          "yearIdPrefix": "017U2I3T"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717215941,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 4
+        }
+      },
+      {
+        "step": "ex.mesOk",
+        "ts": 1787717215941,
+        "data": {
+          "monthName": "Julho",
+          "monthIdPrefix": "017U2I3T"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717216080,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 4
+        }
+      },
+      {
+        "step": "ex.mesSubpastasDetalhado",
+        "ts": 1787717216080,
+        "data": {
+          "monthName": "Julho",
+          "totalItems": 4,
+          "items": [
+            {
+              "idx": 0,
+              "name": "Extrato Recurso",
+              "isFolder": true,
+              "isFile": false,
+              "normName": "extrato recurso"
+            },
+            {
+              "idx": 1,
+              "name": "Relatório Demais Orgão",
+              "isFolder": true,
+              "isFile": false,
+              "normName": "relatorio demais orgao"
+            },
+            {
+              "idx": 2,
+              "name": "Relatório Orgão",
+              "isFolder": true,
+              "isFile": false,
+              "normName": "relatorio orgao"
+            },
+            {
+              "idx": 3,
+              "name": "Relatório Sisbr",
+              "isFolder": true,
+              "isFile": false,
+              "normName": "relatorio sisbr"
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.subfolderCandidatesEntrada",
+        "ts": 1787717216080,
+        "data": {
+          "subfolderCandidatesNormalized": [
+            "Extrato Recurso",
+            "Relatório de Órgão",
+            "Relatório SISBR",
+            "Relatório Sisbr",
+            "SISBR",
+            "Relatórios de Órgão"
+          ],
+          "subfolderCandidatesNormalizedCount": 6
+        }
+      },
+      {
+        "step": "ex.subpastaMatchPorCandidate",
+        "ts": 1787717216080,
+        "data": {
+          "candidate": "Extrato Recurso",
+          "matchedName": "Extrato Recurso",
+          "totalAteAgora": 1
+        }
+      },
+      {
+        "step": "ex.subpastaMatchPorCandidate",
+        "ts": 1787717216080,
+        "data": {
+          "candidate": "Relatório de Órgão",
+          "matchedName": "Relatório Demais Orgão",
+          "totalAteAgora": 2
+        }
+      },
+      {
+        "step": "ex.subpastaMatchPorCandidate",
+        "ts": 1787717216080,
+        "data": {
+          "candidate": "Relatório SISBR",
+          "matchedName": "Relatório Sisbr",
+          "totalAteAgora": 3
+        }
+      },
+      {
+        "step": "ex.subpastaAposCandidatesPrincipais",
+        "ts": 1787717216080,
+        "data": {
+          "matches": [
+            "Extrato Recurso",
+            "Relatório Demais Orgão",
+            "Relatório Sisbr"
+          ],
+          "count": 3
+        }
+      },
+      {
+        "step": "ex.subpastaAdicionadaFallback",
+        "ts": 1787717216080,
+        "data": {
+          "name": "Relatório Orgão",
+          "normName": "relatorio orgao",
+          "totalAteAgora": 4
+        }
+      },
+      {
+        "step": "ex.subpastaMatchesFinal",
+        "ts": 1787717216080,
+        "data": {
+          "total": 4,
+          "nomes": [
+            "Extrato Recurso",
+            "Relatório Demais Orgão",
+            "Relatório Sisbr",
+            "Relatório Orgão"
+          ]
+        }
+      },
+      {
+        "step": "ex.extratoFolderOk",
+        "ts": 1787717216080,
+        "data": {
+          "extratoName": "Extrato Recurso",
+          "extratoIdPrefix": "017U2I3T",
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Extrato Recurso"
+        }
+      },
+      {
+        "step": "ex.extratoFolderOk",
+        "ts": 1787717216080,
+        "data": {
+          "extratoName": "Relatório Demais Orgão",
+          "extratoIdPrefix": "017U2I3T",
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Demais Orgão"
+        }
+      },
+      {
+        "step": "ex.extratoFolderOk",
+        "ts": 1787717216080,
+        "data": {
+          "extratoName": "Relatório Sisbr",
+          "extratoIdPrefix": "017U2I3T",
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Sisbr"
+        }
+      },
+      {
+        "step": "ex.extratoFolderOk",
+        "ts": 1787717216080,
+        "data": {
+          "extratoName": "Relatório Orgão",
+          "extratoIdPrefix": "017U2I3T",
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717216212,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5ConteudoPastaAlvo",
+        "ts": 1787717216212,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Extrato Recurso",
+          "targetIdPrefix": "017U2I3T",
+          "totalItems": 1,
+          "items": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "importados"
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717216348,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 6
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel2",
+        "ts": 1787717216348,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Extrato Recurso",
+          "subpasta": "Importados",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Extrato Recurso/Importados",
+          "totalItensPulos": 6,
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717216467,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5ConteudoPastaAlvo",
+        "ts": 1787717216467,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Demais Orgão",
+          "targetIdPrefix": "017U2I3T",
+          "totalItems": 1,
+          "items": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "importados"
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717216664,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 2
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel2",
+        "ts": 1787717216664,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Demais Orgão",
+          "subpasta": "Importados",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Demais Orgão/Importados",
+          "totalItensPulos": 2,
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717216792,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 3
+        }
+      },
+      {
+        "step": "ex.passo5ConteudoPastaAlvo",
+        "ts": 1787717216792,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Sisbr",
+          "targetIdPrefix": "017U2I3T",
+          "totalItems": 3,
+          "items": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "importados"
+            },
+            {
+              "idx": 1,
+              "name": "TRIBUNAL REGIONAL DO TRABALHO.pdf",
+              "isFolder": false,
+              "isFile": true,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "tribunal regional do trabalho.pdf"
+            },
+            {
+              "idx": 2,
+              "name": "TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf",
+              "isFolder": false,
+              "isFile": true,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "tribunal regional eleitoral de goias.pdf"
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717216939,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 16
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel2",
+        "ts": 1787717216939,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Sisbr",
+          "subpasta": "Importados",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Sisbr/Importados",
+          "totalItensPulos": 16,
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5ItemPulado",
+        "ts": 1787717216939,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Sisbr",
+          "itemName": "TRIBUNAL REGIONAL DO TRABALHO.pdf",
+          "isFolder": false,
+          "isFile": true,
+          "razoes": [
+            "nao_bate_regex_xlsx_xlsm_xls"
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5ItemPulado",
+        "ts": 1787717216939,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Sisbr",
+          "itemName": "TRIBUNAL REGIONAL ELEITORAL DE GOIAS.pdf",
+          "isFolder": false,
+          "isFile": true,
+          "razoes": [
+            "nao_bate_regex_xlsx_xlsm_xls"
+          ]
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717217071,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 9
+        }
+      },
+      {
+        "step": "ex.passo5ConteudoPastaAlvo",
+        "ts": 1787717217071,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "targetIdPrefix": "017U2I3T",
+          "totalItems": 9,
+          "items": [
+            {
+              "idx": 0,
+              "name": "ADFEGO",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "adfego"
+            },
+            {
+              "idx": 1,
+              "name": "ALEGO",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "alego"
+            },
+            {
+              "idx": 2,
+              "name": "ELETRA",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "eletra"
+            },
+            {
+              "idx": 3,
+              "name": "MPGO",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "mpgo"
+            },
+            {
+              "idx": 4,
+              "name": "TCE",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "tce"
+            },
+            {
+              "idx": 5,
+              "name": "TCM",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "tcm"
+            },
+            {
+              "idx": 6,
+              "name": "TJGO",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "tjgo"
+            },
+            {
+              "idx": 7,
+              "name": "TRE",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "tre"
+            },
+            {
+              "idx": 8,
+              "name": "TRT",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false,
+              "isSisbrPdfPermitido": false,
+              "normName": "trt"
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717217071,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "ADFEGO",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ADFEGO"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717217216,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717217216,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ADFEGO",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717217216,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ADFEGO",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ADFEGO/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717217216,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ADFEGO",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717217216,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "ALEGO",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ALEGO"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717217354,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717217354,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ALEGO",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717217354,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ALEGO",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ALEGO/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717217354,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ALEGO",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717217354,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "ELETRA",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ELETRA"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717217661,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717217661,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ELETRA",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717217661,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ELETRA",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ELETRA/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717217661,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/ELETRA",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717217661,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "MPGO",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/MPGO"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717217783,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717217783,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/MPGO",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717217783,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/MPGO",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/MPGO/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717217783,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/MPGO",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717217783,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "TCE",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCE"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717217923,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717217924,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCE",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717217924,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCE",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCE/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717217924,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCE",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717217924,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "TCM",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCM"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717218065,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717218065,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCM",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717218065,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCM",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCM/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717218065,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TCM",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717218065,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "TJGO",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TJGO"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717218199,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717218199,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TJGO",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717218199,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TJGO",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TJGO/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717218199,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TJGO",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717218199,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "TRE",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRE"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717218329,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717218329,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRE",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717218329,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRE",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRE/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717218329,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRE",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.passo5DescendoSubpastaOrgao",
+        "ts": 1787717218329,
+        "data": {
+          "targetPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão",
+          "subpasta": "TRT",
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRT"
+        }
+      },
+      {
+        "step": "ex.list",
+        "ts": 1787717218449,
+        "data": {
+          "folderIdPrefix": "017U2I3T",
+          "count": 1
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoItensDetalhe",
+        "ts": 1787717218449,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRT",
+          "totalItensSubpasta": 1,
+          "itens": [
+            {
+              "idx": 0,
+              "name": "Importados",
+              "isFolder": true,
+              "isFile": false,
+              "isDocRegex": false
+            }
+          ]
+        }
+      },
+      {
+        "step": "ex.passo5IgnoradoImportadosNivel3",
+        "ts": 1787717218449,
+        "data": {
+          "subpastaOrgaoPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRT",
+          "nivel3Nome": "Importados",
+          "nivel3Path": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRT/Importados",
+          "motivoIgnorar": "usuario_ordem_ignorar_pasta_importados_todas_pastas"
+        }
+      },
+      {
+        "step": "ex.passo5SubpastaOrgaoConcluida",
+        "ts": 1787717218449,
+        "data": {
+          "subpastaPath": "9.Recuperação de Crédito/2026/Julho/Relatório Orgão/TRT",
+          "totalItensSubpasta": 1,
+          "excelAdicionados": 0
+        }
+      },
+      {
+        "step": "ex.final",
+        "ts": 1787717218449,
+        "data": {
+          "found": 0,
+          "files": [],
+          "targetsCount": 4
+        }
+      },
+      {
+        "step": "expandResult",
+        "ts": 1787717218449,
+        "data": {
+          "len": 0,
+          "preview": []
+        }
+      }
+    ],
+    "setup": {
+      "driveId": "b!z208TyZCFkSrGxa8CENUy6ZTN4JTDIVKspVpveHFN9gREjIsitcRRbRyBGyI6LEA",
+      "baseFolderId": "017U2I3T6S3AIP6YF43BDZN5VNNA3DB6F4",
+      "basePath": "9.Recuperação de Crédito",
+      "resolvedDirect": true,
+      "tokenOk": true,
+      "parsedUrlOk": true,
+      "driveDiscoveryOk": false
+    }
+  },
+  "at": "2026-08-26T04:06:58.455Z"
+}

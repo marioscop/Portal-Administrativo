@@ -1,0 +1,207 @@
+◇ injected env (12) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:33 [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:33 [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mThrottlerModule dependencies initialized[39m[38;5;3m +7ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:33 [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mConsignadoController {/api/consignado}:[39m[38;5;3m +1221ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/config, GET} route[39m[38;5;3m +18ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/config, POST} route[39m[38;5;3m +5ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/occurrences-panorama/send, POST} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/status, GET} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/start, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/finish, POST} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:34 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/teams/delegated/disconnect, POST} route[39m[38;5;3m +4ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/graph/users/search, GET} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-expand-extratos, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-oneshot-tre-import, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-local-sisbr, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-oneshot-trt-local, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug-oneshot-tre-local, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/import, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/recurso-alego/import, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug/ensure-extratos-relatorios, POST} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/health/drive, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/schedules, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/schedules/:id/toggle, POST} route[39m[38;5;3m +8ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/schedules/:id/run, POST} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/global-config, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/global-config, POST} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/health/geral, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/failures, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/automation/cleanup-ttl, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs/:jobId, GET} route[39m[38;5;3m +4ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs/:jobId/cancel, POST} route[39m[38;5;3m +3ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/jobs/stream/:jobId, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/import/sync, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/modalidades, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/modalidades, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-columns, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-columns, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-depara, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-depara, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/orgao-depara/delete, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos-consolidacao-recurso, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos-consolidacao-recurso, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos-consolidacao-recurso/delete, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/extratos/historico1-values, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/recurso-tables, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/relatorio-consolidacao-recurso, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/relatorio-consolidacao-recurso, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/relatorio-consolidacao-recurso/delete, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/extratos, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/meses, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/auditoria, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/extratos/detalhe, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/home-status, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/pendencias/fluxo, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/export.xlsx, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/lista/export.xlsx, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencias/export.xlsx, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencias, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/export.pdf, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/validacao/solicitar, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/validacao/decidir, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/validacao/portal, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/export.xlsx, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/data/export.pdf, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/clonar-para-sisbr, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/ocorrencia-context, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/inclusao-servidor-acordo-judicial-tjgo, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/tarifa, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/alterar-orgao-relatorio, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/repactuacao-relatorio, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-ccs-excluir-relatorio, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-processo-judicial-excluir-relatorio, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/nao-possui-recurso, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-fora-vencimento, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-antecipada-via-caixa, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/antecipado-devolvido, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/recurso-judicial-valor-a-menor, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/recurso-recebido-a-menor, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/recurso-recebido-a-maior, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/devolucao-parcial-averbacao, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/liquidacao-recurso-judicial, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/estorno-valores, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/fechar, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/reabrir, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/reenviar-contabilidade, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/conciliacao/recurso-vs-relatorio/desfazer-ocorrencia, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/access/emails, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/debug/event, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/access/emails, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/conciliacao, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/conciliacao.csv, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/conciliacao.xlsx, GET} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/extratos, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/extratos, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/relatorios, GET} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/consignado/temporario/relatorios, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 13248  - [39m26/08/2026, 10:50:35 [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +6ms[39m
+[FASE3][bootstrap] setTimeout 7s disparado, chamando bootstrapAutomationSystem()...
+[FASE3][bootstrap] INICIANDO bootstrapAutomationSystem()...
+[FASE3][_ensureDefaultSchedules] ATUALIZADO schedule default id=lot_diario_08h_uteis enabled=true nextRunAt=2026-08-27T11:00:00.000Z
+[FASE3][_attachBootstrapListenersOnce] Listener JobManager.on(*) anexado com sucesso.
+[FASE3][bootstrap] ImportJobsManager.inMem size inicial=0
+[FASE3][bootstrap] CONCLUÍDO com sucesso.
+[FASE3][bootstrap] Resultado bootstrap: ok=true cleanupRemoved=0
+[FASE3][Scheduler] Agendamento habilitado, start() em 5s...
+[FASE3][bootstrap][TTL] cleanupOldJobsTtl concluído: removed=0 checked=41 ttlDias=90
+[FASE3][Scheduler] Iniciando setInterval tick_ms=30000
+║ [DIAG-TRE-PRE1] src candidatos: rowsToImport.len=7  parsedFinal.rows.len=7
+║     [rowsImp-0] Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="       22210105153" CT="    6191.000" Prazo="   059" Valor="     3944,41"
+║     [rowsImp-1] Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="       22210105153" CT="    6191.000" Prazo="   009" Valor="     5731,94"
+║     [rowsImp-2] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="    6191.000" Prazo="   084" Valor="      516,28"
+║     [rowsImp-3] Nome="JORGE MARCOS DE SOUZA                     " CPF="       92928870849" CT="    6191.000" Prazo="   083" Valor="      620,63"
+║     [rowsImp-4] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="    6198.000" Prazo="   082" Valor="        61,1"
+║     [rowsImp-5] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="    6198.000" Prazo="   079" Valor="      270,49"
+║     [rowsImp-6] Nome="JORGE MARCOS DE SOUZA                     " CPF="       92928870849" CT="    6198.000" Prazo="   087" Valor="       453,9"
+║     [parsedR-0] Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="       22210105153" CT="    6191.000" Prazo="   059" Valor="     3944,41"
+║     [parsedR-1] Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="       22210105153" CT="    6191.000" Prazo="   009" Valor="     5731,94"
+║     [parsedR-2] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="    6191.000" Prazo="   084" Valor="      516,28"
+║     [parsedR-3] Nome="JORGE MARCOS DE SOUZA                     " CPF="       92928870849" CT="    6191.000" Prazo="   083" Valor="      620,63"
+║     [parsedR-4] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="    6198.000" Prazo="   082" Valor="        61,1"
+║     [parsedR-5] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="    6198.000" Prazo="   079" Valor="      270,49"
+║     [parsedR-6] Nome="JORGE MARCOS DE SOUZA                     " CPF="       92928870849" CT="    6198.000" Prazo="   087" Valor="       453,9"
+║ [DIAG-TRE-PRE2] finalRowsRaw.len=7 (após nonEmptyCols>=2)
+║     [frr-0] nonEmptyCols=8 Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="       22210105153" CT="  6191.000" N="     "
+║     [frr-1] nonEmptyCols=8 Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="       22210105153" CT="  6191.000" N="     "
+║     [frr-2] nonEmptyCols=8 Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="  6191.000" N="     "
+║     [frr-3] nonEmptyCols=8 Nome="JORGE MARCOS DE SOUZA                     " CPF="       92928870849" CT="  6191.000" N="     "
+║     [frr-4] nonEmptyCols=8 Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="  6198.000" N="     "
+║     [frr-5] nonEmptyCols=8 Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="       26360896168" CT="  6198.000" N="     "
+║     [frr-6] nonEmptyCols=8 Nome="JORGE MARCOS DE SOUZA                     " CPF="       92928870849" CT="  6198.000" N="     "
+║ [DIAG-TRE-PRE2B] TRE-LINK2 antecipado finalRowsRaw.len=7 (Prazo→N+Qtd)
+║     [frr-0] Nome="BENEDITO DA COSTA VELOSO FILHO" CT="  6191.000" N="  59" Qtd=" 059"
+║     [frr-1] Nome="BENEDITO DA COSTA VELOSO FILHO" CT="  6191.000" N="   9" Qtd=" 009"
+║     [frr-2] Nome="MARIA DE LOURDES MACEDO DE AND" CT="  6191.000" N="  84" Qtd=" 084"
+║     [frr-3] Nome="JORGE MARCOS DE SOUZA         " CT="  6191.000" N="  83" Qtd=" 083"
+║     [frr-4] Nome="MARIA DE LOURDES MACEDO DE AND" CT="  6198.000" N="  82" Qtd=" 082"
+║     [frr-5] Nome="MARIA DE LOURDES MACEDO DE AND" CT="  6198.000" N="  79" Qtd=" 079"
+║     [frr-6] Nome="JORGE MARCOS DE SOUZA         " CT="  6198.000" N="  87" Qtd=" 087"
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+║ [DEBUG TRT/TRE L30002] ANTES DO addMissingColumnsAndImportRows — arquivo=TRE-JULHO-2026.xlsx  kind=recurso_tre
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+║ [0/4] CONTAGEM rowsToImport.length = 7
+║     [row0] Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="    222.101.051-53" CT="     6,191" N="   59" Qtd="   59" Prazo="  059"
+║     [row1] Nome="BENEDITO DA COSTA VELOSO FILHO            " CPF="    222.101.051-53" CT="     6,191" N="    9" Qtd="    9" Prazo="  009"
+║     [row2] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="    263.608.961-68" CT="     6,191" N="   84" Qtd="   84" Prazo="  084"
+║     [row3] Nome="JORGE MARCOS DE SOUZA                     " CPF="    929.288.708-49" CT="     6,191" N="   83" Qtd="   83" Prazo="  083"
+║     [row4] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="    263.608.961-68" CT="     6,198" N="   82" Qtd="   82" Prazo="  082"
+║     [row5] Nome="MARIA DE LOURDES MACEDO DE ANDRADE        " CPF="    263.608.961-68" CT="     6,198" N="   79" Qtd="   79" Prazo="  079"
+║     [row6] Nome="JORGE MARCOS DE SOUZA                     " CPF="    929.288.708-49" CT="     6,198" N="   87" Qtd="   87" Prazo="  087"
+║ [1/4] profile.resolvedOptions flags (21 chaves):
+║       ✅ TRUE   extractCompetenciaFromFileName
+║       ❌ FALSE  competenciaMesArquivoSemIncremento
+║       ✅ TRUE   contratoNormalizadoBrMilhar
+║       ✅ TRUE   criterioDebitoPadraoFolhaPagto
+║       ✅ TRUE   descFinalidadeDefaultCreditoConsignado
+║       ✅ TRUE   vencimentoPadraoDia26MesCopetenciaAno2001
+║       ⚠️ ["Nome","CPF","Desc Finalidade","Contrato","N Parcela","Qtd Parcelas","Vencimento","Critério de Débito","Valor Parcela"]  strictColumnWhitelist
+║       ⚠️ 5  strictColumnMinMatches
+║       ✅ TRUE   ignoreImportados
+║       ✅ TRUE   moveToImportadosSubfolderAfterImport
+║       ✅ TRUE   checkDuplicateContent
+║       strictColumnWhitelist cols: ["Nome","CPF","Desc Finalidade","Contrato","N Parcela","Qtd Parcelas","Vencimento","Critério de Débito","Valor Parcela"]
+║ [2/4] headersToImport (17 cols — ORDEM ENVIADA AO INSERT):
+║       [00] 🔹CID00  Nome
+║       [01] 🔹CID01  CPF
+║       [02] 🔹CID02  Copetencia
+║       [03] 🔹CID03  Desc Finalidade
+║       [04] 🔹CID04  Contrato
+║       [05] 🔹CID05  N Parcela
+║       [06] 🔹CID06  Qtd Parcelas
+║       [07] 🔹CID07  Vencimento
+║       [08] 🔹CID08  Critério de Débito
+║       [09] 🔹CID09  Valor Parcela
+║       [10]       Matrícula
+║       [11]       Situação
+║       [12]       Rubrica
+║       [13]       Descrição
+║       [14]       Mês/Ano Referência
+║       [15]       Prazo
+║       [16]       Valor
+║ [3/4] rowsToImport[0] CHAVES E VALORES (17 keys):
+║       10COLS ✅ Nome                   → "BENEDITO DA COSTA VELOSO FILHO"
+║       10COLS ✅ CPF                    → "222.101.051-53"
+║       10COLS ✅ Copetencia             → "08/2026"
+║       10COLS ✅ Desc Finalidade        → "EMPRÉSTIMO COOPERATIVA DE CRÉDITO - SICOOB"
+║       10COLS ✅ Contrato               → "6,191"
+║       10COLS ✅ N Parcela              → "59"
+║       10COLS ✅ Qtd Parcelas           → "59"
+║       10COLS ✅ Vencimento             → "26/08/2001"
+║       10COLS ✅ Critério de Débito     → "Folha Pagto"
+║       10COLS ✅ Valor Parcela          → "R$ 3944.41"
+║       ALIAS  🔹 Situação               → "ATIVO"
+║       EXTRA  🔹 Matrícula              → "5069629"
+║       EXTRA  🔹 Rubrica                → "6191.000"
+║       EXTRA  🔹 Descrição              → "EMPRÉSTIMO COOPERATIVA DE CRÉDITO - SICO"
+║       EXTRA  🔹 Prazo                  → "059"
+║       EXTRA  🔹 Valor                  → "3944,41"
+║ [4/4] tableName=Recurso TRE  checkDup=true  modeOverride=append
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
