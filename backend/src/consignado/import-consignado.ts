@@ -11480,6 +11480,19 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
   const getRecursoAllowedMonthKeys = (_tableName: string) => new Set<string>([wantedMonthKey]);
   const getRecursoAllowedCompetencias = (_tableName: string) =>
     new Set<string>([wantedCopetencia]);
+  const FORCE_RECURSO_COLUMN = 'VALOR DESC HOLERITE';
+  const FORCE_RECURSO_COLUMN_TABLES = new Set<string>([
+    'Recurso CORPO DE BOMBEIROS MILITAR',
+    'Recurso DEFENSORIA PUBLICA DO ESTADO DE GOIAS',
+    'Recurso DELEGACIA-GERAL DA POLICIA CIVIL',
+    'Recurso DIRETORIA-GERAL DA ADMINISTRACAO PENITENCIARIA',
+    'Recurso GOIAS PREVIDENCIA - GOIASPREV',
+    'Recurso JUNTA COMERCIAL DO ESTADO DE GOIAS - JUCEG',
+    'Recurso POLICIA MILITAR',
+    'Recurso SECRETARIA DE ESTADO DA ADMINISTRACAO',
+    'Recurso SECRETARIA DE ESTADO DA ECONOMIA',
+    'Recurso SECRETARIA DE ESTADO DA SEGURANCA PUBLICA',
+  ]);
   const appendRecursoItemsFromTable = (tableName: string) => {
     if (!tableExists(db, tableName)) return;
     const cols = getTableColumns(db, tableName);
@@ -11496,7 +11509,19 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       }) ??
       pickFirstColumnContaining(cols, ['nome', 'cliente']) ??
       null;
-    const valorCol = pickRecursoValorColumn(cols);
+    const forceValorDescHolerite = FORCE_RECURSO_COLUMN_TABLES.has(tableName);
+    let valorCol: string | null = null;
+    if (forceValorDescHolerite) {
+      valorCol = pickFirstExistingColumn(cols, [FORCE_RECURSO_COLUMN]);
+      if (!valorCol) {
+        throw new Error(
+          `Tabela ${tableName} não possui a coluna obrigatória "${FORCE_RECURSO_COLUMN}". ` +
+          `A conciliação deste órgão exige SOMENTE esta coluna para o card Total recurso Orgão.`,
+        );
+      }
+    } else {
+      valorCol = pickRecursoValorColumn(cols);
+    }
     const compCol =
       cols.find((c) =>
         ['COMPETENCIA', 'COPETENCIA'].includes(normalizeHeaderKey(c).replace(/\s/g, '')),
@@ -11535,6 +11560,8 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     const allowedMonthKeys = getRecursoAllowedMonthKeys(tableName);
     const allowedCompetencias = getRecursoAllowedCompetencias(tableName);
 
+    let forceLinesChecked = 0;
+    let forceCentsSum = 0;
     for (const r of rows) {
       if (compCol) {
         const compRaw = String(r[compCol] ?? '').trim();
@@ -11550,8 +11577,10 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
 
       const cpfDigits = normalizeCpfDigits(r[cpfCol]);
       if (cpfDigits.length !== 11) continue;
+      if (forceValorDescHolerite) forceLinesChecked += 1;
       const cents = parseMoneyToCents(r[valorCol]);
       if (cents === null) continue;
+      if (forceValorDescHolerite) forceCentsSum += cents;
       const nomeFromCol =
         nomeCol && typeof r[nomeCol] === 'string' ? String(r[nomeCol]).trim() : '';
       const nome =
@@ -11584,6 +11613,13 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
             : null,
         hideInFront,
       });
+    }
+    if (forceValorDescHolerite && forceLinesChecked > 0 && forceCentsSum <= 0) {
+      throw new Error(
+        `Tabela ${tableName} (competência ${wantedCopetencia}) possui ${forceLinesChecked} linhas ` +
+        `de servidores válidas, mas a coluna "${FORCE_RECURSO_COLUMN}" está vazia ou contém apenas valores inválidos/zerados. ` +
+        `Verifique os dados importados antes de continuar.`,
+      );
     }
   };
   appendRecursoItemsFromTable(recursoTable);
