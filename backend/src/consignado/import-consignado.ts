@@ -18573,39 +18573,126 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
   const relatorioColsSql = relatorioCols.map(escapeSqlIdentifier).join(', ');
   const matchedRowIds: number[] = [];
   const snapshotRows: Array<Record<string, unknown>> = [];
-  const selectRel = db.prepare(
-    `SELECT rowid as __rowid, ${relatorioColsSql}
-     FROM relatorio_consignado
-     WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?;`,
-  );
-  try {
-    selectRel.bind([cpf] as unknown as any[]);
-    while (selectRel.step()) {
-      const row = selectRel.getAsObject() as Record<string, unknown>;
-      const rowid = Number((row as any).__rowid);
-      if (!Number.isFinite(rowid) || rowid <= 0) continue;
+  const seenRowIds = new Set<number>();
+  const nomeMatchKey = normalizeNameForMatch(nome);
 
-      const cop = typeof (row as any).Copetencia === 'string' ? String((row as any).Copetencia).trim() : '';
-      const rowMonthKey = parseCopetenciaToMonthKey(cop);
-      if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
-
-      const cents = parseMoneyToCents((row as any)['Valor Parcela']);
-      if (cents === null || cents !== valueCents) continue;
-
-      if (targetEmpresaKey) {
-        const emp = typeof (row as any).EMPRESA === 'string' ? String((row as any).EMPRESA).trim() : '';
-        const empKey = normalizeRelatorioOrgaoForMatch(emp);
-        if (!empKey || empKey !== targetEmpresaKey) continue;
+  const matchesValue = (row: Record<string, unknown>): boolean => {
+    const raw = (row as any)['Valor Parcela'];
+    const cents = parseMoneyToCents(raw);
+    if (cents !== null && cents === valueCents) return true;
+    const rawStr = String(raw ?? '').trim();
+    if (rawStr && rawStr === valorParcela) return true;
+    if (valueCents === 0) {
+      if (rawStr === '0' || rawStr === '0,00' || rawStr === '0.00' || rawStr === 'R$ 0,00' || rawStr === 'R$0,00') {
+        return true;
       }
-
-      matchedRowIds.push(rowid);
-      const snap: Record<string, unknown> = {};
-      for (const c of relatorioCols) snap[c] = (row as any)[c];
-      snapshotRows.push(snap);
     }
-  } finally {
-    selectRel.free();
+    return false;
+  };
+
+  const matchesCompetencia = (row: Record<string, unknown>): boolean => {
+    const cop = typeof (row as any).Copetencia === 'string' ? String((row as any).Copetencia).trim() : '';
+    const rowMonthKey = parseCopetenciaToMonthKey(cop);
+    return !!rowMonthKey && rowMonthKey === wantedMonthKey;
+  };
+
+  const matchesEmpresa = (row: Record<string, unknown>): boolean => {
+    if (!targetEmpresaKey) return true;
+    const emp = typeof (row as any).EMPRESA === 'string' ? String((row as any).EMPRESA).trim() : '';
+    const empKey = normalizeRelatorioOrgaoForMatch(emp);
+    return !!empKey && empKey === targetEmpresaKey;
+  };
+
+  const tryCollect = (row: Record<string, unknown>, requireEmpresa: boolean) => {
+    const rowid = Number((row as any).__rowid);
+    if (!Number.isFinite(rowid) || rowid <= 0) return;
+    if (seenRowIds.has(rowid)) return;
+    if (!matchesCompetencia(row)) return;
+    if (!matchesValue(row)) return;
+    if (requireEmpresa && !matchesEmpresa(row)) return;
+    seenRowIds.add(rowid);
+    matchedRowIds.push(rowid);
+    const snap: Record<string, unknown> = {};
+    for (const c of relatorioCols) snap[c] = (row as any)[c];
+    snapshotRows.push(snap);
+  };
+
+  {
+    const selectCpf = db.prepare(
+      `SELECT rowid as __rowid, ${relatorioColsSql}
+       FROM relatorio_consignado
+       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?;`,
+    );
+    try {
+      selectCpf.bind([cpf] as unknown as any[]);
+      while (selectCpf.step()) {
+        const row = selectCpf.getAsObject() as Record<string, unknown>;
+        tryCollect(row, true);
+      }
+    } finally {
+      selectCpf.free();
+    }
   }
+
+  if (matchedRowIds.length === 0) {
+    const selectCpfLoose = db.prepare(
+      `SELECT rowid as __rowid, ${relatorioColsSql}
+       FROM relatorio_consignado
+       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?;`,
+    );
+    try {
+      selectCpfLoose.bind([cpf] as unknown as any[]);
+      while (selectCpfLoose.step()) {
+        const row = selectCpfLoose.getAsObject() as Record<string, unknown>;
+        tryCollect(row, false);
+      }
+    } finally {
+      selectCpfLoose.free();
+    }
+  }
+
+  if (matchedRowIds.length === 0 && nomeMatchKey && nomeMatchKey.length >= 3) {
+    const nomeCol = pickFirstExistingColumn(relatorioCols, ['NOME', 'Nome']) ??
+      pickFirstColumnContaining(relatorioCols, ['nome']);
+    if (nomeCol) {
+      const selectNome = db.prepare(
+        `SELECT rowid as __rowid, ${relatorioColsSql}
+         FROM relatorio_consignado;`,
+      );
+      try {
+        while (selectNome.step()) {
+          const row = selectNome.getAsObject() as Record<string, unknown>;
+          const rawNome = typeof (row as any)[nomeCol] === 'string' ? String((row as any)[nomeCol]) : '';
+          if (normalizeNameForMatch(rawNome) !== nomeMatchKey) continue;
+          tryCollect(row, true);
+        }
+      } finally {
+        selectNome.free();
+      }
+    }
+  }
+
+  if (matchedRowIds.length === 0 && nomeMatchKey && nomeMatchKey.length >= 3) {
+    const nomeCol = pickFirstExistingColumn(relatorioCols, ['NOME', 'Nome']) ??
+      pickFirstColumnContaining(relatorioCols, ['nome']);
+    if (nomeCol) {
+      const selectNomeLoose = db.prepare(
+        `SELECT rowid as __rowid, ${relatorioColsSql}
+         FROM relatorio_consignado;`,
+      );
+      try {
+        while (selectNomeLoose.step()) {
+          const row = selectNomeLoose.getAsObject() as Record<string, unknown>;
+          const rawNome = typeof (row as any)[nomeCol] === 'string' ? String((row as any)[nomeCol]) : '';
+          if (normalizeNameForMatch(rawNome) !== nomeMatchKey) continue;
+          tryCollect(row, false);
+        }
+      } finally {
+        selectNomeLoose.free();
+      }
+    }
+  }
+
   if (matchedRowIds.length === 0) {
     throw new Error('Nenhum registro do Relatório SISBR encontrado.');
   }
