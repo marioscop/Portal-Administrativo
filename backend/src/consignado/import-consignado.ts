@@ -15436,37 +15436,125 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
       ...(recursoCompCol ? [recursoCompCol] : []),
     ];
     const recursoRows = readTableRows(db, candidateTable, recursoSelectCols);
-    for (const r of recursoRows) {
-      if (recursoCompCol) {
-        const compRaw = String(r[recursoCompCol] ?? '').trim();
-        if (compRaw) {
-          const m = parseCopetenciaToMonthKey(compRaw);
-          if (m && m !== wantedMonthKey) continue;
-          if (!m && compRaw !== wantedCopetenciaFull && compRaw !== wantedCopetenciaShort) continue;
+    const desiredNomeKey = normalizeNameForMatch(nome);
+    const matchRowCompetenciaOk = (r: Record<string, unknown>): boolean => {
+      if (!recursoCompCol) return true;
+      const compRaw = String(r[recursoCompCol] ?? '').trim();
+      if (!compRaw) return true;
+      const m = parseCopetenciaToMonthKey(compRaw);
+      if (m) return m === wantedMonthKey;
+      return compRaw === wantedCopetenciaFull || compRaw === wantedCopetenciaShort;
+    };
+    const matchRowValueOk = (r: Record<string, unknown>): boolean => {
+      const raw = r[recursoValorCol];
+      const cents = parseMoneyToCents(raw);
+      if (cents !== null && cents === valueCents) return true;
+      const rawStr = String(raw ?? '').trim();
+      if (rawStr && (rawStr === String(opts.value ?? '').trim() || rawStr === centsToPtBr(valueCents))) return true;
+      if (valueCents === 0) {
+        if (
+          rawStr === '0' ||
+          rawStr === '0,00' ||
+          rawStr === '0.00' ||
+          rawStr === 'R$ 0,00' ||
+          rawStr === 'R$0,00' ||
+          rawStr === 'R$ 0.00' ||
+          rawStr === 'R$0.00'
+        ) {
+          return true;
         }
       }
+      return false;
+    };
+
+    const lvl1Strict: typeof matchedRecursoRows = [];
+    const lvl2CpfLoose: typeof matchedRecursoRows = [];
+    const lvl3NomeStrict: typeof matchedRecursoRows = [];
+    const lvl4NomeLoose: typeof matchedRecursoRows = [];
+
+    for (const r of recursoRows) {
+      if (!matchRowCompetenciaOk(r)) continue;
       const rowCpfDigits = normalizeCpfDigits(r[recursoCpfCol]);
-      if (rowCpfDigits.length !== 11 || rowCpfDigits !== cpfDigits) continue;
-      const cents = parseMoneyToCents(r[recursoValorCol]);
-      if (cents === null || cents !== valueCents) continue;
-      const rowNome =
+      const rowNomeRaw =
         recursoNomeCol && typeof r[recursoNomeCol] === 'string'
           ? String(r[recursoNomeCol]).trim()
           : '';
-      matchedRecursoRows.push({
-        cpf: normalizeCpfValue(r[recursoCpfCol]),
-        nome: rowNome || nome,
-        cents,
-        sourceRecursoTable: candidateTable,
-      });
+      const rowNomeKey = normalizeNameForMatch(rowNomeRaw);
+      const cents = parseMoneyToCents(r[recursoValorCol]);
+      const valueOk = matchRowValueOk(r);
+      const safeCents = cents === null ? valueCents : cents;
+      const pushRow = (bucket: typeof matchedRecursoRows) => {
+        bucket.push({
+          cpf: normalizeCpfValue(r[recursoCpfCol]) || cpf,
+          nome: rowNomeRaw || nome,
+          cents: safeCents,
+          sourceRecursoTable: candidateTable,
+        });
+      };
+
+      // Nível 1: CPF exato + valor exato (regra original)
+      if (rowCpfDigits.length === 11 && rowCpfDigits === cpfDigits && valueOk) {
+        pushRow(lvl1Strict);
+        continue;
+      }
+      // Nível 2: CPF exato, valor aproximadamente zero mas parseMoney rejeitou (estilo N/D / vazio string / etc) — só aceita se valueCents for 0
+      if (
+        rowCpfDigits.length === 11 &&
+        rowCpfDigits === cpfDigits &&
+        valueCents === 0 &&
+        (String(r[recursoValorCol] ?? '').trim() === '' ||
+          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'N/D' ||
+          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'ND')
+      ) {
+        pushRow(lvl2CpfLoose);
+        continue;
+      }
+      // Nível 3: Nome rigoroso (normalizado idêntico) + valor OK (CPF pode vazio/diferente por falha de importação)
+      if (desiredNomeKey && rowNomeKey && rowNomeKey === desiredNomeKey && valueOk) {
+        pushRow(lvl3NomeStrict);
+        continue;
+      }
+      // Nível 4: Nome loose (substring normalizada) + valor OK + valueCents zero (se CPF faltando mas nome sugere a pessoa)
+      if (
+        desiredNomeKey &&
+        rowNomeKey &&
+        valueCents === 0 &&
+        (rowNomeKey.includes(desiredNomeKey) || desiredNomeKey.includes(rowNomeKey)) &&
+        (valueOk ||
+          String(r[recursoValorCol] ?? '').trim() === '' ||
+          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'N/D' ||
+          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'ND')
+      ) {
+        pushRow(lvl4NomeLoose);
+        continue;
+      }
     }
+
+    if (lvl1Strict.length > 0) matchedRecursoRows.push(...lvl1Strict);
+    else if (lvl2CpfLoose.length > 0) matchedRecursoRows.push(...lvl2CpfLoose);
+    else if (lvl3NomeStrict.length > 0) matchedRecursoRows.push(...lvl3NomeStrict);
+    else if (lvl4NomeLoose.length > 0) matchedRecursoRows.push(...lvl4NomeLoose);
+
     if (requestedSourceRecursoTable && matchedRecursoRows.length > 0) break;
   }
 
-  if (matchedRecursoRows.length === 0) {
+  if (matchedRecursoRows.length === 0 && isQuitado) {
     throw new Error(
       'Nenhum registro do Recurso do Órgão encontrado para esse CPF e valor na competência selecionada.',
     );
+  }
+  if (matchedRecursoRows.length === 0 && !action.startsWith('clonar_para_relatorio_sisbr')) {
+    throw new Error(
+      'Nenhum registro do Recurso do Órgão encontrado para esse CPF e valor na competência selecionada.',
+    );
+  }
+  if (matchedRecursoRows.length === 0 && action.startsWith('clonar_para_relatorio_sisbr')) {
+    matchedRecursoRows.push({
+      cpf,
+      nome,
+      cents: valueCents,
+      sourceRecursoTable: '__stub_clone_sem_recurso__',
+    });
   }
 
   const resolveRelatorioEmpresaRaw = (): string => {
@@ -15611,30 +15699,83 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
     normalizeRelatorioCopetenciaToFullYear(db);
     const relCpfText = cpf;
     const relValorText = centsToPtBr(valueCents);
+    const desiredNomeKey = normalizeNameForMatch(nome);
     const desiredEmpresaKey = normalizeRelatorioOrgaoForMatch(relEmpresa);
     const selectExisting = db.prepare(
-      `SELECT rowid as __rowid, ${escapeSqlIdentifier('EMPRESA')} as EMPRESA, ${escapeSqlIdentifier('Copetencia')} as Copetencia
+      `SELECT rowid as __rowid, ${escapeSqlIdentifier('EMPRESA')} as EMPRESA, ${escapeSqlIdentifier('Copetencia')} as Copetencia, ${escapeSqlIdentifier('Nome')} as Nome, ${escapeSqlIdentifier('Valor Parcela')} as "Valor Parcela"
        FROM relatorio_consignado
-       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?
-         AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?;`,
+       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?;`,
     );
+    const matchesSisbrValue = (raw: unknown): boolean => {
+      const cents = parseMoneyToCents(raw);
+      if (cents !== null && cents === valueCents) return true;
+      const rawStr = String(raw ?? '').trim();
+      if (rawStr && (rawStr === relValorText || rawStr === String(opts.value ?? '').trim())) return true;
+      if (valueCents === 0) {
+        if (
+          rawStr === '' ||
+          rawStr === '0' ||
+          rawStr === '0,00' ||
+          rawStr === '0.00' ||
+          rawStr === 'R$ 0,00' ||
+          rawStr === 'R$0,00' ||
+          rawStr === 'R$ 0.00' ||
+          rawStr === 'R$0.00' ||
+          rawStr.toUpperCase() === 'N/D' ||
+          rawStr.toUpperCase() === 'ND'
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
     const existingEmpresas = new Map<string, { count: number; raw: string }>();
+    let hasStrictCloneDuplicate = false;
+    const duplicateDetails: Array<{ empresa: string; nome: string }> = [];
     try {
-      selectExisting.bind([cpfDigits, relValorText] as unknown as any[]);
+      selectExisting.bind([cpfDigits] as unknown as any[]);
       while (selectExisting.step()) {
         const row = selectExisting.getAsObject() as Record<string, unknown>;
+        const valorRaw = row['Valor Parcela'];
+        if (!matchesSisbrValue(valorRaw)) continue;
         const cop = typeof row.Copetencia === 'string' ? row.Copetencia.trim() : '';
         const rowMonthKey = parseCopetenciaToMonthKey(cop);
         if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
+        const rowNome = typeof row.Nome === 'string' ? row.Nome.trim() : '';
+        const rowNomeKey = normalizeNameForMatch(rowNome);
         const emp = typeof row.EMPRESA === 'string' ? row.EMPRESA.trim() : '';
         const empKey = normalizeRelatorioOrgaoForMatch(emp) ?? '';
-        if (!empKey) continue;
-        const cur = existingEmpresas.get(empKey);
-        if (cur) cur.count += 1;
-        else existingEmpresas.set(empKey, { count: 1, raw: emp });
+        if (empKey) {
+          const cur = existingEmpresas.get(empKey);
+          if (cur) cur.count += 1;
+          else existingEmpresas.set(empKey, { count: 1, raw: emp });
+        }
+        if (!isQuitado && action.startsWith('clonar_para_relatorio_sisbr') && desiredNomeKey) {
+          if (rowNomeKey && rowNomeKey === desiredNomeKey) {
+            hasStrictCloneDuplicate = true;
+            if (duplicateDetails.length < 3) duplicateDetails.push({ empresa: emp, nome: rowNome });
+          }
+        }
       }
     } finally {
       selectExisting.free();
+    }
+
+    if (!isQuitado && action.startsWith('clonar_para_relatorio_sisbr') && hasStrictCloneDuplicate) {
+      const seen = new Set<string>();
+      const uniqEmpresas: string[] = [];
+      for (const d of duplicateDetails) {
+        if (!d.empresa || seen.has(d.empresa)) continue;
+        seen.add(d.empresa);
+        uniqEmpresas.push(d.empresa);
+      }
+      const hint =
+        uniqEmpresas.length > 0
+          ? ` (Registro encontrado em: ${uniqEmpresas.join(' | ')} — Nome "${duplicateDetails[0]?.nome || nome}")`
+          : '';
+      throw new Error(
+        `Não é possível "Clonar para Relatório SISBR": já existe um registro na tabela do Relatório SISBR com o mesmo CPF, Nome e Valor nesta competência.${hint}`,
+      );
     }
 
     const existingInTarget = desiredEmpresaKey ? existingEmpresas.get(desiredEmpresaKey)?.count ?? 0 : 0;
