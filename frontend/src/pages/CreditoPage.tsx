@@ -8857,19 +8857,64 @@ export default function CreditoPage() {
                               </span>
                             ) : (
                               <>
-                                <span className="chip">
+                                <span
+                                  className="chip"
+                                  title="Total de conciliações (Abertas + Fechadas) existentes para a competência selecionada"
+                                  style={{
+                                    borderColor: 'rgba(59,130,246,0.55)',
+                                    background: 'rgba(59,130,246,0.12)',
+                                    color: 'rgba(219,234,254,0.98)',
+                                  }}
+                                >
                                   <FileText size={16} />
                                   Total: {homeConciliacaoStatuses.length}
                                 </span>
-                                <span className="chip">
-                                  <Lock size={16} />
-                                  Fechadas:{' '}
-                                  {homeConciliacaoStatuses.filter((item) => item.status === 'fechada').length}
-                                </span>
-                                <span className="chip">
+                                <span
+                                  className="chip"
+                                  title="Conciliações com status Aberta (ainda não fechadas) na competência selecionada"
+                                  style={{
+                                    borderColor: 'rgba(234,179,8,0.55)',
+                                    background: 'rgba(234,179,8,0.12)',
+                                    color: 'rgba(254,243,199,0.98)',
+                                    boxShadow:
+                                      '0 0 0 1px rgba(234,179,8,0.25), 0 8px 24px -8px rgba(234,179,8,0.55)',
+                                  }}
+                                >
                                   <Unlock size={16} />
                                   Abertas:{' '}
                                   {homeConciliacaoStatuses.filter((item) => item.status === 'aberta').length}
+                                </span>
+                                <span
+                                  className="chip"
+                                  title="Conciliações com status Fechada (Fechado Financeiro) na competência selecionada"
+                                  style={{
+                                    borderColor: 'rgba(34,197,94,0.45)',
+                                    background: 'rgba(34,197,94,0.10)',
+                                    color: 'rgba(187,247,208,0.98)',
+                                  }}
+                                >
+                                  <Lock size={16} />
+                                  Fechado Financeiro:{' '}
+                                  {homeConciliacaoStatuses.filter((item) => item.status === 'fechada').length}
+                                </span>
+                                <span
+                                  className="chip"
+                                  title="Conciliações Fechadas que receberam o selo verde de validação da contabilidade"
+                                  style={{
+                                    borderColor: 'rgba(34,197,94,0.45)',
+                                    background: 'rgba(34,197,94,0.10)',
+                                    color: 'rgba(187,247,208,0.98)',
+                                  }}
+                                >
+                                  <ShieldCheck size={16} />
+                                  Validado pela contabilidade:{' '}
+                                  {
+                                    homeConciliacaoStatuses.filter(
+                                      (item) =>
+                                        item.status === 'fechada' &&
+                                        (item as any).contabilidadeValidated === true,
+                                    ).length
+                                  }
                                 </span>
                               </>
                             )}
