@@ -18569,6 +18569,7 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
       foundCpf?: boolean;
       foundNome?: boolean;
       competencia?: string | null;
+      valorColuna: string;
     } | null = null;
 
     for (const tableName of allTables) {
@@ -18579,11 +18580,36 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
         pickFirstExistingColumn(cols, ['CPF', 'Cpf']) ??
         pickFirstColumnContaining(cols, ['cpf']);
       const nomeCol =
-        pickFirstExistingColumn(cols, ['NOME', 'Nome']) ??
-        pickFirstColumnContaining(cols, ['nome']);
+        pickFirstExistingColumn(cols, [
+          'NOME',
+          'Nome',
+          'CLIENTE',
+          'Servidor',
+          'Funcionário',
+          'Funcionario',
+          'Nome Funcionário',
+          'Nome Funcionario',
+          'Nome_1',
+        ]) ??
+        pickFirstColumnContaining(cols, ['nome', 'cliente', 'servidor', 'funcionario', 'funcionário']);
       const valorCol =
-        pickFirstExistingColumn(cols, ['VALOR', 'Valor']) ??
-        pickFirstColumnContaining(cols, ['valor']);
+        pickFirstExistingColumn(cols, [
+          'VALOR DESC HOLERITE',
+          'Valor da Parcela',
+          'Valor Parcela',
+          'VALOR',
+          'Valor',
+        ]) ??
+        pickFirstColumnContaining(cols, [
+          'valor desc',
+          'holerite',
+          'desconto',
+          'valor parcela',
+          'valor da parcela',
+          'valor averbad',
+          'valor enviad',
+          'valor',
+        ]);
       const copCol =
         pickFirstExistingColumn(cols, [
           'Copetencia',
@@ -18651,6 +18677,7 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
               foundCpf: cpfMatch,
               foundNome: nomeMatchRow,
               competencia: comp,
+              valorColuna: valorCol,
             };
             break;
           }
@@ -18673,8 +18700,9 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
       const identificadores = detalhe.length ? detalhe.join(' + ') : 'Identificador';
       const compInfo = blockedReason.competencia ? ` (competência ${blockedReason.competencia})` : '';
       throw new Error(
-        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real nos recursos/extratos com valor > R$ 0,00 para este servidor.\n` +
+        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real (coluna "${blockedReason.valorColuna}") nos recursos/extratos com valor > R$ 0,00 para este servidor.\n` +
           `- Tabela de origem: ${blockedReason.table}\n` +
+          `- Coluna de valor usada como referência: ${blockedReason.valorColuna}\n` +
           `- Match por: ${identificadores}${compInfo}\n` +
           `- CPF: ${cpfFmt} / Nome: ${nome}\n` +
           `- Valor encontrado: R$ ${centsToPtBr(blockedReason.valueCents)}\n` +
