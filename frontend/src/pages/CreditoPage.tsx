@@ -8907,7 +8907,7 @@ export default function CreditoPage() {
                                   }}
                                 >
                                   <ShieldCheck size={16} />
-                                  Validado pela contabilidade:{' '}
+                                  Validado contabilidade:{' '}
                                   {
                                     homeConciliacaoStatuses.filter(
                                       (item) =>
