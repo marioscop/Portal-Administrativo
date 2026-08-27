@@ -207,7 +207,7 @@ export default function PortalHomePage() {
       <div className="portal-container">
         <header className="portal-header">
           <img
-            src="/assets/portal_ADM_%20logo.png"
+            src="/assets/portal_ADM_%20logo.svg"
             alt="Portal Administrativo"
             className="portal-logo"
             onError={(e) => {
