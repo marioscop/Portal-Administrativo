@@ -13342,8 +13342,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     if (isQuitado && !alreadyCountedByRelatorio) {
       const date = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const cents = parseMoneyToCents(o?.value);
-      if (cents === null) continue;
+      const cents = parseMoneyToCents(o?.value) ?? 0;
       quitadoByDate.set(date, (quitadoByDate.get(date) ?? 0) + cents);
       const key = buildDevolucaoBusinessKey(o?.cpf, o?.nome, o?.value, date);
       if (key) {
@@ -13354,8 +13353,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     if (isAntecipadoDevolvido && !alreadyCountedByRelatorio) {
       const date = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const cents = parseMoneyToCents(o?.value);
-      if (cents === null) continue;
+      const cents = parseMoneyToCents(o?.value) ?? 0;
       antecipadoDevolvidoByDate.set(date, (antecipadoDevolvidoByDate.get(date) ?? 0) + cents);
       const key = buildDevolucaoBusinessKey(o?.cpf, o?.nome, o?.value, date);
       if (key) {
@@ -13368,8 +13366,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       action.startsWith('devolucao_parcial_averbacao');
     if (isDevolucaoParcialAverbacao) {
       const devolucaoDate = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
-      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue);
-      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate) && devolucaoCents !== null) {
+      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue) ?? 0;
+      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate)) {
         devolucaoParcialAverbacaoValorByDate.set(
           devolucaoDate,
           (devolucaoParcialAverbacaoValorByDate.get(devolucaoDate) ?? 0) + devolucaoCents,
@@ -13384,8 +13382,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       const devolucaoDate =
         (typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '') ||
         (typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '');
-      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue);
-      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate) && devolucaoCents !== null) {
+      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue) ?? 0;
+      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate)) {
         recursoRecebidoMaiorEstornoByDate.set(
           devolucaoDate,
           (recursoRecebidoMaiorEstornoByDate.get(devolucaoDate) ?? 0) + devolucaoCents,
@@ -13417,8 +13415,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       const date =
         estornoDate || normalDate;
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const cents = parseMoneyToCents(o?.estornoValue ?? o?.nextValue ?? o?.value);
-      if (cents === null || cents === 0) continue;
+      const cents = parseMoneyToCents(o?.estornoValue ?? o?.nextValue ?? o?.value) ?? 0;
+      if (cents === null) continue;
       estornoByDate.set(date, (estornoByDate.get(date) ?? 0) + cents);
     }
 
@@ -13427,8 +13425,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     if (isRecursoRecebidoMenor && Boolean(o?.noDebitInAccount)) {
       const liqDate = typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
       if (!liqDate || !/^\d{2}\/\d{2}\/\d{4}$/.test(liqDate)) continue;
-      const diffCents = parseMoneyToCents(o?.differenceValue);
-      if (diffCents === null || diffCents <= 0) continue;
+      const diffCents = parseMoneyToCents(o?.differenceValue) ?? 0;
+      if (diffCents === null || diffCents < 0) continue;
       recursoRecebidoMenorNoDebitByDate.set(
         liqDate,
         (recursoRecebidoMenorNoDebitByDate.get(liqDate) ?? 0) + diffCents,
@@ -13439,8 +13437,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
         ? debitAccountDate
         : (typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '');
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const debitCents = parseMoneyToCents(o?.debitAccountValue ?? o?.differenceValue ?? o?.value);
-      if (debitCents === null || debitCents <= 0) continue;
+      const debitCents = parseMoneyToCents(o?.debitAccountValue ?? o?.differenceValue ?? o?.value) ?? 0;
+      if (debitCents === null || debitCents < 0) continue;
       recursoRecebidoMenorDebitByDate.set(
         date,
         (recursoRecebidoMenorDebitByDate.get(date) ?? 0) + debitCents,
@@ -13450,8 +13448,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
   for (const r of relatorio) {
     const baseVenc = typeof r?.vencimento === 'string' ? r.vencimento.trim() : '';
     const liquidationDate = pickLiquidationDate(r);
-    const cents = parseMoneyToCents(r?.value);
-    if (cents === null) continue;
+    const cents = parseMoneyToCents(r?.value) ?? 0;
     const devolucaoDate = pickDevolucaoDateQuitado(r);
     if (devolucaoDate) {
       quitadoByDate.set(devolucaoDate, (quitadoByDate.get(devolucaoDate) ?? 0) + cents);
@@ -13604,7 +13601,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (repactuacaoCents !== 0) {
+    if (repactuacaoEmAndamentoByDate.has(date)) {
       runningSaldo += -repactuacaoCents;
       out.push({
         vencimento: date,
@@ -13617,7 +13614,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoJudicialEditedCents !== 0) {
+    if (recursoJudicialEditedByDate.has(date)) {
       runningSaldo += -recursoJudicialEditedCents;
       out.push({
         vencimento: date,
@@ -13630,7 +13627,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoJudicialDiffCents !== 0) {
+    if (recursoJudicialDiffByDate.has(date)) {
       runningSaldo += -recursoJudicialDiffCents;
       out.push({
         vencimento: date,
@@ -13643,7 +13640,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (naoPossuiRecursoCents !== 0) {
+    if (naoPossuiRecursoByDate.has(date)) {
       runningSaldo += -naoPossuiRecursoCents;
       out.push({
         vencimento: date,
@@ -13656,7 +13653,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (quitadoCents !== 0) {
+    if (quitadoByDate.has(date)) {
       runningSaldo += -quitadoCents;
       out.push({
         vencimento: date,
@@ -13669,7 +13666,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (devolucaoParcialAverbacaoValorCents !== 0) {
+    if (devolucaoParcialAverbacaoValorByDate.has(date)) {
       runningSaldo += devolucaoParcialAverbacaoValorCents;
       out.push({
         vencimento: date,
@@ -13682,7 +13679,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoRecebidoMaiorEstornoCents !== 0) {
+    if (recursoRecebidoMaiorEstornoByDate.has(date)) {
       runningSaldo += recursoRecebidoMaiorEstornoCents;
       out.push({
         vencimento: date,
@@ -13695,7 +13692,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (liquidacaoNormalEstornadaCents !== 0) {
+    if (liquidacaoNormalEstornadaByDate.has(date)) {
       runningSaldo += -liquidacaoNormalEstornadaCents;
       out.push({
         vencimento: date,
@@ -13708,7 +13705,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (estornoCents !== 0) {
+    if (estornoByDate.has(date)) {
       runningSaldo += estornoCents;
       out.push({
         vencimento: date,
@@ -13722,7 +13719,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     }
 
     const antecipadoDevolvidoCents = antecipadoDevolvidoByDate.get(date) ?? 0;
-    if (antecipadoDevolvidoCents !== 0) {
+    if (antecipadoDevolvidoByDate.has(date)) {
       runningSaldo += -antecipadoDevolvidoCents;
       out.push({
         vencimento: date,
@@ -13735,7 +13732,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoRecebidoMenorNoDebitCents !== 0) {
+    if (recursoRecebidoMenorNoDebitByDate.has(date)) {
       out.push({
         vencimento: date,
         recursoCents: 0,
@@ -13747,7 +13744,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoRecebidoMenorDebitCents !== 0) {
+    if (recursoRecebidoMenorDebitByDate.has(date)) {
       runningSaldo += -recursoRecebidoMenorDebitCents;
       out.push({
         vencimento: date,
@@ -25029,8 +25026,8 @@ export async function getConciliacaoPorDataPreview(opts: {
         if (!isQuitado && !isAntecipado) return acc;
         const liquidationDate = String(occ?.devolucaoDate ?? '').trim();
         if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) return acc;
-        const debitCents = parseMoneyToCents(occ?.value);
-        if (debitCents === null || debitCents === 0) return acc;
+        const debitCents = parseMoneyToCents(occ?.value) ?? 0;
+        if (debitCents === null) return acc;
         const event = isAntecipado ? 'DEVOLUÇÃO (ANTECIPADO)' : 'DEVOLUÇÃO (QUITADO)';
         const key = `${event}|${liquidationDate}`;
         const current = acc.get(key) ?? {
@@ -25388,11 +25385,12 @@ export async function getOrgaoDePara() {
   return { items, dbFilePath };
 }
 
-export async function listHomeConciliacaoStatuses(opts: { month: string }) {
+export async function listHomeConciliacaoStatuses(opts: { month: string; crossPorData?: boolean }) {
   const monthKey = String(opts.month ?? '').trim();
   if (!/^\d{4}-\d{2}$/.test(monthKey)) {
     throw new Error('Informe a competência no formato YYYY-MM.');
   }
+  const crossPorData = Boolean(opts.crossPorData);
 
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
@@ -25424,6 +25422,30 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
       return `${m[3]}${m[2]}${m[1]}`;
     };
     return parseKey(a).localeCompare(parseKey(b), 'pt-BR');
+  };
+
+  const pickLiquidationDateGlobal = (r: any) => {
+    const occs = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
+    for (const o of occs) {
+      const liq = typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
+      if (liq && /^\d{2}\/\d{2}\/\d{4}$/.test(liq)) return liq;
+    }
+    return null;
+  };
+  const pickDevolucaoDateQuitadoGlobal = (r: any) => {
+    const occs = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
+    for (const o of occs) {
+      const action = typeof o?.action === 'string' ? o.action.trim() : '';
+      const isQuitado = action === 'quitado_recurso' || action.startsWith('quitado_recurso');
+      const isAntecipado =
+        action === 'antecipado_devolvido_relatorio_sisbr' || action.startsWith('antecipado_devolvido');
+      if (!isQuitado && !isAntecipado) continue;
+      const dev = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
+      if (dev && /^\d{2}\/\d{2}\/\d{4}$/.test(dev)) return dev;
+      const m = action.match(/\b(\d{2}\/\d{2}\/\d{4})\b/);
+      if (m && m[1]) return m[1];
+    }
+    return null;
   };
 
   const validationMap = listConciliacaoPorDataValidationMap(db, monthKey);
@@ -25461,9 +25483,29 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
 
     const allVencimentosSet = new Set<string>();
     const relatorioRows = Array.isArray(conciliacao?.relatorio) ? conciliacao.relatorio : [];
+    const vencimentoToLiquidationDatesCross = new Map<string, Set<string>>();
     for (const row of relatorioRows) {
       const vencimento = getLinkedRelatorioVencimentoLabel(row);
       if (vencimento && vencimento !== '-') allVencimentosSet.add(vencimento);
+      if (crossPorData && vencimento && vencimento !== '-') {
+        const l1 = pickLiquidationDateGlobal(row);
+        const l2 = pickDevolucaoDateQuitadoGlobal(row);
+        const lds = new Set<string>();
+        if (l1) lds.add(l1);
+        if (l2) lds.add(l2);
+        const occs = Array.isArray(row?.ocorrencias) ? row.ocorrencias : row?.ocorrencia ? [row.ocorrencia] : [];
+        for (const o of occs) {
+          const d1 = typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
+          const d2 = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
+          if (d1 && /^\d{2}\/\d{2}\/\d{4}$/.test(d1)) lds.add(d1);
+          if (d2 && /^\d{2}\/\d{2}\/\d{4}$/.test(d2)) lds.add(d2);
+        }
+        if (lds.size > 0) {
+          const existing = vencimentoToLiquidationDatesCross.get(vencimento) ?? new Set<string>();
+          lds.forEach((x) => existing.add(x));
+          vencimentoToLiquidationDatesCross.set(vencimento, existing);
+        }
+      }
     }
     for (const vencimento of closedVencimentos) {
       if (vencimento && vencimento !== '-') allVencimentosSet.add(vencimento);
@@ -25499,6 +25541,33 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
       continue;
     }
 
+    const isPorDataApprovedCross = (vencimento: string) => {
+      if (!crossPorData) return false;
+      const globalOrgao = 'Todos os órgãos';
+      const fromGlobalVencimento = validationMap.get(
+        buildConciliacaoPorDataValidationCompositeKey(monthKey, globalOrgao, vencimento),
+      )?.status === 'approved';
+      const fromOrgaoVencimento = validationMap.get(
+        buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, vencimento),
+      )?.status === 'approved';
+      if (fromGlobalVencimento || fromOrgaoVencimento) return true;
+      const liquids = vencimentoToLiquidationDatesCross.get(vencimento);
+      if (!liquids || liquids.size === 0) return false;
+      for (const liqDate of liquids) {
+        if (
+          validationMap.get(
+            buildConciliacaoPorDataValidationCompositeKey(monthKey, globalOrgao, liqDate),
+          )?.status === 'approved'
+        ) return true;
+        if (
+          validationMap.get(
+            buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, liqDate),
+          )?.status === 'approved'
+        ) return true;
+      }
+      return false;
+    };
+
     for (const vencimento of allVencimentos) {
       const globalOrgao = 'Todos os órgãos';
       const contabilidadeValidated =
@@ -25508,7 +25577,8 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
         )?.status === 'approved') ||
           (validationMap.get(
             buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, vencimento),
-          )?.status === 'approved'));
+          )?.status === 'approved') ||
+          isPorDataApprovedCross(vencimento));
       items.push({
         orgao,
         vencimento,
@@ -25532,6 +25602,7 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
 
   return {
     month: monthKey,
+    crossPorData,
     items,
     dbFilePath,
   };
@@ -27971,8 +28042,7 @@ export async function requestConciliacaoPorDataValidation(opts: {
   const hasClosedRowForDate = Array.isArray((preview as any)?.rows)
     ? (preview as any).rows.some((row: any) => {
         const rowDate = String(row?.liquidationDate ?? '').trim();
-        if (rowDate !== liquidationDate) return false;
-        return !/^DEVOLUÇÃO\b/i.test(String(row?.event ?? '').trim());
+        return rowDate === liquidationDate;
       })
     : false;
   if (!hasClosedRowForDate) {

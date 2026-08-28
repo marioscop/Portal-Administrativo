@@ -288,11 +288,9 @@ function getConciliacaoPorDataReceivedColumnTotal(
 ) {
   const grouped = new Map<string, number>()
   for (const row of rows) {
-    const liquidationDate = String(row?.liquidationDate ?? '').trim() || '—'
     const orgao = String(row?.orgao ?? '').trim() || '—'
-    const groupKey = `${liquidationDate}__${orgao}`
-    if (!grouped.has(groupKey)) {
-      grouped.set(groupKey, Number(row?.orgaoReceivedCents ?? 0) || 0)
+    if (!grouped.has(orgao)) {
+      grouped.set(orgao, Number(row?.orgaoReceivedCents ?? 0) || 0)
     }
   }
   return Array.from(grouped.values()).reduce((sum, value) => sum + value, 0)
@@ -4354,7 +4352,6 @@ export default function CreditoPage() {
       (row) => String(row?.liquidationDate ?? '').trim() === dateKey,
     )
     if (targetRows.length === 0) return null
-    if (targetRows.every((row) => isConciliacaoPorDataDevolucaoEvent(row?.event))) return null
 
     const tarifasByOrgao = new Map(
       (conciliacaoPorDataData.tarifasByOrgao ?? []).map((item) => [
@@ -12195,8 +12192,7 @@ export default function CreditoPage() {
                                 Boolean(selectedDate) &&
                                 (conciliacaoPorDataData?.rows.some(
                                   (row) =>
-                                    String(row?.liquidationDate ?? '').trim() === selectedDate &&
-                                    !isConciliacaoPorDataDevolucaoEvent(row?.event),
+                                    String(row?.liquidationDate ?? '').trim() === selectedDate,
                                 ) ??
                                   false)
 
@@ -12660,8 +12656,11 @@ export default function CreditoPage() {
                                   })
                                 const dateAggregateMap = (() => {
                                   const map = new Map<string, any>()
+                                  const receivedByDateOrgKeys = new Set<string>()
                                   for (const row of pivotRowsWithTarifas) {
                                     const dateKey = String(row.liquidationDate ?? '').trim() || '—'
+                                    const orgaoKey = String(row.orgao ?? '').trim() || '—'
+                                    const receivedSeenKey = `${dateKey}__${orgaoKey}`
                                     const current =
                                       map.get(dateKey) ?? {
                                         liquidationDate: dateKey,
@@ -12684,7 +12683,10 @@ export default function CreditoPage() {
                                         }>,
                                       }
 
-                                    current.orgaoReceivedCents += Number(row.orgaoReceivedCents ?? 0) || 0
+                                    if (!receivedByDateOrgKeys.has(receivedSeenKey)) {
+                                      current.orgaoReceivedCents += Number(row.orgaoReceivedCents ?? 0) || 0
+                                      receivedByDateOrgKeys.add(receivedSeenKey)
+                                    }
                                     current.totalDebitCents += Number(row.totalDebitCents ?? 0) || 0
 
                                     for (const col of row.eventColumns || []) {
@@ -12742,10 +12744,13 @@ export default function CreditoPage() {
                                     pivotRowsWithTarifas.reduce((sum, row) => sum + (row.values[column.key] ?? 0), 0),
                                   ]),
                                 ) as Record<string, number>
-                                const totalReceivedCents = pivotRowsWithTarifas.reduce(
-                                  (sum, row) => sum + row.orgaoReceivedCents,
-                                  0,
-                                )
+                                const receivedSeenOrgaoKeys = new Set<string>()
+                                const totalReceivedCents = pivotRowsWithTarifas.reduce((sum, row) => {
+                                  const key = `${String(row.orgao ?? '').trim() || '—'}`
+                                  if (receivedSeenOrgaoKeys.has(key)) return sum
+                                  receivedSeenOrgaoKeys.add(key)
+                                  return sum + (Number(row.orgaoReceivedCents ?? 0) || 0)
+                                }, 0)
                                 const totalTarifasCents = pivotRowsWithTarifas.reduce(
                                   (sum, row) => sum + (row.tarifaCents ?? 0),
                                   0,

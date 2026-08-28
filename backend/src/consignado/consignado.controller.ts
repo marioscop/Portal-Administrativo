@@ -852,13 +852,20 @@ export class ConsignadoController {
     return await this.service.conciliarRecursoOrgaoRelatorio({ month, orgao });}
 
   @Get('conciliacao/recurso-vs-relatorio/home-status')
-  async listarHomeStatusConciliacao(@Query('month') month?: string) {
+  async listarHomeStatusConciliacao(
+    @Query('month') month?: string,
+    @Query('crossPorData') crossPorData?: string,
+  ) {
     if (!month) {
       throw new InternalServerErrorException(
         'Informe a competência no formato YYYY-MM.',
       );
     }
-    return await this.service.listHomeConciliacaoStatuses({ month });}
+    return await this.service.listHomeConciliacaoStatuses({
+      month,
+      crossPorData: String(crossPorData ?? '').trim() === '1',
+    });
+  }
 
   @Get('conciliacao/recurso-vs-relatorio/pendencias/fluxo')
   async listarPendenciasFluxo(
