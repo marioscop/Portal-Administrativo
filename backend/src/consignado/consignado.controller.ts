@@ -62,6 +62,9 @@ export class ConsignadoController {
       month?: string | null;
       previewOnly?: boolean;
       force?: boolean;
+      legacyTemplate?: boolean;
+      withCartaDiretoria?: boolean;
+      withFullPanorama2408?: boolean;
     },
   ) {
     return await this.service.sendDailyOccurrencesPanoramaEmail({
@@ -70,6 +73,9 @@ export class ConsignadoController {
         month: body.month,
         previewOnly: Boolean(body.previewOnly),
         force: Boolean(body.force),
+        legacyTemplate: Boolean(body.legacyTemplate),
+        withCartaDiretoria: Boolean(body.withCartaDiretoria),
+        withFullPanorama2408: Boolean(body.withFullPanorama2408),
       });}
 
   @Get('teams/delegated/status')

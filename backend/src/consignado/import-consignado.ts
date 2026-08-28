@@ -27065,7 +27065,7 @@ function buildEmailTemplateHtml(opts: {
   const subtitle = escapeHtml(String(opts.subtitle ?? '').trim());
   const title = escapeHtml(String(opts.title ?? 'Portal Administrativo').trim() || 'Portal Administrativo');
   const logoDataUri = getEmailLogoDataUri();
-  const headerBg = '#ffffff';
+  const headerBg = '#003641';
   const topBarColor = '#003641';
   const bottomBarColor = '#00ae9d';
   return `<!doctype html>
@@ -27086,18 +27086,22 @@ function buildEmailTemplateHtml(opts: {
       <div style="background: ${headerBg}; border-top: 6px solid ${topBarColor}; border-bottom: 4px solid ${bottomBarColor}; padding: 18px 24px 16px;">
         <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse: collapse;">
           <tr>
-            <td align="left" valign="middle" style="width: 180px; white-space: nowrap;">
+            <td align="left" valign="middle" style="width: 150px; white-space: nowrap;">
               ${
                 logoDataUri
-                  ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height: 36px; background-color: #f1f5f9; padding: 4px 10px; border-radius: 8px; display: block;">`
-                  : '<span style="color:#0f172a; font-weight:900; font-size:18px;">SICOOB Juriscred</span>'
+                  ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height: 30px; background-color: rgba(255,255,255,0.1); padding: 4px 10px; border-radius: 8px; display: block;">`
+                  : '<span style="color:#ffffff; font-weight:900; font-size:16px;">SICOOB Juriscred</span>'
               }
             </td>
-            <td align="center" valign="middle" style="padding:0 12px;">
-              <div style="font-size:26px;font-weight:900;letter-spacing:-0.02em;line-height:1.15;color:#0f172a;">${title}</div>
-              <div style="font-size:13px;margin-top:8px;line-height:1.45;color:#334155;font-weight:600;">${subtitle}</div>
+            <td align="center" valign="middle" style="padding:0 10px;white-space:nowrap">
+              <div style="white-space:nowrap;font-size:20px;font-weight:900;letter-spacing:-0.02em;line-height:1.0;color:#ffffff;overflow-wrap:normal;word-break:keep-all;">${title}</div>
             </td>
-            <td style="width: 180px;">&nbsp;</td>
+            <td style="width: 150px;">&nbsp;</td>
+          </tr>
+          <tr>
+            <td colspan="3" align="center" style="padding-top:10px;">
+              <div style="font-size:13px;line-height:1.45;color:#e2e8f0;font-weight:600;">${subtitle}</div>
+            </td>
           </tr>
         </table>
       </div>
@@ -27106,10 +27110,10 @@ function buildEmailTemplateHtml(opts: {
         ${String(opts.contentHtml ?? '')}
       </div>
 
-      <div style="background-color: #f8fafc; border-top:1px solid #e2e8f0; padding: 18px 15px; text-align: center; font-size: 12px; color: #334155; line-height:1.6; font-weight:600;">
+      <div style="background-color: #003641; border-top:1px solid #004958; padding: 10px 15px; text-align: center; font-size: 11px; color: #e2e8f0; line-height:1.35; font-weight:600;">
         © 2026 Sicoob Juriscred • Portal Administrativo<br>
         Desenvolvido Por: Departamento de Tecnologia da Informação - Juriscred<br>
-        E-mail automático - Por favor não responder.
+        🤖 E-mail enviado por agentes de IA - Por favor não responder.
       </div>
     </div>
   </body>
@@ -33291,26 +33295,340 @@ export async function runImportConsignado(opts: {
   };
 }
 
+function formatOccurrencesPanoramaOrgaoLabel(orgaoRaw: unknown): string {
+  const raw = String(orgaoRaw ?? '').trim();
+  const key = normalizeExtratosOrgaoForMatch(raw) ?? '';
+  if (key === 'PIX RECEBIDO OUTRA IF') return '(ELETRA) PIX RECEBIDO - OUTRA IF';
+  if (key === 'CRED LIQUIDACAO COBRANCA') return '(ADFEGO) CRÉD.LIQUIDAÇÃO COBRANÇA';
+  return raw;
+}
+function formatOccurrenceActionLabel(actionRaw: unknown): string {
+  const t = String(actionRaw ?? '').trim().toLowerCase() || '';
+  if (!t) return '-';
+  const simple = t.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!simple) return '-';
+  if (simple.startsWith('solicitar encaminhamento credito')) return 'Solicitar Encaminhamento Crédito';
+  if (simple.startsWith('solicitar encaminhamento negocios')) return 'Solicitar Encaminhamento Negócios';
+  if (simple.startsWith('solicitar recurso sisbr')) return 'Solicitar Recurso SISBR';
+  if (simple.startsWith('enviar para contabilidade')) return 'Enviar para Contabilidade';
+  if (simple.startsWith('fechamento financeiro')) return 'Fechamento Financeiro';
+  if (simple.startsWith('credito liquidacao cobranca')) return 'Crédito Liquidação Cobrança';
+  if (simple.startsWith('liquidacao fora vencimento')) return 'Liquidação Fora Vencimento';
+  if (simple.startsWith('nao possui recurso')) return 'Não Possui Recurso';
+  if (simple.startsWith('clonar sisbr')) return 'Clonar para SISBR';
+  if (simple.startsWith('alterar orgao relatorio')) return 'Alterar Órgão Relatório';
+  if (simple.startsWith('devolucao antecipado')) return 'Devolução (Antecipado)';
+  if (simple.startsWith('devolucao quitado')) return 'Devolução (Quitado)';
+  if (simple.startsWith('antecipado devolvido')) return 'Antecipado Devolvido';
+  return simple.length > 1
+    ? simple.charAt(0).toUpperCase() + simple.slice(1)
+    : simple;
+}
+function formatOccurrencesPanoramaStageLabel(stage: unknown): string {
+  const value = String(stage ?? '').trim().toLowerCase();
+  if (value === 'credito') return 'Crédito';
+  if (value === 'negocios') return 'Negócios';
+  return 'Financeiro';
+}
+function formatOccurrencesPanoramaManagerLabel(emailRaw: unknown): string {
+  const email = String(emailRaw ?? '').trim().toLowerCase();
+  if (!email) return 'Sem gerente';
+  const localPart = email.split('@')[0] ?? '';
+  const words = localPart
+    .split(/[._-]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => item.charAt(0).toUpperCase() + item.slice(1));
+  return words.length > 0 ? words.join(' ') : email;
+}
+function getOccurrencesPanoramaMonthLabel(monthKey: unknown): string {
+  const match = String(monthKey ?? '').trim().match(/^(\d{4})-(\d{2})$/);
+  if (!match) return String(monthKey ?? '').trim() || '-';
+  return `${match[2]}/${match[1]}`;
+}
+function resolveLatestOccurrencesPanoramaMonthKey(db: Database): string | null {
+  if (!tableExists(db, 'conciliacao_pendencia_actions')) return null;
+  const stmt = db.prepare(`SELECT month
+     FROM conciliacao_pendencia_actions
+     WHERE COALESCE(TRIM(undone_at),'')=''
+       AND COALESCE(TRIM(error),'')=''
+       AND TRIM(COALESCE(month,''))<>''
+     GROUP BY month
+     ORDER BY month DESC
+     LIMIT 1;`);
+  try {
+    if (!stmt.step()) return null;
+    const row = stmt.getAsObject() as any;
+    return String(row.month ?? '').trim() || null;
+  } finally { stmt.free(); }
+}
+
+interface FullPanorama2408Data {
+  monthKey: string;
+  summary: { ocorrenciasEmAtraso: number; orgaosComAtraso: number; filasComAtraso: number };
+  managerCards: Array<{ label: string; total: number }>;
+  topStages: Array<{ label: string; total: number }>;
+  topOrgaos: Array<{ label: string; total: number }>;
+  topActions: Array<{ label: string; total: number }>;
+  recentItems: Array<{ createdAt: string; orgao: string; nome: string; value: string; action: string; stage: string; vencimento: string | null }>;
+  subject: string;
+}
+
+function buildFullPanorama2408Html(opts: {
+  monthKey: string;
+  summary: { ocorrenciasEmAtraso: number; orgaosComAtraso: number; filasComAtraso: number };
+  managerCards: Array<{ label: string; total: number }>;
+  topStages: Array<{ label: string; total: number }>;
+  topOrgaos: Array<{ label: string; total: number }>;
+  topActions: Array<{ label: string; total: number }>;
+  recentItems: Array<{ createdAt: string; orgao: string; nome: string; value: string; action: string; stage: string; vencimento: string | null }>;
+}): string {
+  const summaryCard = (label: string, value: string, tone?: { background?: string; border?: string; labelColor?: string; valueColor?: string }): string => `
+    <td style="padding:0 6px 12px 6px;vertical-align:top;">
+      <div style="padding:14px 16px;border-radius:16px;background:${tone?.background ?? '#f8fafc'};border:1px solid ${tone?.border ?? '#dbe4ee'};min-height:92px;">
+        <div style="font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:${tone?.labelColor ?? '#64748b'};margin-bottom:10px;line-height:1.35;">
+          ${escapeHtml(label)}
+        </div>
+        <div style="font-size:24px;font-weight:900;color:${tone?.valueColor ?? '#0f172a'};line-height:1.1;">
+          ${escapeHtml(value)}
+        </div>
+      </div>
+    </td>`;
+  const renderRankingTable = (title: string, colLabel: string, items: Array<{ label: string; total: number }>): string => `
+    <div style="margin-top:18px;padding:18px;border-radius:18px;background:#ffffff;border:1px solid #e2e8f0;">
+      <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:12px;">${escapeHtml(title)}</div>
+      ${items.length === 0
+        ? '<div style="font-size:13px;color:#64748b;">Nenhum item para exibir.</div>'
+        : `<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+             <thead>
+               <tr>
+                 <th style="text-align:left;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">${escapeHtml(colLabel)}</th>
+                 <th style="text-align:right;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Qtd.</th>
+               </tr>
+             </thead>
+             <tbody>
+               ${items.map((item) => `
+                   <tr>
+                     <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:13px;color:#0f172a;">${escapeHtml(item.label)}</td>
+                     <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:13px;color:#0f172a;text-align:right;font-weight:800;">${escapeHtml(String(item.total))}</td>
+                   </tr>`).join('')}
+             </tbody>
+           </table>`}
+    </div>`;
+  const managerCardsHtml = opts.managerCards.length === 0 ? '' : `
+    <div style="margin-top:18px;padding:18px;border-radius:18px;background:#ffffff;border:1px solid #e2e8f0;">
+      <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:12px;">Quantidade em atraso por gerente</div>
+      <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:12px 12px;">
+        <tr>
+          ${opts.managerCards.map((item) => `
+              <td style="width:33.33%;min-width:180px;vertical-align:top;">
+                <div style="padding:14px 16px;border-radius:16px;background:#f8fafc;border:1px solid #dbe4ee;min-height:92px;">
+                  <div style="font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#64748b;margin-bottom:10px;line-height:1.35;">
+                    ${escapeHtml(item.label)}
+                  </div>
+                  <div style="font-size:24px;font-weight:900;color:#0f172a;line-height:1.1;">
+                    ${escapeHtml(String(item.total))}
+                  </div>
+                </div>
+              </td>`).join('')}
+        </tr>
+      </table>
+    </div>`;
+  const recentRows = opts.recentItems.length === 0
+    ? '<tr><td colspan="6" style="padding:12px 0;color:#64748b;font-size:13px;">Nenhuma pendência aberta encontrada.</td></tr>'
+    : opts.recentItems.map((item) => `
+        <tr>
+          <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:12px;color:#475569;white-space:nowrap;">${escapeHtml(formatIsoToPtBrDateTime(item.createdAt))}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.orgao)}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.nome)}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.action)}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.stage)}</td>
+          <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;text-align:right;white-space:nowrap;">${escapeHtml(item.vencimento || '-')}</td>
+        </tr>`).join('');
+  return `
+    <div style="font-size:14px;color:#334155;line-height:1.7;">
+      <div style="margin:0 0 16px;padding:16px 18px;border-radius:16px;background:linear-gradient(135deg, #f8fafc 0%, #eef6f7 100%);border:1px solid #d9e8eb;">
+        <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:6px;">Panorama diário das ocorrências em atraso</div>
+        <div>Resumo automático apenas das ocorrências já em atraso na competência <b>${escapeHtml(getOccurrencesPanoramaMonthLabel(opts.monthKey))}</b>.</div>
+      </div>
+
+      <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+        <tr>
+          ${summaryCard('Ocorrências em atraso', String(opts.summary.ocorrenciasEmAtraso), {
+            background: '#ecfeff', border: '#bae6fd', valueColor: '#0f172a', labelColor: '#155e75',
+          })}
+          ${summaryCard('Órgãos com atraso', String(opts.summary.orgaosComAtraso), { background: '#f8fafc', border: '#dbe4ee' })}
+        </tr>
+        <tr>
+          ${summaryCard('Filas com atraso', String(opts.summary.filasComAtraso), {
+            background: '#fff7ed', border: '#fed7aa', valueColor: '#9a3412', labelColor: '#9a3412',
+          })}
+          ${summaryCard('Competência', escapeHtml(getOccurrencesPanoramaMonthLabel(opts.monthKey)), {
+            background: '#f8fafc', border: '#dbe4ee', valueColor: '#0f172a', labelColor: '#64748b',
+          })}
+        </tr>
+      </table>
+
+      ${managerCardsHtml}
+      ${renderRankingTable('Ocorrências em atraso por fila', 'Fila', opts.topStages)}
+      ${renderRankingTable('Top órgãos com ocorrência em atraso', 'Órgão', opts.topOrgaos)}
+      ${renderRankingTable('Top tipos de ocorrência em atraso', 'Ocorrência', opts.topActions)}
+
+      <div style="margin-top:18px;padding:18px;border-radius:18px;background:#ffffff;border:1px solid #e2e8f0;">
+        <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:12px;">Ocorrências em atraso mais recentes</div>
+        <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Data/Hora</th>
+              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Órgão</th>
+              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Nome</th>
+              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Ocorrência</th>
+              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Fila</th>
+              <th style="text-align:right;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Vencimento</th>
+            </tr>
+          </thead>
+          <tbody>${recentRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+async function buildFullPanorama2408Data(db: Database, monthKeyInput: unknown): Promise<FullPanorama2408Data> {
+  const monthKey = String(monthKeyInput ?? '').trim() || resolveLatestOccurrencesPanoramaMonthKey(db) || '';
+  if (!monthKey) throw new Error('Nenhuma competência com ocorrências foi encontrada.');
+  const stmt = db.prepare(`
+    SELECT
+      a.id as id,
+      a.created_at as created_at,
+      a.orgao as orgao,
+      a.nome as nome,
+      a.value as value,
+      a.action as action,
+      a.gerente_email as gerente_email,
+      a.meta_json as meta_json,
+      f.sla_due_at as flow_sla_due_at,
+      COALESCE(f.stage, 'financeiro') as flow_stage,
+      COALESCE(f.status, 'aberta') as flow_status
+    FROM conciliacao_pendencia_actions a
+    LEFT JOIN conciliacao_pendencia_flow f ON f.occurrence_id = a.id
+    WHERE a.month = ?
+      AND COALESCE(TRIM(a.undone_at),'') = ''
+      AND COALESCE(TRIM(a.error),'') = '';
+  `);
+  const rows: Array<{
+    id: number;
+    createdAt: string;
+    orgao: string;
+    nome: string;
+    value: string;
+    action: string;
+    stage: 'credito' | 'negocios' | 'financeiro';
+    status: 'aberta' | 'concluida';
+    slaDueAt: string | null;
+    gerenteEmail: string | null;
+    vencimento: string | null;
+  }> = [];
+  const tryPickVencimentoFromMeta = (metaRaw: unknown): string => {
+    const raw = String(metaRaw ?? '').trim();
+    if (!raw) return '';
+    try {
+      const parsed = JSON.parse(raw);
+      const direct = String((parsed as any)?.vencimentoRef ?? (parsed as any)?.vencimento ?? (parsed as any)?.venc ?? '').trim();
+      if (direct) return normalizeVencimentoLabel(direct);
+      const firstRow = Array.isArray((parsed as any)?.rows) ? (parsed as any).rows[0] : null;
+      if (!firstRow || typeof firstRow !== 'object') return '';
+      const v = (firstRow as any)?.Vencimento ?? (firstRow as any)?.vencimento ?? (firstRow as any)?.['Vencto. Operação'] ?? (firstRow as any)?.['Vencto. Operacao'];
+      return v ? normalizeVencimentoLabel(v) : '';
+    } catch {
+      return '';
+    }
+  };
+  try {
+    stmt.bind([monthKey]);
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as any;
+      const action = String(row.action ?? '').trim();
+      const stageRaw = String(row.flow_stage ?? '').trim().toLowerCase();
+      const stage = stageRaw === 'credito' ? 'credito' : stageRaw === 'negocios' ? 'negocios' : 'financeiro';
+      const statusRaw = String(row.flow_status ?? '').trim().toLowerCase();
+      const status = statusRaw === 'concluida' ? 'concluida' : 'aberta';
+      rows.push({
+        id: Number(row.id ?? 0) || 0,
+        createdAt: String(row.created_at ?? '').trim(),
+        orgao: String(row.orgao ?? '').trim(),
+        nome: String(row.nome ?? '').trim(),
+        value: String(row.value ?? '').trim(),
+        action,
+        stage,
+        status,
+        slaDueAt: typeof row.flow_sla_due_at === 'string' ? row.flow_sla_due_at.trim() || null : null,
+        gerenteEmail: typeof row.gerente_email === 'string' ? row.gerente_email.trim().toLowerCase() || null : null,
+        vencimento: (() => {
+          const picked = tryPickVencimentoFromMeta(String(row.meta_json ?? '').trim());
+          return picked && picked !== '-' ? picked : null;
+        })(),
+      });
+    }
+  } finally { stmt.free(); }
+  const nowMs = Date.now();
+  const overdueRows = rows.filter((row) => {
+    if (row.status !== 'aberta') return false;
+    if (!row.slaDueAt) return false;
+    const dueMs = Date.parse(row.slaDueAt);
+    if (!Number.isFinite(dueMs) || dueMs >= nowMs) return false;
+    if (row.action.startsWith('liquidacao_fora_vencimento')) return false;
+    if (row.action.startsWith('clonar_para_relatorio_sisbr')) return false;
+    if (row.action.startsWith('alterar_orgao_relatorio')) return false;
+    return true;
+  });
+  const countBy = <T>(items: T[], resolveKey: (row: T) => string): Array<{ label: string; total: number }> => {
+    const counts = new Map<string, number>();
+    for (const item of items) {
+      const key = resolveKey(item).trim();
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([label, total]) => ({ label, total }))
+      .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label, 'pt-BR'));
+  };
+  const summary = {
+    ocorrenciasEmAtraso: overdueRows.length,
+    orgaosComAtraso: new Set(overdueRows.map((row) => row.orgao).filter(Boolean)).size,
+    filasComAtraso: new Set(overdueRows.map((row) => row.stage).filter(Boolean)).size,
+  };
+  const managerCards = countBy(overdueRows, (row) => formatOccurrencesPanoramaManagerLabel(row.gerenteEmail || '')).slice(0, 6);
+  const topStages = countBy(overdueRows, (row) => formatOccurrencesPanoramaStageLabel(row.stage)).slice(0, 5);
+  const topOrgaos = countBy(overdueRows, (row) => formatOccurrencesPanoramaOrgaoLabel(row.orgao)).slice(0, 8);
+  const topActions = countBy(overdueRows, (row) => formatOccurrenceActionLabel(row.action)).slice(0, 8);
+  const recentItems = overdueRows
+    .slice()
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+    .slice(0, 12)
+    .map((row) => ({
+      createdAt: row.createdAt,
+      orgao: formatOccurrencesPanoramaOrgaoLabel(row.orgao),
+      nome: row.nome,
+      value: row.value,
+      action: formatOccurrenceActionLabel(row.action),
+      stage: formatOccurrencesPanoramaStageLabel(row.stage),
+      vencimento: row.vencimento,
+    }));
+  const subject = `Consignados - Panorama diário de ocorrências em atraso • ${getOccurrencesPanoramaMonthLabel(monthKey)} • ${summary.ocorrenciasEmAtraso} em atraso`;
+  return { monthKey, summary, managerCards, topStages, topOrgaos, topActions, recentItems, subject };
+}
+
 export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, unknown> = {}): Promise<{
   sent: boolean;
-  recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade'; email: string }>;
+  recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade' | 'custom'; email: string }>;
   subjectPrefix: string;
   countsByMonth: Record<string, { total: number; byAction: Record<string, number> }>;
+  slaBreaches?: Array<{ ocorrenciaId: number; stage: string; status: string; month: string; orgao: string; nome: string; cpf: string; action: string; value: string; slaStartedAt: string | null; slaDueAt: string | null; atrasoHoras: number; }>;
 }> {
-  // --- DESATIVADO POR SOLICITAÇÃO DO USUÁRIO em 2026-08-17 ---
-  // Envio automático e manual do panorama diário estão desligados.
-  // Para reativar no futuro basta remover/condicionar o early return abaixo
-  // (deixando passar apenas quando opts.force === true, por exemplo).
   const forceSend = Boolean(_opts?.force ?? false);
-  if (!forceSend) {
-    const hoje = formatDatePtBr(new Date());
-    return {
-      sent: false,
-      recipients: [],
-      subjectPrefix: `Panorama diário de ocorrências ${hoje} (desativado)`,
-      countsByMonth: {},
-    };
-  }
+  const legacyTemplate = Boolean(_opts?.legacyTemplate ?? false);
+  const withCartaDiretoria = Boolean(_opts?.withCartaDiretoria ?? false);
+  const withFullPanorama2408 = Boolean(_opts?.withFullPanorama2408 ?? false);
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
@@ -33353,6 +33671,48 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
     } finally { s.free(); }
   } catch { /* ignore */ }
 
+  const slaBreaches: Array<{
+    ocorrenciaId: number; stage: string; status: string; month: string; orgao: string; nome: string;
+    cpf: string; action: string; value: string; slaStartedAt: string | null; slaDueAt: string | null; atrasoHoras: number;
+  }> = [];
+  try {
+    const nowMs = Date.now();
+    const s2 = db.prepare(`
+      SELECT f.occurrence_id, f.stage, f.status, f.sla_started_at, f.sla_due_at, f.sla_seconds,
+             a.month, a.orgao, a.cpf, a.nome, a.action, a.value
+      FROM conciliacao_pendencia_flow f
+      INNER JOIN conciliacao_pendencia_actions a ON a.id = f.occurrence_id
+      WHERE COALESCE(f.sla_stopped_at,'') = ''
+        AND COALESCE(f.sla_due_at,'') <> ''
+        AND f.sla_due_at <= ?
+        AND COALESCE(a.undone_at,'') = ''
+      ORDER BY f.sla_due_at ASC
+      LIMIT 100;
+    `);
+    try {
+      s2.bind([new Date(nowMs).toISOString()]);
+      while (s2.step()) {
+        const r = s2.getAsObject() as any;
+        const dueMs = r.sla_due_at ? new Date(String(r.sla_due_at)).getTime() : nowMs;
+        const atrasoHoras = Math.max(0, Math.round(((nowMs - dueMs) / 1000 / 60 / 60) * 10) / 10);
+        slaBreaches.push({
+          ocorrenciaId: Number(r.occurrence_id) || 0,
+          stage: String(r.stage ?? ''),
+          status: String(r.status ?? ''),
+          month: String(r.month ?? ''),
+          orgao: String(r.orgao ?? ''),
+          nome: String(r.nome ?? ''),
+          cpf: String(r.cpf ?? ''),
+          action: String(r.action ?? ''),
+          value: String(r.value ?? ''),
+          slaStartedAt: r.sla_started_at ? String(r.sla_started_at) : null,
+          slaDueAt: r.sla_due_at ? String(r.sla_due_at) : null,
+          atrasoHoras,
+        });
+      }
+    } finally { s2.free(); }
+  } catch { /* ignore */ }
+
   const now = new Date();
   const todayPtBr = formatDatePtBr(now);
   // --- FIX (antigo, mantido: evitar enviar o mesmo panorama múltiplas vezes por dia ---
@@ -33364,24 +33724,42 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
       getConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT) ?? '',
     ).trim();
     if (lastSentAt && lastSentAt === todayPtBr) {
-      return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth };
+      return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches };
     }
   }
-  const subjectPrefix = `Panorama diário de ocorrências ${todayPtBr}`;
+  const slaCount = legacyTemplate ? 0 : slaBreaches.length;
+  const subjectPrefix = (slaCount > 0 && !legacyTemplate)
+    ? `Panorama diário de ocorrências ${todayPtBr} — SLA estourando: ${slaCount}`
+    : `Panorama diário de ocorrências ${todayPtBr}`;
 
-  const recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade'; email: string }> = [];
+  const recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade' | 'custom'; email: string }> = [];
   const splitEmails = (raw: string): string[] =>
     raw
       .split(/[;,]/)
       .map((s) => s.trim())
       .filter(Boolean);
 
-  if (diretoriaEmail) splitEmails(diretoriaEmail).forEach((e) => recipients.push({ type: 'diretoria', email: e }));
-  if (gerentesEmail) splitEmails(gerentesEmail).forEach((e) => recipients.push({ type: 'gerencia', email: e }));
-  if (contabilidadeEmail) splitEmails(contabilidadeEmail).forEach((e) => recipients.push({ type: 'contabilidade', email: e }));
+  const customToRaw = _opts?.to;
+  const customCcRaw = _opts?.cc;
+  const customToArr: string[] = [];
+  const customCcArr: string[] = [];
+  if (Array.isArray(customToRaw)) customToRaw.forEach((e: any) => { const s = String(e ?? '').trim(); if (s) customToArr.push(s); });
+  else if (customToRaw && typeof customToRaw === 'string') splitEmails(String(customToRaw)).forEach((e) => customToArr.push(e));
+  if (Array.isArray(customCcRaw)) customCcRaw.forEach((e: any) => { const s = String(e ?? '').trim(); if (s) customCcArr.push(s); });
+  else if (customCcRaw && typeof customCcRaw === 'string') splitEmails(String(customCcRaw)).forEach((e) => customCcArr.push(e));
+
+  const isCustomRecipient = customToArr.length > 0 || customCcArr.length > 0;
+  if (isCustomRecipient) {
+    customToArr.forEach((e) => recipients.push({ type: 'custom', email: e }));
+    customCcArr.forEach((e) => recipients.push({ type: 'custom', email: e }));
+  } else {
+    if (diretoriaEmail) splitEmails(diretoriaEmail).forEach((e) => recipients.push({ type: 'diretoria', email: e }));
+    if (gerentesEmail) splitEmails(gerentesEmail).forEach((e) => recipients.push({ type: 'gerencia', email: e }));
+    if (contabilidadeEmail) splitEmails(contabilidadeEmail).forEach((e) => recipients.push({ type: 'contabilidade', email: e }));
+  }
 
   if (!tenantId || !clientId || !notificationFrom || recipients.length === 0) {
-    return { sent: false, recipients, subjectPrefix, countsByMonth };
+    return { sent: false, recipients, subjectPrefix, countsByMonth, slaBreaches };
   }
 
   try {
@@ -33406,35 +33784,181 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
             <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#334155">${topActions || '-'}</td>
           </tr>`;
         }).join('');
-    const html = `
-      <div style="font-family:Segoe UI,Arial,sans-serif;max-width:860px;margin:auto">
-        <div style="font-size:18px;font-weight:900;color:#0f172a;margin-bottom:8px">${subjectPrefix}</div>
-        <div style="color:#475569;margin-bottom:16px">Resumo de ocorrências ativas (sem undone_at) por competência.</div>
-        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">
-          <thead style="background:#f8fafc">
-            <tr>
-              <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Competência</th>
-              <th style="padding:10px 12px;text-align:right;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Total Ocorrências</th>
-              <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Top ações (6 primeiras)</th>
-            </tr>
-          </thead>
-          <tbody>${htmlRows}</tbody>
-        </table>
-      </div>`;
+    const slaSummaryHtml = slaCount === 0
+      ? `<div style="margin-top:22px;padding:14px 16px;background:#f0fdf4;border:1px solid #86efac;border-radius:12px">
+           <div style="font-weight:800;color:#166534;margin-bottom:4px">SLA — Todas as ocorrências no prazo ✔</div>
+           <div style="color:#15803d;font-size:13px">Nenhuma pendência com prazo de 48h estourado.</div>
+         </div>`
+      : `<div style="margin-top:22px;padding:14px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px">
+           <div style="font-weight:900;color:#991b1b;margin-bottom:2px;font-size:15px">SLA ESTOURANDO — ${slaCount} ocorrência(s) fora do prazo de 48h</div>
+           <div style="color:#7f1d1d;font-size:13px;margin-bottom:12px">
+             Pendências movidas para Crédito/Negócios que não foram concluídas e já ultrapassaram o vencimento do SLA.
+           </div>
+           <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;background:#fff;border-radius:10px;overflow:hidden">
+             <thead style="background:#fee2e2">
+               <tr>
+                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Atraso</th>
+                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Competência</th>
+                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Estágio</th>
+                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Órgão / Nome</th>
+                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Ação / Valor</th>
+                 <th style="padding:8px 10px;text-align:right;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Venceu em</th>
+               </tr>
+             </thead>
+             <tbody>
+               ${slaBreaches.map((b) => {
+                 const orgaoCurto = (b.orgao || '').length > 32 ? String(b.orgao).slice(0, 31) + '…' : (b.orgao || '-');
+                 const nomeCurto = (b.nome || '').length > 28 ? String(b.nome).slice(0, 27) + '…' : (b.nome || '-');
+                 const venceu = b.slaDueAt ? new Date(b.slaDueAt) : null;
+                 const venceuStr = venceu
+                   ? `${String(venceu.getDate()).padStart(2,'0')}/${String(venceu.getMonth()+1).padStart(2,'0')}/${venceu.getFullYear()} ${String(venceu.getHours()).padStart(2,'0')}:${String(venceu.getMinutes()).padStart(2,'0')}`
+                   : '-';
+                 return `<tr>
+                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;font-weight:800;color:#b91c1c">${b.atrasoHoras.toFixed(1)}h</td>
+                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca">${b.month || '-'}</td>
+                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca">${String(b.stage || b.status || '').replace(/_/g,' ') || '-'}</td>
+                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;font-size:12px">
+                     <div style="font-weight:700;color:#1f2937">${orgaoCurto}</div>
+                     <div style="color:#475569">${nomeCurto} · ${b.cpf || '-'}</div>
+                   </td>
+                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;font-size:12px">
+                     <div style="font-weight:600;color:#1f2937">${String(b.action || '').replace(/_/g,' ') || '-'}</div>
+                     <div style="color:#475569">${b.value || '-'}</div>
+                   </td>
+                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;text-align:right;color:#7f1d1d;font-size:12px;white-space:nowrap">${venceuStr}</td>
+                 </tr>`;
+               }).join('')}
+             </tbody>
+           </table>
+         </div>`;
+
+    let fullPanorama2408: FullPanorama2408Data | null = null;
+    let effectiveSubject: string = subjectPrefix;
+    if (withFullPanorama2408) {
+      fullPanorama2408 = await buildFullPanorama2408Data(db, _opts?.month);
+      effectiveSubject = fullPanorama2408.subject;
+    }
+
+    const html = withFullPanorama2408 && fullPanorama2408
+      ? buildEmailTemplateHtml({
+          title: `Panorama Consignados ${getOccurrencesPanoramaMonthLabel(fullPanorama2408.monthKey)}`,
+          subtitle: `${getOccurrencesPanoramaMonthLabel(fullPanorama2408.monthKey)} • ${fullPanorama2408.summary.ocorrenciasEmAtraso} ocorrências em atraso`,
+          introHtml: `
+            <div style="font-size:14px; color:#334155; white-space:pre-line;">
+              À
+              Diretoria do Sicoob Juriscred
+            </div>
+            <div style="margin-top:12px; font-size:14px; color:#0f172a; font-weight:700;">
+              Assunto: Solicitação de apoio na regularização de pendências
+            </div>
+            <div style="margin-top:18px; font-size:14px; color:#334155;">
+              Prezados(as),
+            </div>
+            <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
+              Solicitamos o apoio desta Diretoria na tratativa e regularização das pendências relacionadas abaixo, que permanecem em atraso sob responsabilidade dos Gerentes de PA.
+            </div>
+            <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
+              Ressaltamos que a manutenção dessas ocorrências em aberto e fora do prazo estabelecido tem gerado impactos diretos nos processos financeiros e contábeis da Cooperativa, podendo comprometer o cumprimento dos prazos e a adequada execução das rotinas operacionais.
+            </div>
+            <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
+              Diante do exposto, solicitamos o apoio da Diretoria junto aos responsáveis, visando à priorização e regularização das pendências com a maior brevidade possível.
+            </div>
+            <div style="margin-top:18px; font-size:14px; color:#334155;">
+              Atenciosamente,
+            </div>
+            <div style="margin-top:6px; font-size:14px; color:#334155; font-weight:700;">
+              Financeiro/Contabilidade
+            </div>
+          `.trim(),
+          contentHtml: `
+            ${buildFullPanorama2408Html(fullPanorama2408)}
+          `.trim(),
+        })
+      : withCartaDiretoria
+        ? buildEmailTemplateHtml({
+            title: 'Consignados - Panorama das Ocorrências em Atraso',
+            subtitle: `${todayPtBr} • ${monthsSorted.length} competência(s) ativa(s) • ${Object.values(countsByMonth).reduce((s, x) => s + x.total, 0)} ocorrências`,
+            introHtml: `
+              <div style="font-size:14px; color:#334155; white-space:pre-line;">
+                À
+                Diretoria do Sicoob Juriscred
+              </div>
+              <div style="margin-top:12px; font-size:14px; color:#0f172a; font-weight:700;">
+                Assunto: Solicitação de apoio na regularização de pendências
+              </div>
+              <div style="margin-top:18px; font-size:14px; color:#334155;">
+                Prezados(as),
+              </div>
+              <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
+                Solicitamos o apoio desta Diretoria na tratativa e regularização das pendências relacionadas abaixo, que permanecem em atraso sob responsabilidade dos Gerentes de PA.
+              </div>
+              <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
+                Ressaltamos que a manutenção dessas ocorrências em aberto e fora do prazo estabelecido tem gerado impactos diretos nos processos financeiros e contábeis da Cooperativa, podendo comprometer o cumprimento dos prazos e a adequada execução das rotinas operacionais.
+              </div>
+              <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
+                Diante do exposto, solicitamos o apoio da Diretoria junto aos responsáveis, visando à priorização e regularização das pendências com a maior brevidade possível.
+              </div>
+              <div style="margin-top:18px; font-size:14px; color:#334155;">
+                Atenciosamente,
+              </div>
+              <div style="margin-top:6px; font-size:14px; color:#334155; font-weight:700;">
+                Financeiro/Contabilidade
+              </div>
+            `.trim(),
+            contentHtml: `
+              <div style="margin-top:4px">
+                <div style="font-size:15px;font-weight:800;color:#0f172a;margin-bottom:10px">Resumo por competência</div>
+                <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">
+                  <thead style="background:#f8fafc">
+                    <tr>
+                      <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Competência</th>
+                      <th style="padding:10px 12px;text-align:right;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Total Ocorrências</th>
+                      <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Top ações (6 primeiras)</th>
+                    </tr>
+                  </thead>
+                  <tbody>${htmlRows}</tbody>
+                </table>
+              </div>
+              ${legacyTemplate ? '' : slaSummaryHtml}
+            `.trim(),
+          })
+        : `
+        <div style="font-family:Segoe UI,Arial,sans-serif;max-width:860px;margin:auto">
+          <div style="font-size:18px;font-weight:900;color:#0f172a;margin-bottom:8px">${subjectPrefix}</div>
+          <div style="color:#475569;margin-bottom:16px">Resumo de ocorrências ativas (sem undone_at) por competência.</div>
+          <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">
+            <thead style="background:#f8fafc">
+              <tr>
+                <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Competência</th>
+                <th style="padding:10px 12px;text-align:right;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Total Ocorrências</th>
+                <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Top ações (6 primeiras)</th>
+              </tr>
+            </thead>
+            <tbody>${htmlRows}</tbody>
+          </table>
+          ${legacyTemplate ? '' : slaSummaryHtml}
+        </div>`;
+    const customToEmails = recipients.filter((r) => r.type === 'custom').map((r) => r.email);
+    const toList = customToEmails.length > 0
+      ? customToEmails
+      : recipients.filter((r) => r.type === 'diretoria').map((r) => r.email) || [recipients[0]!.email];
+    const ccList = customToEmails.length > 0
+      ? []
+      : recipients.filter((r) => r.type !== 'diretoria').map((r) => r.email) || undefined;
     await sendGraphMail({
       token,
       from: notificationFrom,
-      to: recipients.filter((r) => r.type === 'diretoria').map((r) => r.email) || [recipients[0]!.email],
-      cc: recipients.filter((r) => r.type !== 'diretoria').map((r) => r.email) || undefined,
-      subject: subjectPrefix,
+      to: toList,
+      cc: ccList,
+      subject: effectiveSubject,
       html,
     });
-    // --- FIX: marcar que o panorama de HOJE já foi enviado ---
-    // evita re-envio de hora em hora nas próximas execuções do scheduler.
     try {
-      setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr);
+      if (!isCustomRecipient) {
+        setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr);
+      }
     } catch { /* ignore, não bloqueia retorno do envio */ }
-    return { sent: true, recipients, subjectPrefix, countsByMonth };
+    return { sent: true, recipients, subjectPrefix, countsByMonth, slaBreaches };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e ?? 'Erro desconhecido');
     throw new Error(`sendDailyOccurrencesPanoramaEmail falhou: ${message}`);
@@ -34971,34 +35495,27 @@ export async function getTeamsDelegatedLoginStatus(): Promise<{
 }
 
 let _dailyPanoramaSchedulerStarted = false;
+let _dailyPanoramaTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startDailyOccurrencesPanoramaScheduler(): { started: boolean; alreadyRunning: boolean; nextRunAtIso: string | null; intervalMs: number; } {
-  // --- DESATIVADO POR SOLICITAÇÃO DO USUÁRIO em 2026-08-17 ---
-  // O panorama diário automático foi desligado (ver também main.ts onde a chamada inicial está comentada).
-  // Para reativar no futuro basta:
-  //   (1) descomentar a chamada safeStart() em main.ts; e
-  //   (2) remover o early return abaixo e restaurar o bloco antigo (tick/setInterval).
-  void _dailyPanoramaSchedulerStarted;
-  return {
-    started: false,
-    alreadyRunning: true, // sinaliza "já estava rodando" para logs silenciosos (não dispara mais nada)
-    nextRunAtIso: null,
-    intervalMs: 60 * 60 * 1000,
-  };
-  /* --- código original (para referência / reativação futura):
   const intervalMs = 60 * 60 * 1000;
+  if (String(process.env.DISABLE_PANORAMA_SCHEDULER ?? '').trim().toLowerCase() === 'true') {
+    return { started: false, alreadyRunning: false, nextRunAtIso: null, intervalMs };
+  }
   if (_dailyPanoramaSchedulerStarted) {
     return { started: false, alreadyRunning: true, nextRunAtIso: null, intervalMs };
   }
   _dailyPanoramaSchedulerStarted = true;
   const tick = async () => {
     try {
-      await sendDailyOccurrencesPanoramaEmail();
-    } catch { /* ignore * / }
+      const r = await sendDailyOccurrencesPanoramaEmail({ withFullPanorama2408: true });
+      console.log('[PANORAMA][scheduler] tick executado: sent=' + r.sent + ' subject="' + r.subjectPrefix + '" recipients=' + r.recipients.length + ' meses=' + Object.keys(r.countsByMonth).length + ' slaBreaches=' + (r.slaBreaches?.length ?? 0));
+    } catch (e) {
+      console.error('[PANORAMA][scheduler] tick falhou:', e instanceof Error ? (e.stack || e.message) : String(e));
+    }
   };
   void tick();
-  const timer = setInterval(() => { void tick(); }, intervalMs);
-  if (typeof timer === 'undefined' || timer === null) { /* noop * / }
+  _dailyPanoramaTimer = setInterval(() => { void tick(); }, intervalMs);
   const nextRunAtIso = new Date(Date.now() + intervalMs).toISOString();
   return {
     started: true,
@@ -35006,7 +35523,6 @@ export function startDailyOccurrencesPanoramaScheduler(): { started: boolean; al
     nextRunAtIso,
     intervalMs,
   };
-  --- fim código original --- */
 }
 
 const JOB_KV_PREFIX = 'job_record::v1::';
@@ -36074,6 +36590,12 @@ export async function bootstrapAutomationSystem(): Promise<{ ok: boolean; cleanu
     console.log('[FASE3][bootstrap] INICIANDO bootstrapAutomationSystem()...');
     await _ensureDefaultSchedules();
     _attachBootstrapListenersOnce();
+    try {
+      const p = startDailyOccurrencesPanoramaScheduler();
+      console.log('[PANORAMA][bootstrap] startDailyOccurrencesPanoramaScheduler: started=' + p.started + ' alreadyRunning=' + p.alreadyRunning + ' next=' + p.nextRunAtIso + ' intervalMs=' + p.intervalMs);
+    } catch (e) {
+      console.error('[PANORAMA][bootstrap] startDailyOccurrencesPanoramaScheduler ERRO:', e instanceof Error ? (e.stack || e.message) : String(e));
+    }
     void cleanupOldJobsTtl().then((r) => { cleanup = r; console.log('[FASE3][bootstrap][TTL] cleanupOldJobsTtl concluído: removed=' + r.removed + ' checked=' + r.checked + ' ttlDias=' + r.ttlDias); }).catch((e) => { console.error('[FASE3][bootstrap][TTL] cleanupOldJobsTtl erro:', e instanceof Error ? (e.stack || e.message) : String(e)); });
     try { const sz = ImportJobsManager.inMem.size; console.log('[FASE3][bootstrap] ImportJobsManager.inMem size inicial=' + sz); } catch { /* placeholder p/ touch ImportJobsManager no boot */ }
     console.log('[FASE3][bootstrap] CONCLUÍDO com sucesso.');
