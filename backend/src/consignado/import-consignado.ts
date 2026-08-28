@@ -23228,9 +23228,9 @@ async function createConciliacaoPorDataPdfBuffer(opts: {
   let logoBuf: Buffer | null = null;
   try {
     const candidates = [
-      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
     ];
     const logoPath = candidates.find((candidate) => fs.existsSync(candidate));
     logoBuf = logoPath ? fs.readFileSync(logoPath) : null;
@@ -27037,12 +27037,14 @@ function escapeHtml(value: string): string {
 function getEmailLogoDataUri(): string | null {
   try {
     const candidates = [
-      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
       path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
       path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
       path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'frontend/dist/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), '../frontend/dist/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
     ];
     const p = candidates.find((x) => fs.existsSync(x));
     if (!p) return null;
@@ -34513,9 +34515,9 @@ async function createConciliacaoPdfBuffer(opts: {
   let logoBuf: Buffer | null = null;
   try {
     const candidates = [
-      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
     ];
     const logoPath = candidates.find((p) => fs.existsSync(p));
     logoBuf = logoPath ? fs.readFileSync(logoPath) : null;
