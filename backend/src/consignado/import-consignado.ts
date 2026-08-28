@@ -33622,6 +33622,7 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
   sent: boolean;
   recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade' | 'custom'; email: string }>;
   subjectPrefix: string;
+  effectiveSubject?: string;
   countsByMonth: Record<string, { total: number; byAction: Record<string, number> }>;
   slaBreaches?: Array<{ ocorrenciaId: number; stage: string; status: string; month: string; orgao: string; nome: string; cpf: string; action: string; value: string; slaStartedAt: string | null; slaDueAt: string | null; atrasoHoras: number; }>;
 }> {
@@ -33958,7 +33959,7 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
         setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr);
       }
     } catch { /* ignore, não bloqueia retorno do envio */ }
-    return { sent: true, recipients, subjectPrefix, countsByMonth, slaBreaches };
+    return { sent: true, recipients, subjectPrefix, effectiveSubject, countsByMonth, slaBreaches };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e ?? 'Erro desconhecido');
     throw new Error(`sendDailyOccurrencesPanoramaEmail falhou: ${message}`);
@@ -35508,8 +35509,8 @@ export function startDailyOccurrencesPanoramaScheduler(): { started: boolean; al
   _dailyPanoramaSchedulerStarted = true;
   const tick = async () => {
     try {
-      const r = await sendDailyOccurrencesPanoramaEmail({ withFullPanorama2408: true });
-      console.log('[PANORAMA][scheduler] tick executado: sent=' + r.sent + ' subject="' + r.subjectPrefix + '" recipients=' + r.recipients.length + ' meses=' + Object.keys(r.countsByMonth).length + ' slaBreaches=' + (r.slaBreaches?.length ?? 0));
+      const r = await sendDailyOccurrencesPanoramaEmail({ force: true, withFullPanorama2408: true });
+      console.log('[PANORAMA][scheduler] tick executado: sent=' + r.sent + ' subject="' + (r.sent ? r.effectiveSubject || r.subjectPrefix : r.subjectPrefix) + '" recipients=' + r.recipients.length + ' meses=' + Object.keys(r.countsByMonth).length + ' slaBreaches=' + (r.slaBreaches?.length ?? 0));
     } catch (e) {
       console.error('[PANORAMA][scheduler] tick falhou:', e instanceof Error ? (e.stack || e.message) : String(e));
     }
