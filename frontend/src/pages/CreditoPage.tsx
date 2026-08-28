@@ -235,8 +235,11 @@ function makeConciliacaoPorDataEventColumnKey(label: string) {
 
 function isConciliacaoPorDataDevolucaoEvent(event: unknown) {
   const normalized = String(event ?? '').trim().toUpperCase()
-  return normalized.startsWith('DEVOLUÇÃO')
+  void normalized
+  void event
+  return false
 }
+void isConciliacaoPorDataDevolucaoEvent
 
 function splitConciliacaoPorDataHeaderLabel(label: string) {
   const normalized = String(label ?? '').trim()
