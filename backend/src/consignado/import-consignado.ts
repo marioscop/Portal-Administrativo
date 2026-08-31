@@ -35511,7 +35511,7 @@ export function startDailyOccurrencesPanoramaScheduler(): { started: boolean; al
   _dailyPanoramaSchedulerStarted = true;
   const tick = async () => {
     try {
-      const r = await sendDailyOccurrencesPanoramaEmail({ force: true, withFullPanorama2408: true });
+      const r = await sendDailyOccurrencesPanoramaEmail({ withFullPanorama2408: true });
       console.log('[PANORAMA][scheduler] tick executado: sent=' + r.sent + ' subject="' + (r.sent ? r.effectiveSubject || r.subjectPrefix : r.subjectPrefix) + '" recipients=' + r.recipients.length + ' meses=' + Object.keys(r.countsByMonth).length + ' slaBreaches=' + (r.slaBreaches?.length ?? 0));
     } catch (e) {
       console.error('[PANORAMA][scheduler] tick falhou:', e instanceof Error ? (e.stack || e.message) : String(e));
