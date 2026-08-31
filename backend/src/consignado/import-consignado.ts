@@ -27,8 +27,8 @@ if (process.env.NODE_ENV !== 'production') {
 type PdfParseResult = { text?: string };
 type PdfParseFn = (dataBuffer: Buffer) => Promise<PdfParseResult>;
 
-const DB_CACHE_MAX_ENTRIES = 8;
-const DB_CACHE_TTL_MS = 30 * 60 * 1000;
+const DB_CACHE_MAX_ENTRIES = 32;
+const DB_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias corridos. Previne "Database closed" após ociosidade > 30 min do processo PM2
 const DB_MTIME_SAFETY_DELTA_MS = 50;
 type DbCacheEntry = { db: Database; mtimeMs: number; lastUsedMs: number };
 let cachedPdfParse: PdfParseFn | null = null;
