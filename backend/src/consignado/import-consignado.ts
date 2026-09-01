@@ -84,12 +84,7 @@ function evictOldDbCacheEntriesIfNeeded(): void {
     (a, b) => a[1].lastUsedMs - b[1].lastUsedMs,
   );
   const toRemove = sorted.slice(0, cachedDbByPath.size - DB_CACHE_MAX_ENTRIES);
-  for (const [resolvedPath, entry] of toRemove) {
-    try {
-      (entry.db as { close?: () => void }).close?.();
-    } catch {
-      void 0;
-    }
+  for (const [resolvedPath] of toRemove) {
     cachedDbByPath.delete(resolvedPath);
   }
 }
@@ -97,11 +92,6 @@ function evictOldDbCacheEntriesIfNeeded(): void {
 function evictExpiredDbCacheEntriesIfNeeded(nowMs: number): void {
   for (const [resolvedPath, entry] of Array.from(cachedDbByPath.entries())) {
     if (nowMs - entry.lastUsedMs > DB_CACHE_TTL_MS) {
-      try {
-        (entry.db as { close?: () => void }).close?.();
-      } catch {
-        void 0;
-      }
       cachedDbByPath.delete(resolvedPath);
     }
   }
@@ -4998,11 +4988,7 @@ async function openDatabase(dbPath: string): Promise<Database> {
     return cached.db;
   }
   if (cached) {
-    try {
-      (cached.db as { close?: () => void }).close?.();
-    } catch (e) {
-      safeLogError('openDatabase close stale cache', e);
-    }
+    cachedDbByPath.delete(resolvedPath);
   }
 
   let db: Database;
