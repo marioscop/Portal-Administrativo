@@ -72,6 +72,7 @@ const TARGETS: Array<{ value: string; label: string; desc: string }> = [
   { value: 'recurso_mpgo', label: 'Recurso MPGO', desc: 'Ministério Público de Goiás' },
   { value: 'recurso_tjgo', label: 'Recurso TJGO', desc: 'Tribunal de Justiça de Goiás' },
   { value: 'recurso_neoconsig_demais', label: 'Demais Neoconsig', desc: 'Outros órgãos via padrão Neoconsig' },
+  { value: 'extratos_todos', label: 'Extrato TODOS', desc: 'TODOS-MÊS-ANO.xlsx / Conta Corrente (CRÉD.TED-STR)' },
 ]
 
 const STATUS_STYLES: Record<JobStatus, { label: string; bg: string; color: string; border: string; dot: string; icon: React.ReactNode }> = {

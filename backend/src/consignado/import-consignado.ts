@@ -6987,6 +6987,66 @@ function ensureDefaultLearningProfiles(db: Database) {
       moveToImportadosSubfolderAfterImport: true,
     },
   });
+  // ========= REGRA OFICIAL GRAVADA em 2026-09-01 — EXTRATO RECURSO TODOS (TODOS-MÊS-ANO.xlsx) =========
+  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
+  // Formato idêntico ao TRE/TRT/ADFEGO/ELETRO — planilha conta corrente 5 cols: DATA / DOCUMENTO / HISTÓRICO / INFORMAÇÕES COMPLEMENTARES / VALOR.
+  //   [TO1] Match: Nome do arquivo COMECE com "TODOS" (case insensitive) + extensão .xlsx/.xlsm/.xls.
+  //        Ex: TODOS-AGOSTO-2026.xlsx, TODOS SETEMBRO 2026.xlsm, TODOS_09-2026.xls.
+  //   [TO2] Pipeline idêntico Conta Corrente TRE/TRT:
+  //        DATA (col 1) → DATA · DOCUMENTO (col 2) → DOCUMENTO · HISTÓRICO Excel (col 3) → apenas marcador de filtro abaixo.
+  //        INFORMAÇÕES COMPLEMENTARES (col 4) → HISTÓRICO BD (SOMENTE a 1ª linha útil da célula = linha nome órgão).
+  //        VALOR (col 5) → VALOR. HISTÓRICO_1 BD vazio.
+  //        Copetencia = Mês arquivo + 1 (ex: TODOS-AGOSTO-2026 → 09/2026).
+  //        CompetenciaArquivo = prefixo-mês-ano (TODOS-AGOSTO-2026).
+  //   [TO3] Filtro de linhas: SÓ importa se HISTÓRICO Excel === "CRÉD.TED-STR" (case + acento insensitive).
+  //        (Arquivos modelos TODOS costumam ter 100% das linhas com esse marcador; filtro protege contra totalizadores / headers fantasmas / outras movimentações de débito).
+  //   [TO4] BFS SharePoint prioriza subpastas TODOS. checkDuplicateContent=true. Pós-insert move para Importados.
+  try {
+    db.run(`DELETE FROM import_learning_profiles WHERE id='extratos_todos_go';`);
+  } catch { /* ignore */ }
+  upsertLearningProfile(db, {
+    id: 'extratos_todos_go',
+    kind: 'extratos',
+    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
+    fileNameRegex: '^TODOS.*\\.(xlsx|xlsm|xls)$',
+    targetTable: 'extratos',
+    options: {
+      isTodosExtratoProfile: true,
+      isOrgaoContaCorrenteExtrato: true,
+      historicoStrictFilterCtedStr: true,
+      mode: 'append',
+      folderCandidates: [
+        'Extratos de Recurso/TODOS',
+        'Extrato de Recurso/TODOS',
+        'Extratos do Recurso/TODOS',
+        'Extrato do Recurso/TODOS',
+        'Extratos Recurso/TODOS',
+        'Extrato Recurso/TODOS',
+        'Extratos/TODOS',
+        'Extrato/TODOS',
+        'TODOS',
+        'Todos',
+        'Extratos de Recurso',
+        'Extrato de Recurso',
+        'Extratos do Recurso',
+        'Extrato do Recurso',
+        'Extratos Recurso',
+        'Extrato Recurso',
+        'Extratos',
+        'Extrato',
+        'Extrato(s)',
+        'Extratos de Recursos',
+        'Extrato de Recursos',
+      ],
+      ignoreImportados: true,
+      checkDuplicateContent: true,
+      strictColumnWhitelist: null,
+      strictColumnMinMatches: 0,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
+    },
+  });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-19 — EXTRATOS (Extrato Recurso / Extrato de Recurso) =========
   // Pipeline de transformação (antes do insert, aplicado se kind === 'extratos'):
   //   [E1] Flexibilidade total: QUALQUER arquivo .xlsx/.xlsm/.xls dentro de uma pasta com nome
@@ -8324,11 +8384,30 @@ function insertExtratosRows(opts: {
     profileIdNorm.startsWith('extratos_trt');
   const isAdfegoById = profileIdNorm.startsWith('extratos_adfego');
   const isEletraById = profileIdNorm.startsWith('extratos_eletra');
+  const isTodosById = profileIdNorm.startsWith('extratos_todos');
   const isTreTrtProfile = isTreTrtById || profileOptionsIsTre;
   const isAdfegoProfile = isAdfegoById || profileOptionsIsAdfego;
   const isEletraProfile = isEletraById || profileOptionsIsEletra;
+  const isTodosProfile =
+    isTodosById ||
+    Boolean(
+      opts.learningProfileOptions &&
+        typeof opts.learningProfileOptions === 'object' &&
+        opts.learningProfileOptions !== null &&
+        (opts.learningProfileOptions as Record<string, unknown>).isTodosExtratoProfile === true,
+    );
+  const historicoStrictFilterCtedStr = Boolean(
+    opts.learningProfileOptions &&
+      typeof opts.learningProfileOptions === 'object' &&
+      opts.learningProfileOptions !== null &&
+      (opts.learningProfileOptions as Record<string, unknown>).historicoStrictFilterCtedStr === true,
+  );
   const isContaCorrenteProfile =
-    isTreTrtProfile || isAdfegoProfile || isEletraProfile || profileOptionsIsContaCorrente;
+    isTreTrtProfile ||
+    isAdfegoProfile ||
+    isEletraProfile ||
+    isTodosProfile ||
+    profileOptionsIsContaCorrente;
   const forceOrgaoFromUIForProfile =
     isContaCorrenteProfile ? null :
     (typeof opts.forceOrgaoFromUI === 'string' ? opts.forceOrgaoFromUI : null);
@@ -8601,6 +8680,24 @@ function insertExtratosRows(opts: {
   let skippedRows = 0;
   try {
     for (const row of opts.rows) {
+      if (historicoStrictFilterCtedStr) {
+        const historicoRaw = (() => {
+          const srcCol =
+            (headerMap?.historicoTarget && headerMap.sourceColumnByTarget
+              ? headerMap.sourceColumnByTarget.get(headerMap.historicoTarget) ?? null
+              : null) ??
+            opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'HISTORICO') ??
+            headerMap?.historicoTarget ??
+            null;
+          if (!srcCol) return null;
+          return row[srcCol];
+        })();
+        const match = /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(String(historicoRaw ?? '').trim());
+        if (!match) {
+          skippedRows++;
+          continue;
+        }
+      }
       if (credTedFilterColumn) {
         const raw = row[credTedFilterColumn];
         const marcadorOk = historicoCellHasCredTedMarker(raw);
@@ -33150,6 +33247,8 @@ export async function runImportConsignado(opts: {
   if (rawTarget) {
     const tLow = rawTarget.toLowerCase();
     if (tLow === 'extratos' || tLow === 'extrato') {
+      kinds = [{ kind: 'extratos' }];
+    } else if (tLow === 'extratos_todos' || tLow === 'extrato_todos') {
       kinds = [{ kind: 'extratos' }];
     } else if (tLow === 'relatorio' || tLow === 'relatorios' || tLow === 'sisbr') {
       kinds = [{ kind: 'relatorio' }];
