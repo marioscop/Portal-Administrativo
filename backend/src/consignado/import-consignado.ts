@@ -29676,6 +29676,22 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         const defaultSubfoldersForDef: string[] = [];
         if (forceKindExtratos) {
           defaultSubfoldersForDef.push('Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso');
+          // Se tiver learning profiles de extratos no BD com folderCandidates customizado,
+          // inclui também (garante que perfis como extratos_todos_go com subpasta "TODOS" sejam visitados
+          // na expansão ano/mês corrente, mesmo fallback de segurança que já existe p/ relatório).
+          try {
+            const profilesExtratos = profiles.filter((p) => String(p.kind ?? '').trim().toLowerCase() === 'extratos');
+            for (const profileExtrato of profilesExtratos) {
+              if (
+                profileExtrato?.resolvedOptions &&
+                Array.isArray((profileExtrato.resolvedOptions as { folderCandidates?: string[] }).folderCandidates)
+              ) {
+                for (const fc of (profileExtrato.resolvedOptions as { folderCandidates: string[] }).folderCandidates) {
+                  if (typeof fc === 'string' && fc.trim()) defaultSubfoldersForDef.push(fc.trim());
+                }
+              }
+            }
+          } catch { /* ignore */ }
         }
         if (forceKindRelatorio) {
           defaultSubfoldersForDef.push('Relatórios de Órgão', 'Relatório de Órgão', 'Relatorios de Orgao', 'Relatorio de Orgao',
