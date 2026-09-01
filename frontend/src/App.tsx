@@ -117,9 +117,6 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
               message?: string
             }
           | null
-        // #region debug-point C:access-check-response
-        fetch('/api/consignado/debug/event',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:'access-validation-503',runId:'pre-fix',hypothesisId:'C',location:'App.tsx:access-check:response',msg:'[DEBUG] Resposta da validacao de acesso recebida no frontend',data:{status:res.status,ok:res.ok,message:data?.message??null,hasEntries:Array.isArray(data?.entries),entries:Array.isArray(data?.entries)?data.entries.length:null},ts:Date.now()})}).catch(()=>{})
-        // #endregion
         if (!res.ok) {
           const msg =
             data?.message || `Falha ao validar acesso (HTTP ${res.status}).`

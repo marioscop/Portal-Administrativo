@@ -28,8 +28,11 @@ type PdfParseResult = { text?: string };
 type PdfParseFn = (dataBuffer: Buffer) => Promise<PdfParseResult>;
 
 const DB_CACHE_MAX_ENTRIES = 32;
-const DB_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias corridos. Previne "Database closed" após ociosidade > 30 min do processo PM2
+const DB_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias corridos. Previne "Database closed" após ociosidade > 30 min do processo PM2 (2026-09-01)
 const DB_MTIME_SAFETY_DELTA_MS = 50;
+const DB_HANDLE_VALIDATION_ENABLED = true;
+const DB_CLOSED_RETRY_MAX = 2;
+const DB_CLOSED_RETRY_SLEEP_MS = 35;
 type DbCacheEntry = { db: Database; mtimeMs: number; lastUsedMs: number };
 let cachedPdfParse: PdfParseFn | null = null;
 let cachedPdfModule: unknown | null = null;
@@ -95,6 +98,61 @@ function evictExpiredDbCacheEntriesIfNeeded(nowMs: number): void {
       cachedDbByPath.delete(resolvedPath);
     }
   }
+}
+
+function isDatabaseClosedError(err: unknown): boolean {
+  if (!err) return false;
+  const m = err instanceof Error ? err.message : String(err);
+  return (
+    typeof m === 'string' &&
+    /database\s*(is\s*|has\s*been\s*)?\s*closed/i.test(m)
+  );
+}
+
+function dbHandleLooksAlive(db: Database): boolean {
+  if (!DB_HANDLE_VALIDATION_ENABLED) return true;
+  try {
+    const stmt = (db as any).prepare('SELECT 1 AS v');
+    try {
+      const r = stmt.getAsObject ? stmt.getAsObject() : stmt.get();
+      return r && (r.v === 1 || (r as any)?.v === 1);
+    } finally {
+      try { if (stmt && typeof stmt.free === 'function') stmt.free(); } catch {}
+    }
+  } catch (e) {
+    safeLogError('dbHandleLooksAlive ping', e);
+    return false;
+  }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+function withRetryOnDbClosed<T>(
+  label: string,
+  fn: (attempt: number) => T | Promise<T>,
+  maxAttempts = DB_CLOSED_RETRY_MAX + 1,
+  sleepMsBetween = DB_CLOSED_RETRY_SLEEP_MS,
+): Promise<T> {
+  return (async () => {
+    let lastErr: unknown = null;
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        return await fn(i);
+      } catch (e) {
+        lastErr = e;
+        if (!isDatabaseClosedError(e)) throw e;
+        safeLogError(`${label} retry attempt ${i + 1}/${maxAttempts} (Database closed)`, e);
+        if (i + 1 >= maxAttempts) break;
+        // Invalidar TODOS os caminhos do cache para forçar reabertura fresh
+        // (nunca chamar .close(): WebAssembly/GC limpa; close explícito causa crash em reabertura.)
+        try { cachedDbByPath.clear(); } catch {}
+        await sleepMs(sleepMsBetween * (i + 1));
+      }
+    }
+    throw lastErr;
+  })();
 }
 
 type PdfParseModuleShape = {
@@ -4996,8 +5054,15 @@ async function openDatabase(dbPath: string): Promise<Database> {
     cached &&
     Math.abs(cached.mtimeMs - currentMtimeMs) <= DB_MTIME_SAFETY_DELTA_MS
   ) {
-    cached.lastUsedMs = nowMs;
-    return cached.db;
+    if (!DB_HANDLE_VALIDATION_ENABLED || dbHandleLooksAlive(cached.db)) {
+      cached.lastUsedMs = nowMs;
+      return cached.db;
+    }
+    safeLogError(
+      `openDatabase cached handle DEAD for ${resolvedPath} (will reopen fresh, no .close())`,
+      new Error('cached handle SELECT 1 failed'),
+    );
+    try { cachedDbByPath.delete(resolvedPath); } catch {}
   }
   if (cached) {
     cachedDbByPath.delete(resolvedPath);
@@ -5231,6 +5296,7 @@ function markFileImportedByContentHash(db: Database, sha256Hex: string, meta?: R
 
 function getSqlitePath(): string {
   const raw = (() => {
+    if (process.env.CONSIGNADO_DB_PATH) return process.env.CONSIGNADO_DB_PATH;
     if (process.env.SQLITE_PATH) return process.env.SQLITE_PATH;
     const cwd = process.cwd();
     const projectRootData = path.resolve(cwd, '..', 'data', 'consignado.sqlite');
@@ -8026,6 +8092,7 @@ function insertRowsWithBatchTracking(opts: {
   const lastRowIdStmt = batchRowStmt ? opts.db.prepare(`SELECT last_insert_rowid() as id;`) : null;
   let insertedRows = 0;
   let skippedRows = 0;
+  let skippedByHistoricoStrictFilter = 0;
   try {
     for (const row of opts.rows) {
       const values = opts.mapRowToValues(row);
@@ -8690,23 +8757,36 @@ function insertExtratosRows(opts: {
   const lastRowIdStmt = batchRowStmt ? opts.db.prepare(`SELECT last_insert_rowid() as id;`) : null;
   let insertedRows = 0;
   let skippedRows = 0;
+  let skippedByHistoricoStrictFilter = 0;
   try {
     for (const row of opts.rows) {
       if (historicoStrictFilterCtedStr) {
-        const historicoRaw = (() => {
+        // Perfil extratos_todos_go: a coluna HISTÓRICO do Excel (coluna 3) é que deve ser estritamente igual a CRÉD.TED-STR
+        // (NÃO a coluna INFORMAÇÕES COMPLEMENTARES, que é o target HISTÓRICO do BD).
+        // headerMap.credTedFilterColumn é setado em buildExtratoHeaderMapping quando temos infoCompColumnOriginal:
+        // guarda a coluna HISTÓRICO original do Excel (a que tem o marcador).
+        const historicoExcelRaw = (() => {
+          if (headerMap && typeof (headerMap as any).credTedFilterColumn === 'string' && (headerMap as any).credTedFilterColumn) {
+            const srcCol = (headerMap as any).credTedFilterColumn;
+            if (Object.prototype.hasOwnProperty.call(row ?? {}, srcCol)) return row[srcCol];
+          }
+          // Fallback segura: coluna original HISTÓRICO / HISTORICO do Excel
           const srcCol =
-            (headerMap?.historicoTarget && headerMap.sourceColumnByTarget
-              ? headerMap.sourceColumnByTarget.get(headerMap.historicoTarget) ?? null
-              : null) ??
             opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'HISTORICO') ??
-            headerMap?.historicoTarget ??
+            opts.fileColumns.find((c) => String(c ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase() === 'HISTORICO') ??
             null;
-          if (!srcCol) return null;
-          return row[srcCol];
+          if (srcCol && Object.prototype.hasOwnProperty.call(row ?? {}, srcCol)) return row[srcCol];
+          // último fallback (perfil sem Info Compl): o próprio target HISTÓRICO já é a coluna original
+          if (headerMap?.historicoTarget && headerMap.sourceColumnByTarget) {
+            const src = headerMap.sourceColumnByTarget.get(headerMap.historicoTarget);
+            if (src && Object.prototype.hasOwnProperty.call(row ?? {}, src)) return row[src];
+          }
+          return null;
         })();
-        const match = /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(String(historicoRaw ?? '').trim());
+        const match = /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(String(historicoExcelRaw ?? '').trim());
         if (!match) {
           skippedRows++;
+          skippedByHistoricoStrictFilter++;
           continue;
         }
       }
@@ -21441,20 +21521,43 @@ export async function importExtratosTemporario(opts: {
     const mm = String(month).padStart(2, '0');
     return `${mm}/${yy}`;
   };
-  const addCompetenciaCol = Boolean(refCol);
+  const fnForTemp = path.basename(resolvedPath);
+  const parsedFile = detectCustomFileRules({ sourceFile: fnForTemp, fileColumns, firstRowsSample: rows.slice(0, 10) });
+  const fileHasFixedCompetencia = Boolean(parsedFile?.competenciaFixa);
+  const addCompetenciaCol = Boolean(refCol) || fileHasFixedCompetencia;
   const baseColumns = headerMap.mappedColumns;
   const effectiveColumns = (() => {
-    if (!addCompetenciaCol) return baseColumns;
-    if (baseColumns.includes('Competencia')) return baseColumns;
-    const idx = baseColumns.indexOf(refCol ?? '');
-    if (idx < 0) return baseColumns.concat('Competencia');
-    return baseColumns.slice(0, idx).concat('Competencia', baseColumns.slice(idx));
+    const addCols: string[] = [];
+    if (fileHasFixedCompetencia) {
+      if (!baseColumns.includes('CompetenciaArquivo')) addCols.push('CompetenciaArquivo');
+      if (!baseColumns.includes('Copetencia')) addCols.push('Copetencia');
+    } else if (addCompetenciaCol) {
+      if (!baseColumns.includes('Competencia')) addCols.push('Competencia');
+    }
+    if (addCols.length === 0) return baseColumns;
+    const refIdx = refCol ? baseColumns.indexOf(refCol) : -1;
+    if (refIdx < 0) return baseColumns.concat(addCols);
+    return baseColumns.slice(0, refIdx).concat(addCols).concat(baseColumns.slice(refIdx));
   })();
   const historicoTarget = headerMap.historicoTarget;
   const historicoSource = historicoTarget ? (headerMap.sourceColumnByTarget.get(historicoTarget) ?? null) : null;
   const sourceForTarget = (target: string): string => headerMap.sourceColumnByTarget.get(target) ?? target;
+  const credTedStrictFilterColumn: string | null =
+    (headerMap && typeof (headerMap as any).credTedFilterColumn === 'string' && (headerMap as any).credTedFilterColumn) ||
+    fileColumns.find((c) => normalizeHeaderKey(c) === 'HISTORICO') ||
+    null;
+  const hasTodosExtratoStrictProfile = (() => {
+    try {
+      const fnorm = String(fnForTemp ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+      return /^TODOS.*\.(XLSX|XLSM|XLS)$/i.test(fnorm.trim());
+    } catch { return false; }
+  })();
 
   const filteredRows = rows.filter((row) => {
+    if (hasTodosExtratoStrictProfile && credTedStrictFilterColumn) {
+      const raw = String(row[credTedStrictFilterColumn] ?? '').trim();
+      return /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(raw);
+    }
     if (!historicoSource) return true;
     const raw = row[historicoSource];
     return historicoCellHasCredTedMarker(raw);
@@ -21468,13 +21571,15 @@ export async function importExtratosTemporario(opts: {
       db,
       kind: `temporario:${tableName}`,
       tableName,
-      fileName: path.basename(resolvedPath),
+      fileName: fnForTemp,
       sourceUrl: null,
       fileColumns: effectiveColumns,
       rows: filteredRows,
       mapRowToValues: (row) =>
         effectiveColumns.map((col) => {
           if (col === 'Competencia' && refColSource) return computeCompetencia(row[refColSource]);
+          if (col === 'Copetencia' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
+          if (col === 'CompetenciaArquivo' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
           const src = sourceForTarget(col);
           const raw = src in row ? toStableValue(row[src]) : '';
           if (col === 'HISTÓRICO') {
@@ -21557,20 +21662,43 @@ export async function importExtratosTemporarioFromBuffer(opts: {
     const mm = String(month).padStart(2, '0');
     return `${mm}/${yy}`;
   };
-  const addCompetenciaCol = Boolean(refCol);
+  const fnForTemp = String(opts.fileName ?? 'upload');
+  const parsedFile = detectCustomFileRules({ sourceFile: fnForTemp, fileColumns, firstRowsSample: rows.slice(0, 10) });
+  const fileHasFixedCompetencia = Boolean(parsedFile?.competenciaFixa);
+  const addCompetenciaCol = Boolean(refCol) || fileHasFixedCompetencia;
   const baseColumns = headerMap.mappedColumns;
   const effectiveColumns = (() => {
-    if (!addCompetenciaCol) return baseColumns;
-    if (baseColumns.includes('Competencia')) return baseColumns;
-    const idx = baseColumns.indexOf(refCol ?? '');
-    if (idx < 0) return baseColumns.concat('Competencia');
-    return baseColumns.slice(0, idx).concat('Competencia', baseColumns.slice(idx));
+    const addCols: string[] = [];
+    if (fileHasFixedCompetencia) {
+      if (!baseColumns.includes('CompetenciaArquivo')) addCols.push('CompetenciaArquivo');
+      if (!baseColumns.includes('Copetencia')) addCols.push('Copetencia');
+    } else if (addCompetenciaCol) {
+      if (!baseColumns.includes('Competencia')) addCols.push('Competencia');
+    }
+    if (addCols.length === 0) return baseColumns;
+    const refIdx = refCol ? baseColumns.indexOf(refCol) : -1;
+    if (refIdx < 0) return baseColumns.concat(addCols);
+    return baseColumns.slice(0, refIdx).concat(addCols).concat(baseColumns.slice(refIdx));
   })();
   const historicoTarget = headerMap.historicoTarget;
   const historicoSource = historicoTarget ? (headerMap.sourceColumnByTarget.get(historicoTarget) ?? null) : null;
   const sourceForTarget = (target: string): string => headerMap.sourceColumnByTarget.get(target) ?? target;
+  const credTedStrictFilterColumn: string | null =
+    (headerMap && typeof (headerMap as any).credTedFilterColumn === 'string' && (headerMap as any).credTedFilterColumn) ||
+    fileColumns.find((c) => normalizeHeaderKey(c) === 'HISTORICO') ||
+    null;
+  const hasTodosExtratoStrictProfile = (() => {
+    try {
+      const fnorm = String(fnForTemp ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+      return /^TODOS.*\.(XLSX|XLSM|XLS)$/i.test(fnorm.trim());
+    } catch { return false; }
+  })();
 
   const filteredRows = rows.filter((row) => {
+    if (hasTodosExtratoStrictProfile && credTedStrictFilterColumn) {
+      const raw = String(row[credTedStrictFilterColumn] ?? '').trim();
+      return /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(raw);
+    }
     if (!historicoSource) return true;
     const raw = row[historicoSource];
     return historicoCellHasCredTedMarker(raw);
@@ -21584,13 +21712,15 @@ export async function importExtratosTemporarioFromBuffer(opts: {
       db,
       kind: `temporario:${tableName}`,
       tableName,
-      fileName: opts.fileName,
+      fileName: fnForTemp,
       sourceUrl: null,
       fileColumns: effectiveColumns,
       rows: filteredRows,
       mapRowToValues: (row) =>
         effectiveColumns.map((col) => {
           if (col === 'Competencia' && refColSource) return computeCompetencia(row[refColSource]);
+          if (col === 'Copetencia' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
+          if (col === 'CompetenciaArquivo' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
           const src = sourceForTarget(col);
           const raw = src in row ? toStableValue(row[src]) : '';
           if (col === 'HISTÓRICO') {
@@ -26209,84 +26339,77 @@ function parseJsonArraySafe(value: unknown): unknown[] {
 }
 
 export async function getConsignadoAccessEmails() {
-  const dbFilePath = getSqlitePath();
-  // #region debug-point B:access-emails-service-enter
-  (()=>{let u='http://127.0.0.1:7777/event',s='access-validation-503';try{const e=fs.readFileSync('/var/www/html/Portal-Administrativo/.dbg/access-validation-503.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}void fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'B',location:'import-consignado.ts:getConsignadoAccessEmails:enter',msg:'[DEBUG] Iniciando leitura de acessos do consignado',data:{dbFilePath},ts:Date.now()})}).catch(()=>{});})();
-  // #endregion
-  const db = await openDatabase(dbFilePath);
-  ensureSchema(db);
+  return withRetryOnDbClosed('getConsignadoAccessEmails', async () => {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
 
-  const rows = readTableRows(db, 'consignado_access_emails', [
-    'email',
-    'role',
-    'menu_permissions_json',
-    'flow_stage_permissions_json',
-  ]);
-  const fromDb = rows
-    .map((r) => ({
-      email: typeof r.email === 'string' ? normalizeEmail(r.email) : '',
-      role: normalizeAccessRole((r as any).role),
-      menus: normalizeMenuPermissions(parseJsonArraySafe((r as any).menu_permissions_json)),
-      flowStages:
-        typeof (r as any).flow_stage_permissions_json === 'string' &&
-        (r as any).flow_stage_permissions_json.trim() !== ''
-          ? normalizeFlowStagePermissions(
-              parseJsonArraySafe((r as any).flow_stage_permissions_json),
-              false,
-            )
-          : [...CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES],
-    }))
-    .filter((r) => Boolean(r.email))
-    .filter((r, i, arr) => arr.findIndex((x) => x.email === r.email) === i);
-  // #region debug-point B:access-emails-service-rows
-  (()=>{let u='http://127.0.0.1:7777/event',s='access-validation-503';try{const e=fs.readFileSync('/var/www/html/Portal-Administrativo/.dbg/access-validation-503.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}void fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'B',location:'import-consignado.ts:getConsignadoAccessEmails:rows',msg:'[DEBUG] Leitura da tabela consignado_access_emails concluida',data:{rows:rows.length,fromDb:fromDb.length},ts:Date.now()})}).catch(()=>{});})();
-  // #endregion
+    const rows = readTableRows(db, 'consignado_access_emails', [
+      'email',
+      'role',
+      'menu_permissions_json',
+      'flow_stage_permissions_json',
+    ]);
+    const fromDb = rows
+      .map((r) => ({
+        email: typeof r.email === 'string' ? normalizeEmail(r.email) : '',
+        role: normalizeAccessRole((r as any).role),
+        menus: normalizeMenuPermissions(parseJsonArraySafe((r as any).menu_permissions_json)),
+        flowStages:
+          typeof (r as any).flow_stage_permissions_json === 'string' &&
+          (r as any).flow_stage_permissions_json.trim() !== ''
+            ? normalizeFlowStagePermissions(
+                parseJsonArraySafe((r as any).flow_stage_permissions_json),
+                false,
+              )
+            : [...CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES],
+      }))
+      .filter((r) => Boolean(r.email))
+      .filter((r, i, arr) => arr.findIndex((x) => x.email === r.email) === i);
 
-  const fixed = FIXED_ACCESS_EMAIL;
-  const fixedSaved = fromDb.find((e) => e.email === fixed);
-  const fixedEntry = {
-    email: fixed,
-    role: 'admin' as const,
-    menus: [...CONSIGNADO_MENU_PERMISSION_VALUES],
-    flowStages: fixedSaved
-      ? fixedSaved.flowStages
-      : [...CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES],
-  };
-  const hasFixed = fromDb.some((e) => e.email === fixed);
-  const entries = hasFixed
-    ? fromDb.map((e) => (e.email === fixed ? fixedEntry : e))
-    : [fixedEntry, ...fromDb];
+    const fixed = FIXED_ACCESS_EMAIL;
+    const fixedSaved = fromDb.find((e) => e.email === fixed);
+    const fixedEntry = {
+      email: fixed,
+      role: 'admin' as const,
+      menus: [...CONSIGNADO_MENU_PERMISSION_VALUES],
+      flowStages: fixedSaved
+        ? fixedSaved.flowStages
+        : [...CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES],
+    };
+    const hasFixed = fromDb.some((e) => e.email === fixed);
+    const entries = hasFixed
+      ? fromDb.map((e) => (e.email === fixed ? fixedEntry : e))
+      : [fixedEntry, ...fromDb];
 
-  if (rows.length === 0 || !hasFixed) {
-    const createdAt = new Date().toISOString();
-    const stmt = db.prepare(
-      `INSERT OR IGNORE INTO consignado_access_emails (email, role, menu_permissions_json, flow_stage_permissions_json, created_at) VALUES (?, ?, ?, ?, ?);`,
-    );
-    try {
-      for (const e of entries) {
-        stmt.run([
-          e.email,
-          e.role,
-          JSON.stringify(e.menus),
-          JSON.stringify(e.flowStages),
-          createdAt,
-        ]);
+    if (rows.length === 0 || !hasFixed) {
+      const createdAt = new Date().toISOString();
+      const stmt = db.prepare(
+        `INSERT OR IGNORE INTO consignado_access_emails (email, role, menu_permissions_json, flow_stage_permissions_json, created_at) VALUES (?, ?, ?, ?, ?);`,
+      );
+      try {
+        for (const e of entries) {
+          stmt.run([
+            e.email,
+            e.role,
+            JSON.stringify(e.menus),
+            JSON.stringify(e.flowStages),
+            createdAt,
+          ]);
+        }
+      } finally {
+        try { if (stmt && typeof stmt.free === 'function') stmt.free(); } catch {}
       }
-    } finally {
-      stmt.free();
+      persistDatabase(db, dbFilePath);
     }
-    persistDatabase(db, dbFilePath);
-  }
 
-  // #region debug-point B:access-emails-service-success
-  (()=>{let u='http://127.0.0.1:7777/event',s='access-validation-503';try{const e=fs.readFileSync('/var/www/html/Portal-Administrativo/.dbg/access-validation-503.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}void fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'B',location:'import-consignado.ts:getConsignadoAccessEmails:success',msg:'[DEBUG] Retornando acessos do consignado',data:{entries:entries.length,hasFixed},ts:Date.now()})}).catch(()=>{});})();
-  // #endregion
-  return {
-    entries,
-    emails: entries.map((e) => e.email),
-    fixedEmail: FIXED_ACCESS_EMAIL,
-    dbFilePath,
-  };
+    return {
+      entries,
+      emails: entries.map((e) => e.email),
+      fixedEmail: FIXED_ACCESS_EMAIL,
+      dbFilePath,
+    };
+  });
 }
 
 export async function setConsignadoAccessEmails(opts: {
@@ -26298,6 +26421,7 @@ export async function setConsignadoAccessEmails(opts: {
   }>;
   emails?: string[];
 }) {
+  return withRetryOnDbClosed('setConsignadoAccessEmails', async () => {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
@@ -26352,7 +26476,7 @@ export async function setConsignadoAccessEmails(opts: {
         ]);
       }
     } finally {
-      stmt.free();
+      try { if (stmt && typeof stmt.free === 'function') stmt.free(); } catch {}
     }
     db.run('COMMIT;');
   } catch (e) {
@@ -26371,6 +26495,7 @@ export async function setConsignadoAccessEmails(opts: {
     fixedEmail: FIXED_ACCESS_EMAIL,
     dbFilePath,
   };
+  });
 }
 
 async function ensureChildFolder(opts: {
@@ -26533,12 +26658,6 @@ function buildUniqueImportedFileName(fileName: string): string {
     .replace(/\.\d{3}Z$/, '')
     .replace('T', '-');
   return `${base} (${stamp})${ext}`;
-}
-
-async function sleepMs(ms: number) {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 async function getDriveItemParentId(opts: {
@@ -27320,7 +27439,11 @@ async function sendImportFinishedEmailNotification(input: {
             out.to = dbRecipients;
           }
         } finally {
-          try { if (dbFallback && typeof dbFallback.close === 'function') { dbFallback.close(); } } catch { /* ignore close errors */ }
+          // NUNCA chamar .close() em handle vindo do cache openDatabase() —
+          // SQL.js WebAssembly + cache compartilhado: close() corrompe chamados subsequentes
+          // de outros endpoints (getConsignadoAccessEmails etc.) causando "Database closed".
+          // O cache é dono do handle e invalida apenas por delete() sem close explícito.
+          void dbFallback;
         }
       } catch { /* ignore SQLite fallback open errors — try last env fallback below */ }
       // (2) Último fallback: usar o e-mail REMETENTE como destinatário (notificacoes@sicoobjuriscred.com.br)
