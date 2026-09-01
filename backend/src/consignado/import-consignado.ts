@@ -28947,6 +28947,9 @@ function findLearningProfilesFor(db: Database, url: string, forceKind?: string):
         if (i.startsWith('extratos_tre_trt')) return 30;
         if (i.startsWith('extratos_tre')) return 20;
         if (i.startsWith('extratos_trt')) return 20;
+        if (i.startsWith('extratos_todos')) return 18;
+        if (i.startsWith('extratos_adfego')) return 17;
+        if (i.startsWith('extratos_eletra')) return 16;
         if (i.startsWith('extratos_recurso')) return 10;
         if (i.startsWith('recurso_tre')) return 5;
         if (i.startsWith('recurso_trt')) return 5;
