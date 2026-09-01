@@ -1478,6 +1478,7 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
   baseFolderId: string;
   basePath: string;
   subfolderCandidates?: string[];
+  rootFolderNameHint?: string;
   __trace?: (step: string, data: Record<string, unknown>) => void;
   permitirPdfSisbr?: boolean;
 }): Promise<Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>> {
@@ -1610,48 +1611,59 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
   let yearId: string | null = null;
   let yearName = '';
   const lvlStart = await safeListChildren(startId);
-  // 1) Tem pastas de ano DIRETAMENTE?
-  let yearCandidates = lvlStart.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
-  let desceuRecuperacao = false;
-  if (yearCandidates.length === 0) {
-    // Não tem anos direto. Ainda estamos acima (ex.: Diretoria / Tec. Inf. / 99-automações_ti). Desce primeiro até Recuperação de Crédito.
-    const rc = lvlStart.find((c) => c.folder && isRecuperacaoCreditoInPath(c.name ?? ''))
-      ?? lvlStart.find((c) => c.folder && normalizeNameForMatch(String(c.name ?? '')).includes('99.automacoes'));
-    if (rc) {
-      const kids = await safeListChildren(String(rc.id));
-      yearCandidates = kids.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
-      startPath = startPath ? `${startPath}/${rc.name}` : String(rc.name ?? '');
-      startId = String(rc.id);
-      desceuRecuperacao = true;
-      tr('desceuRC', { rcName: rc.name, startPath, newYearCandidates: yearCandidates.length });
-    }
-  }
-  if (yearCandidates.length === 0) {
-    // Ainda sem anos? BFS 1 nível dentro de TODAS as pastas do start atrás de pasta 4 dígitos.
-    tr('yearFallbackBFS', {});
-    for (const f of lvlStart.filter((x) => x.folder)) {
-      if (yearCandidates.length > 0) break;
-      const sub = await safeListChildren(String(f.id));
-      const ys = sub.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
-      if (ys.length > 0) {
-        yearCandidates = ys;
-        startPath = startPath ? `${startPath}/${f.name}` : String(f.name ?? '');
-        startId = String(f.id);
+  // NOVO (2026-09-01): Se a pasta RAIZ que recebemos JÁ É O ANO (ex: SHAREPOINT_FOLDER_URL termina com "/2026"
+  // e o startId é a própria pasta do ano), PULAMOS descida de ano (startId = yearId direto).
+  // Sem isso, yearCandidates sempre vazio (filhos de 2026/ são Janeiro..Dezembro, não 2026/2025) → 0 candidates.
+  const startNameIsAno4Digitos = /^\d{4}$/.test(String(opts.rootFolderNameHint ?? '').trim()) ||
+    /^\d{4}$/.test(String(startPath.split('/').filter(Boolean).pop() ?? '').trim());
+  if (startNameIsAno4Digitos) {
+    yearId = startId;
+    yearName = String(opts.rootFolderNameHint ?? '').trim() || String(startPath.split('/').filter(Boolean).pop() ?? '').trim();
+    tr('anoOk', { mode: 'startIsYear', yearName, yearIdPrefix: (yearId || '').slice(0, 8) });
+  } else {
+    // 1) Tem pastas de ano DIRETAMENTE?
+    let yearCandidates = lvlStart.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+    let desceuRecuperacao = false;
+    if (yearCandidates.length === 0) {
+      // Não tem anos direto. Ainda estamos acima (ex.: Diretoria / Tec. Inf. / 99-automações_ti). Desce primeiro até Recuperação de Crédito.
+      const rc = lvlStart.find((c) => c.folder && isRecuperacaoCreditoInPath(c.name ?? ''))
+        ?? lvlStart.find((c) => c.folder && normalizeNameForMatch(String(c.name ?? '')).includes('99.automacoes'));
+      if (rc) {
+        const kids = await safeListChildren(String(rc.id));
+        yearCandidates = kids.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+        startPath = startPath ? `${startPath}/${rc.name}` : String(rc.name ?? '');
+        startId = String(rc.id);
         desceuRecuperacao = true;
-        break;
+        tr('desceuRC', { rcName: rc.name, startPath, newYearCandidates: yearCandidates.length });
       }
     }
+    if (yearCandidates.length === 0) {
+      // Ainda sem anos? BFS 1 nível dentro de TODAS as pastas do start atrás de pasta 4 dígitos.
+      tr('yearFallbackBFS', {});
+      for (const f of lvlStart.filter((x) => x.folder)) {
+        if (yearCandidates.length > 0) break;
+        const sub = await safeListChildren(String(f.id));
+        const ys = sub.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+        if (ys.length > 0) {
+          yearCandidates = ys;
+          startPath = startPath ? `${startPath}/${f.name}` : String(f.name ?? '');
+          startId = String(f.id);
+          desceuRecuperacao = true;
+          break;
+        }
+      }
+    }
+    yearCandidates.sort((a, b) => String(b.name ?? '').localeCompare(String(a.name ?? '')));
+    for (const y of yearCandidates) {
+      if (String(y.name ?? '').trim() === alvoAno) { yearId = String(y.id); yearName = String(y.name ?? ''); break; }
+    }
+    if (!yearId && yearCandidates.length > 0) {
+      yearId = String(yearCandidates[0].id); yearName = String(yearCandidates[0].name ?? '');
+      tr('anoFallbackLatest', { yearName, expected: alvoAno });
+    }
+    if (!yearId) { tr('noYear', {}); return out; }
+    tr('anoOk', { yearName, yearIdPrefix: (yearId || '').slice(0, 8) });
   }
-  yearCandidates.sort((a, b) => String(b.name ?? '').localeCompare(String(a.name ?? '')));
-  for (const y of yearCandidates) {
-    if (String(y.name ?? '').trim() === alvoAno) { yearId = String(y.id); yearName = String(y.name ?? ''); break; }
-  }
-  if (!yearId && yearCandidates.length > 0) {
-    yearId = String(yearCandidates[0].id); yearName = String(yearCandidates[0].name ?? '');
-    tr('anoFallbackLatest', { yearName, expected: alvoAno });
-  }
-  if (!yearId) { tr('noYear', {}); return out; }
-  tr('anoOk', { yearName, yearIdPrefix: yearId.slice(0, 8) });
 
   // ====== PASSO 3: Descender MÊS (alvo) ======
   const yearPath = startPath ? `${startPath}/${yearName}` : yearName;
@@ -29522,6 +29534,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                     driveId: driveIdForExpansion,
                     baseFolderId: driveIdForExpansion,
                     basePath: parsedUrl.restPath || 'Recuperação de Crédito',
+                    rootFolderNameHint: (parsedUrl.restPath || '').split('/').filter(Boolean).pop() || '',
                     subfolderCandidates: defaultSubfolders,
                     permitirPdfSisbr: forceKindRelatorio,
                   });
@@ -29679,6 +29692,8 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         const defaultSubfoldersForDef: string[] = [];
         if (forceKindExtratos) {
           defaultSubfoldersForDef.push('Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso');
+          const envExtratosSubfolder = String(process.env.SHAREPOINT_EXTRATOS_SUBFOLDER ?? '').trim();
+          if (envExtratosSubfolder) defaultSubfoldersForDef.push(envExtratosSubfolder);
           // Se tiver learning profiles de extratos no BD com folderCandidates customizado,
           // inclui também (garante que perfis como extratos_todos_go com subpasta "TODOS" sejam visitados
           // na expansão ano/mês corrente, mesmo fallback de segurança que já existe p/ relatório).
@@ -29715,6 +29730,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           driveId,
           baseFolderId: rootFolderId,
           basePath: String(resolved?.folderPath ?? resolvedItemName ?? '').trim(),
+          rootFolderNameHint: resolvedItemName,
           subfolderCandidates: defaultSubfoldersForDef,
           permitirPdfSisbr: forceKindRelatorio,
         });
