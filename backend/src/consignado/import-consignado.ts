@@ -27248,6 +27248,10 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#039;');
 }
 
+function escapeAttr(value: string): string {
+  return escapeHtml(value);
+}
+
 function getEmailLogoDataUri(): string | null {
   try {
     const candidates = [
@@ -27439,10 +27443,6 @@ async function sendImportFinishedEmailNotification(input: {
             out.to = dbRecipients;
           }
         } finally {
-          // NUNCA chamar .close() em handle vindo do cache openDatabase() —
-          // SQL.js WebAssembly + cache compartilhado: close() corrompe chamados subsequentes
-          // de outros endpoints (getConsignadoAccessEmails etc.) causando "Database closed".
-          // O cache é dono do handle e invalida apenas por delete() sem close explícito.
           void dbFallback;
         }
       } catch { /* ignore SQLite fallback open errors — try last env fallback below */ }
@@ -27473,39 +27473,270 @@ async function sendImportFinishedEmailNotification(input: {
     catch (e) { out.error = `Falha ao obter token Graph: ${e instanceof Error ? e.message : String(e)}`; return out; }
     if (!token) { out.error = 'Token Graph vazio.'; return out; }
 
-    const outcomeLabel: Record<string, { title: string; sub: string; accent: string }> = {
-      success:   { title: 'Importação concluída com sucesso',     sub: 'Todos os arquivos foram processados.',                       accent: '#166534' },
-      partial:   { title: 'Importação concluída parcialmente',    sub: 'Alguns arquivos tiveram linhas puladas ou processadas.',     accent: '#92400e' },
-      failed:    { title: 'Falha na importação',                   sub: 'Ocorreu um erro durante o processamento dos arquivos.',     accent: '#991b1b' },
-      cancelled: { title: 'Importação cancelada',                  sub: 'A operação foi cancelada antes da conclusão.',              accent: '#475569' },
+    const outcomeConfig: Record<string, {
+      title: string; summary: string; accent: string; bg: string; border: string; pillLabel: string; emoji: string;
+    }> = {
+      success: {
+        title: 'Importação concluída com sucesso',
+        summary: 'Todos os arquivos foram processados sem erros.',
+        accent: '#15803d',
+        bg: 'linear-gradient(135deg,#ecfdf5 0%,#bbf7d0 100%)',
+        border: '#86efac',
+        pillLabel: 'Sucesso',
+        emoji: '✅',
+      },
+      partial: {
+        title: 'Importação parcial — precisa conferir',
+        summary: 'Alguns arquivos tiveram linhas puladas ou não foram importados — veja os problemas abaixo.',
+        accent: '#b45309',
+        bg: 'linear-gradient(135deg,#fffbeb 0%,#fde68a 100%)',
+        border: '#fcd34d',
+        pillLabel: 'Parcial',
+        emoji: '⚠️',
+      },
+      failed: {
+        title: 'Falha na importação — precisa corrigir',
+        summary: 'Ocorreu um problema durante o processamento. Veja a causa e o que fazer abaixo.',
+        accent: '#b91c1c',
+        bg: 'linear-gradient(135deg,#fef2f2 0%,#fecaca 100%)',
+        border: '#fca5a5',
+        pillLabel: 'Falha',
+        emoji: '❌',
+      },
+      cancelled: {
+        title: 'Importação cancelada',
+        summary: 'A importação foi cancelada antes de terminar.',
+        accent: '#475569',
+        bg: 'linear-gradient(135deg,#f1f5f9 0%,#cbd5e1 100%)',
+        border: '#94a3b8',
+        pillLabel: 'Cancelada',
+        emoji: '⏹️',
+      },
     };
-    const display = outcomeLabel[input.outcome] ?? outcomeLabel.failed;
     const forceKindDisplay = String(input.forceKind ?? 'Não especificado').trim() || 'Não especificado';
     const modeDisplay = String(input.mode ?? 'append').trim() || 'append';
     const folderShort = String(input.folderUrlPreview ?? '').trim().slice(0, 180);
     const isOk = input.totalRowsInserted > 0 && !input.errorMessage;
     const effectiveOutcome = input.outcome === 'success' ? (isOk ? 'success' : (input.totalRowsSkipped > 0 ? 'partial' : 'success')) : input.outcome;
+    const display = outcomeConfig[effectiveOutcome] ?? outcomeConfig.failed;
+
+    type IssueEntry = {
+      title: string;
+      cause: string;
+      action: string;
+      severity: 'Ação necessária' | 'Verificar' | 'Informativo';
+      detail?: string;
+    };
+    const issues: IssueEntry[] = [];
+    const err = (input.errorMessage || '').trim();
+    const errLower = err.toLowerCase();
+
+    if (effectiveOutcome === 'cancelled') {
+      issues.push({
+        title: 'Importação cancelada pelo sistema ou usuário',
+        cause: 'A execução foi interrompida antes de concluir (cancelamento manual, timeout, ou reinício do backend).',
+        action: 'Rode a importação novamente. Se cancelou de propósito, pode ignorar este e-mail.',
+        severity: 'Informativo',
+      });
+    }
+    if (input.totalFilesScanned <= 0 && effectiveOutcome !== 'cancelled') {
+      issues.push({
+        title: 'Nenhum arquivo foi encontrado na pasta/origem',
+        cause: 'A pasta/origem está vazia, ou o link da pasta SharePoint está errado (ex: aponta para uma subpasta sem arquivos ou com ano/mês incorreto).',
+        action: '1) Abra a URL SharePoint informada abaixo e confira se existem arquivos .xlsx/.xls/.xlsm dentro; 2) Se URL termina com /ANO, ajuste para apontar para a raiz da automação; 3) Confira se o nome dos arquivos bate com o perfil (ex: TODOS-MÊS-ANO.xlsx).',
+        severity: 'Ação necessária',
+      });
+    }
+    if (input.totalFilesScanned > 0 && input.totalFilesMatched <= 0) {
+      issues.push({
+        title: 'Encontrei arquivos mas nenhum bate com o perfil de importação',
+        cause: 'O nome/layout dos arquivos não combina com nenhum perfil de aprendizado cadastrado, ou você escolheu o Tipo de importação errado no painel (ex: usou "Extratos Recurso" genérico ao invés de "Extrato TODOS").',
+        action: '1) No painel Automação, confira o Tipo selecionado — use o perfil específico do arquivo (ex: Extrato TODOS); 2) Confira se o nome do arquivo segue o padrão (ex: ORGAO-MES-ANO.xlsx); 3) Cadastre/ajuste o perfil de aprendizado se o layout mudou.',
+        severity: 'Ação necessária',
+      });
+    }
+    if (input.totalFilesMatched > 0 && input.totalRowsInserted <= 0 && input.totalRowsSkipped <= 0 && effectiveOutcome !== 'cancelled') {
+      issues.push({
+        title: 'Arquivo bateu com perfil mas não inseriu nenhuma linha',
+        cause: 'Arquivo está vazio, a planilha tem layout incorreto (ex: o cabeçalho está em outra linha), ou a aba/sheet principal está vazia.',
+        action: 'Abra o arquivo Excel e confira: 1) se existe uma aba com a tabela; 2) se o cabeçalho está na linha 2 quando A1 contém "EXTRATO CONTA CORRENTE"; 3) se existem linhas de dados abaixo do cabeçalho.',
+        severity: 'Ação necessária',
+      });
+    }
+    if (input.totalRowsSkipped > 0 && effectiveOutcome !== 'cancelled') {
+      issues.push({
+        title: `${input.totalRowsSkipped} linha(s) pulada(s) no arquivo`,
+        cause: 'Linhas foram rejeitadas automaticamente por: 1) conteúdo não bate com o filtro do perfil (ex: HISTÓRICO diferente de "CRÉD.TED-STR"); 2) linha já havia sido importada antes (hash duplicado — proteção contra importar o mesmo arquivo duas vezes).',
+        action: '1) Confira se você já rodou esse arquivo antes — se sim, pulada é esperado; 2) Se NÃO rodou ainda, abra o arquivo e confira se o HISTÓRICO está exatamente no formato exigido pelo perfil; 3) Veja o detalhamento por arquivo no final do e-mail.',
+        severity: 'Verificar',
+      });
+    }
+    if (err.length > 0) {
+      if (isDatabaseClosedError(err as unknown as Error)) {
+        issues.push({
+          title: 'Erro interno de banco (Database closed)',
+          cause: 'O handle interno do SQLite foi invalidado (reload do backend em andamento ou hot reload Nest).',
+          action: 'Rode a importação novamente em 1 minuto — o backend já reabre automaticamente. Se persistir, reinicie o backend NestJS ou o serviço PM2 em produção.',
+          severity: 'Ação necessária',
+        });
+      } else if (/unauthorized|401|403|forbidden|access.?denied|permiss/i.test(errLower)) {
+        issues.push({
+          title: 'Sem permissão para acessar o SharePoint / Graph',
+          cause: 'Credencial Graph expirou, ou o usuário/serviço não tem permissão de leitura na pasta SharePoint informada.',
+          action: '1) Teste abrindo a URL SharePoint com o mesmo usuário da automação — se não abre lá, peça acesso ao dono da pasta; 2) Se permissão está ok, valide AZURE_TENANT_ID / CLIENT_ID / CLIENT_SECRET no .env do backend.',
+          severity: 'Ação necessária',
+        });
+      } else if (/not.?found|404|itemNotFound/i.test(errLower)) {
+        issues.push({
+          title: 'Pasta ou arquivo não encontrado no SharePoint',
+          cause: 'URL da pasta SharePoint foi alterada, ou a subpasta (ANO/MÊS) não existe ainda.',
+          action: '1) Cole a URL SharePoint no navegador e confirme que a pasta abre; 2) Se mudou o ano/mês, ajuste a URL na configuração de automação.',
+          severity: 'Ação necessária',
+        });
+      } else if (/corrupt|invalid file|unsupported format|password|protect|couldn'?t be parsed|buffer|xlsx|sheet|workbook/i.test(errLower)) {
+        issues.push({
+          title: 'Arquivo Excel inválido, corrompido ou protegido por senha',
+          cause: 'Arquivo não pôde ser lido: pode estar incompleto (download interrompido), protegido por senha, salvo em formato antigo, ou ainda aberto/lockado no Excel de outra pessoa.',
+          action: '1) Tente abrir o arquivo manualmente no Excel — se pede senha, salve uma cópia sem senha; 2) Salve novamente como .xlsx; 3) Certifique-se que ninguém mais está com o arquivo aberto.',
+          severity: 'Ação necessária',
+        });
+      } else if (/duplicate|hash|já exist|already exis|same file|same content|imported_row_hashes/i.test(errLower) || (input.totalRowsInserted === 0 && input.totalRowsSkipped > 0)) {
+        issues.push({
+          title: 'Arquivo ou linhas já haviam sido importadas antes',
+          cause: 'Antiduplicata ativou — hash do arquivo ou das linhas já existe no banco. É esperado se você rodou o mesmo arquivo mais de uma vez.',
+          action: 'Se quer importar de novo, primeiro remova as linhas antigas da tabela ou use um arquivo com dados novos.',
+          severity: 'Informativo',
+        });
+      } else if (/historicoStrict|cred\.?ted|histórico|filtro histó|skipped by historico strict/i.test(errLower)) {
+        issues.push({
+          title: 'Filtro estrito do perfil rejeitou linhas',
+          cause: 'O perfil exige um valor exato para alguma coluna (ex: HISTÓRICO = CRÉD.TED-STR) e algumas linhas tem valor diferente.',
+          action: 'Confira no arquivo se todas as linhas que quer importar possuem exatamente o valor esperado no filtro do perfil.',
+          severity: 'Verificar',
+        });
+      } else {
+        issues.push({
+          title: 'Erro inesperado durante o processamento',
+          cause: 'Mensagem técnica: ' + err.slice(0, 500),
+          action: 'Rode a importação novamente. Se continuar, envie este e-mail para a TI — anexe também o arquivo Excel que deu problema.',
+          severity: 'Ação necessária',
+          detail: err,
+        });
+      }
+    }
+
+    const statusBannerHtml = `
+      <div style="margin:0 0 22px;padding:18px 20px;border-radius:14px;background:${display.bg};border:1px solid ${display.border};">
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;">
+          <div style="font-size:28px;line-height:1;">${display.emoji}</div>
+          <div style="flex:1;">
+            <div style="font-size:20px;font-weight:900;letter-spacing:-.02em;color:${display.accent};margin-bottom:4px;">${display.title}</div>
+            <div style="font-size:13.5px;line-height:1.55;color:#0f172a;font-weight:600;">${display.summary}</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#fff;">${display.pillLabel}</span>
+          <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#0f172a;color:#f8fafc;">${escapeHtml(forceKindDisplay)}</span>
+          <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#334155;color:#f8fafc;">Modo ${escapeHtml(modeDisplay)}</span>
+        </div>
+      </div>
+    `;
+
+    const summaryHtml = `
+      <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin:0 0 22px;">
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;color:#1e3a8a;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;margin-bottom:6px;">Arquivos varridos</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalFilesScanned}</div>
+          <div style="font-size:11px;color:#1e3a8a;margin-top:4px;font-weight:700;">Encontrados na pasta/origem</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;color:#0f766e;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;margin-bottom:6px;">Compatíveis</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalFilesMatched}</div>
+          <div style="font-size:11px;color:#0f766e;margin-top:4px;font-weight:700;">Batem com perfil de importação</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;color:#14532d;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;margin-bottom:6px;">Linhas inseridas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalRowsInserted}</div>
+          <div style="font-size:11px;color:#14532d;margin-top:4px;font-weight:700;">Gravadas no banco</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;color:#92400e;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;margin-bottom:6px;">Linhas puladas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalRowsSkipped}</div>
+          <div style="font-size:11px;color:#92400e;margin-top:4px;font-weight:700;">Rejeitadas pelo filtro/duplicata</div>
+        </div>
+      </div>
+      ${folderShort
+        ? `<div style="margin:0 0 22px;padding:14px 16px;border-radius:12px;background:#f1f5f9;border:1px solid #cbd5e1;color:#0f172a;font-size:12.5px;line-height:1.65;">
+             <b style="font-weight:900;color:#0f172a;">Origem (SharePoint):</b><br>
+             <a href="${escapeAttr(folderShort)}" style="color:#0369a1;font-weight:800;word-break:break-all;">${escapeHtml(folderShort)}</a>
+           </div>`
+        : ''
+      }
+    `;
+
+    const issuesHtml = issues.length > 0
+      ? `
+        <div style="margin:0 0 26px;">
+          <div style="font-size:16px;font-weight:900;letter-spacing:-.01em;color:${issues.some(i => i.severity === 'Ação necessária') ? '#b91c1c' : '#b45309'};margin-bottom:12px;">
+            ⚠️ Problemas encontrados — causa e o que fazer
+          </div>
+          ${issues.map((it) => {
+            const sevColor =
+              it.severity === 'Ação necessária'
+                ? { bg: '#fef2f2', border: '#fecaca', label: '#b91c1c' }
+                : it.severity === 'Verificar'
+                ? { bg: '#fffbeb', border: '#fde68a', label: '#b45309' }
+                : { bg: '#f1f5f9', border: '#cbd5e1', label: '#334155' };
+            return `
+              <div style="margin-bottom:12px;padding:16px 18px;border-radius:14px;background:${sevColor.bg};border:1px solid ${sevColor.border};">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+                  <span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${sevColor.label};color:#fff;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">${it.severity}</span>
+                  <div style="font-size:15px;font-weight:900;color:#0f172a;line-height:1.3;">${escapeHtml(it.title)}</div>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:12px;margin-top:4px;">
+                  <div>
+                    <div style="font-size:11px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin-bottom:4px;">Causa provável</div>
+                    <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;">${escapeHtml(it.cause)}</div>
+                  </div>
+                  <div>
+                    <div style="font-size:11px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin-bottom:4px;">Ação recomendada</div>
+                    <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;white-space:pre-wrap;">${escapeHtml(it.action)}</div>
+                  </div>
+                </div>
+                ${it.detail ? `<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.7);border:1px dashed ${sevColor.border};font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#111827;white-space:pre-wrap;word-break:break-word;">${escapeHtml(String(it.detail).slice(0, 1500))}</div>` : ''}
+              </div>`;
+          }).join('')}
+        </div>`
+      : `
+        <div style="margin:0 0 26px;padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#bbf7d0 100%);border:1px solid #86efac;color:#14532d;">
+          <div style="font-weight:900;font-size:14px;margin-bottom:4px;">✅ Nenhum problema detectado</div>
+          <div style="font-size:12.5px;line-height:1.55;font-weight:600;">Tudo correu bem. Pode fechar este e-mail.</div>
+        </div>`;
 
     const tableRowsHtml = input.importedFiles.length > 0
       ? `<table width="100%" cellpadding="8" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px;color:#0f172a;background:#ffffff;border:1px solid #cbd5e1;border-radius:14px;overflow:hidden;">
           <thead>
             <tr style="background:#0f172a;color:#f8fafc;">
               <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Arquivo</th>
-              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Tabela</th>
+              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Tabela alvo</th>
               <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Inseridas</th>
               <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Puladas</th>
-              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Status</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Resultado</th>
             </tr>
           </thead>
           <tbody>
             ${input.importedFiles.map((f, i) => {
               const insOk = Number(f.insertedRows || 0) > 0;
               const skip = Number(f.skippedRows || 0);
-              const statusLabel = insOk ? (skip > 0 ? 'Processado parcial' : 'Importado') : (skip > 0 ? 'Pulado' : 'Sem alterações');
-              const statusColor = insOk ? (skip > 0 ? '#92400e' : '#14532d') : (skip > 0 ? '#991b1b' : '#334155');
+              let statusLabel = '—';
+              let statusColor = '#334155';
+              if (insOk && skip === 0) { statusLabel = '100% importado'; statusColor = '#14532d'; }
+              else if (insOk && skip > 0) { statusLabel = 'Parcial (tem pulada)'; statusColor = '#92400e'; }
+              else if (!insOk && skip > 0) { statusLabel = 'Pulado/tudo duplicado'; statusColor = '#991b1b'; }
+              else { statusLabel = 'Sem alterações'; statusColor = '#334155'; }
               const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
               return `<tr style="background:${rowBg};color:#0f172a;">
-                <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;word-break:break-all;font-weight:600;">${escapeHtml(f.fileName)}</td>
+                <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;word-break:break-all;font-weight:700;">${escapeHtml(f.fileName)}</td>
                 <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;">${escapeHtml(f.targetTable || f.kind || '-')}</td>
                 <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#0f766e;">${f.insertedRows ?? 0}</td>
                 <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#9a3412;">${f.skippedRows ?? 0}</td>
@@ -27514,61 +27745,42 @@ async function sendImportFinishedEmailNotification(input: {
             }).join('')}
           </tbody>
         </table>`
-      : `<div style="padding:16px 18px;border-radius:12px;background:#fef2f2;border:1px dashed #fca5a5;color:#991b1b;font-size:13px;font-weight:600;">Nenhum arquivo foi processado nesta execução.</div>`;
+      : `<div style="padding:16px 18px;border-radius:12px;background:#fef2f2;border:1px dashed #fca5a5;color:#991b1b;font-size:13px;font-weight:700;">Nenhum arquivo foi processado nesta execução.</div>`;
 
-    const summaryHtml = `
-      <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin:0 0 22px;">
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;color:#1e3a8a;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;">Arquivos varridos</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalFilesScanned}</div>
+    const techHtml = `
+      <details style="margin-top:26px;padding:14px 16px;border-radius:12px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
+        <summary style="cursor:pointer;font-weight:900;font-size:13px;letter-spacing:.02em;color:#334155;">ℹ️ Dados técnicos (só para a TI)</summary>
+        <div style="margin-top:12px;display:grid;grid-template-columns:repeat(2, 1fr);gap:10px;font-size:12px;line-height:1.55;">
+          <div><b style="font-weight:800;">Tipo importação:</b> ${escapeHtml(forceKindDisplay)}</div>
+          <div><b style="font-weight:800;">Modo:</b> ${escapeHtml(modeDisplay)}</div>
+          <div><b style="font-weight:800;">Outcome raw:</b> ${escapeHtml(input.outcome)}</div>
+          <div><b style="font-weight:800;">Outcome efetivo:</b> ${escapeHtml(effectiveOutcome)}</div>
+          <div style="grid-column:1 / -1;"><b style="font-weight:800;">Perfis usados:</b> ${input.importedFiles.length === 0 ? 'Nenhum' : input.importedFiles.map(f => `${escapeHtml(f.fileName)} → ${escapeHtml(f.profileId || '(sem perfil)')}`).join('<br>')}</div>
+          ${err ? `<div style="grid-column:1 / -1;margin-top:8px;padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;"><b style="font-weight:900;">Stack/mensagem bruta:</b><br>${escapeHtml(err)}</div>` : ''}
         </div>
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;color:#0f766e;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;">Compatíveis</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalFilesMatched}</div>
-        </div>
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;color:#14532d;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;">Linhas inseridas</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalRowsInserted}</div>
-        </div>
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;color:#92400e;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;">Linhas puladas</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalRowsSkipped}</div>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:12px;margin:0 0 26px;">
-        <div style="padding:16px 18px;border-radius:14px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px;color:#334155;">Tipo de importação</div>
-          <div style="font-weight:900;font-size:16px;color:#0f172a;">${escapeHtml(forceKindDisplay)}</div>
-        </div>
-        <div style="padding:16px 18px;border-radius:14px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px;color:#334155;">Modo</div>
-          <div style="font-weight:900;font-size:16px;color:#0f172a;">${escapeHtml(modeDisplay)}</div>
-        </div>
-      </div>
-      ${folderShort
-        ? `<div style="margin:0 0 22px;padding:14px 16px;border-radius:12px;background:#f1f5f9;border:1px solid #cbd5e1;color:#0f172a;font-size:12.5px;line-height:1.6;word-break:break-all;font-weight:600;">
-            <b style="color:#0f172a;">Origem (SharePoint):</b><br>${escapeHtml(folderShort)}
-          </div>`
-        : ''
-      }
-      ${input.errorMessage
-        ? `<div style="margin:0 0 22px;padding:16px 18px;border-radius:14px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;line-height:1.6;font-weight:600;">
-            <div style="font-weight:900;font-size:15px;margin-bottom:8px;">Erro reportado</div>
-            <div style="font-size:13px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(String(input.errorMessage).slice(0, 4000))}</div>
-          </div>`
-        : ''
-      }
-      <div style="margin:0 0 16px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">Detalhamento por arquivo</div>
-      ${tableRowsHtml}`;
+      </details>
+    `;
+
+    const finalContentHtml = statusBannerHtml + summaryHtml + issuesHtml +
+      `<div style="margin:0 0 6px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">📄 Arquivos processados</div>` +
+      tableRowsHtml + techHtml;
 
     const html = buildEmailTemplateHtml({
       title: display.title,
-      subtitle: `${display.sub} • ${forceKindDisplay} • ${modeDisplay.toUpperCase()}`,
-      contentHtml: summaryHtml,
-      introHtml: `<div style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${effectiveOutcome === 'success' ? 'Sucesso' : effectiveOutcome === 'partial' ? 'Parcial' : effectiveOutcome === 'failed' ? 'Falha' : 'Cancelado'}</div>`,
+      subtitle: `${display.summary} • ${forceKindDisplay} • ${modeDisplay.toUpperCase()}`,
+      contentHtml: finalContentHtml,
+      introHtml: `<div style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${display.emoji} ${display.pillLabel}</div>`,
     });
     const dataIso = new Date().toISOString().replace('T', ' ').slice(0, 16);
-    const subject = `[Portal Administrativo] Importação ${effectiveOutcome === 'success' ? 'OK' : effectiveOutcome === 'failed' ? 'FALHA' : effectiveOutcome === 'partial' ? 'PARCIAL' : 'CANCELADA'} • ${forceKindDisplay} (${dataIso})`;
+    const subjectPrefix =
+      effectiveOutcome === 'success' ? '✅' :
+      effectiveOutcome === 'partial' ? '⚠️' :
+      effectiveOutcome === 'failed'  ? '❌' : '⏹️';
+    const subjectStatus =
+      effectiveOutcome === 'success' ? 'OK' :
+      effectiveOutcome === 'partial' ? 'PARCIAL' :
+      effectiveOutcome === 'failed'  ? 'FALHA' : 'CANCELADA';
+    const subject = `[Portal Administrativo] ${subjectPrefix} Importação ${subjectStatus} • ${forceKindDisplay} (${dataIso})`;
     await sendGraphMail({
       token,
       from: notificationFrom,
