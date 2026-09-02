@@ -102,7 +102,48 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
       setAccessMessage(null)
     })
 
-    fetch('/api/consignado/access/emails')
+    const accessFetchWithRetry = async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+      maxAttempts = 4,
+      baseDelayMs = 400,
+    ): Promise<Response> => {
+      let lastErr: unknown = null
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const res = await fetch(input, init)
+          if (
+            res.status === 502 ||
+            res.status === 503 ||
+            res.status === 504 ||
+            (res.status >= 500 && attempt < maxAttempts)
+          ) {
+            lastErr = new Error(`HTTP ${res.status}`)
+            if (attempt < maxAttempts) {
+              await new Promise((r) =>
+                setTimeout(r, baseDelayMs * attempt * attempt),
+              )
+              continue
+            }
+            return res
+          }
+          return res
+        } catch (e) {
+          lastErr = e
+          if (attempt < maxAttempts) {
+            await new Promise((r) =>
+              setTimeout(r, baseDelayMs * attempt * attempt),
+            )
+            continue
+          }
+          throw e
+        }
+      }
+      if (lastErr instanceof Error) throw lastErr
+      throw new Error('Falha ao validar acesso (tentativas esgotadas).')
+    }
+
+    accessFetchWithRetry('/api/consignado/access/emails', undefined, 4, 400)
       .then(async (res) => {
         const data = (await res.json().catch(() => null)) as
           | {
@@ -118,8 +159,13 @@ function RequireMicrosoftLogin({ children }: { children: React.ReactNode }) {
             }
           | null
         if (!res.ok) {
-          const msg =
-            data?.message || `Falha ao validar acesso (HTTP ${res.status}).`
+          const defaultMsg =
+            res.status === 502 || res.status === 503 || res.status === 504
+              ? location.port === '5173'
+                ? `Back-end DEV ainda está iniciando (HTTP ${res.status}). Aguarde alguns segundos e recarregue — ou rode \`npm run start\` no backend.`
+                : `Servidor de produção indisponível (HTTP ${res.status}). Contate TI para reiniciar PM2.`
+              : `Falha ao validar acesso (HTTP ${res.status}).`
+          const msg = data?.message || defaultMsg
           throw new Error(msg)
         }
         return data

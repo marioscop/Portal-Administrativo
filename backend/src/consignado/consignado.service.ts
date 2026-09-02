@@ -258,6 +258,12 @@ export class ConsignadoService {
     error?: string;
   }>;
 
+  readonly debugSendImportFinishedEmailPreview = resolveModuleFn(
+    (ns as { sendImportFinishedEmailNotification?: unknown }).sendImportFinishedEmailNotification as unknown,
+    _mod,
+    'sendImportFinishedEmailNotification',
+  ) as unknown as typeof _mod.sendImportFinishedEmailNotification;
+
   readonly debugOneshotTreImportSync = resolveModuleFn(
     (ns as { debugOneshotTreImportSync?: unknown }).debugOneshotTreImportSync as unknown,
     _mod,

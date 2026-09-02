@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Query, Param, Header, Res, UploadedFile, UseInterceptors, InternalServerErrorException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, Param, Header, Res, UploadedFile, UseInterceptors, InternalServerErrorException, BadRequestException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import * as path from 'node:path';
@@ -446,6 +446,74 @@ export class ConsignadoController {
       return await this.service.debugEnsureExtratosRelatoriosTables();
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Falha ao executar ensureSchema extratos/relatorios.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post('debug/send-import-email-preview')
+  async debugSendImportEmailPreview(
+    @Body() body: {
+      toEmail?: string;
+      scenario?: 'success' | 'partial' | 'failed';
+      forceKind?: string;
+    },
+  ) {
+    const toEmail = String(body?.toEmail ?? '').trim();
+    if (!toEmail) throw new BadRequestException('Campo toEmail é obrigatório.');
+    const scenario: 'success' | 'partial' | 'failed' =
+      body?.scenario === 'success' || body?.scenario === 'partial' || body?.scenario === 'failed' ? body.scenario : 'success';
+    const forceKind = String(body?.forceKind ?? scenario === 'success' ? 'Extrato TODOS' : scenario === 'partial' ? 'Extratos Recurso' : 'Extratos Recurso (SP)').trim() || 'Extrato TODOS';
+
+    const buildDemoPayload = (outcome: 'success' | 'partial' | 'failed') => {
+      const baseFiles = [
+        { fileName: 'TODOS-AGOSTO-2026.xlsx', targetTable: 'extratos_todos_ago2026', kind: forceKind, profileId: 'extratos_todos_go', insertedRows: 69, skippedRows: 0 },
+        { fileName: 'TODOS-AGOSTO-2026-APOIO.xlsx', targetTable: 'extratos_todos_ago2026_apoio', kind: forceKind, profileId: 'extratos_todos_go', insertedRows: 31, skippedRows: 3 },
+      ];
+      if (outcome === 'success') {
+        return {
+          outcome: 'success' as const,
+          totalFilesScanned: 8,
+          totalFilesMatched: 2,
+          totalRowsInserted: 100,
+          totalRowsSkipped: 0,
+          importedFiles: baseFiles.map(f => ({ ...f, skippedRows: 0 })),
+          errorMessage: null as string | null,
+        };
+      }
+      if (outcome === 'partial') {
+        return {
+          outcome: 'partial' as const,
+          totalFilesScanned: 8,
+          totalFilesMatched: 2,
+          totalRowsInserted: 69,
+          totalRowsSkipped: 31,
+          importedFiles: baseFiles,
+          errorMessage: null as string | null,
+        };
+      }
+      return {
+        outcome: 'failed' as const,
+        totalFilesScanned: 8,
+        totalFilesMatched: 0,
+        totalRowsInserted: 0,
+        totalRowsSkipped: 0,
+        importedFiles: [] as typeof baseFiles,
+        errorMessage: 'Nenhum arquivo bateu com o perfil de aprendizado. Verifique Tipo de importação e nome dos arquivos.' as string | null,
+      };
+    };
+
+    const payload = buildDemoPayload(scenario);
+    try {
+      const result = await this.service.debugSendImportFinishedEmailPreview({
+        notificationTo: toEmail,
+        forceKind,
+        folderUrlPreview: 'https://sicoobjuriscred.sharepoint.com/sites/JURISRECCRED/Recupera%20Crdito/Forms/AllItems.aspx?id=%2Fsites%2FJURISRECCRED%2FRecupera%20Crdito%2FExtratos',
+        ...payload,
+        mode: 'append',
+      });
+      return { ok: true, ...(result ?? {}) };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao enviar preview de e-mail de importação.';
       throw new InternalServerErrorException(message);
     }
   }

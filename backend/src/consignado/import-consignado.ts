@@ -34,6 +34,8 @@ const DB_HANDLE_VALIDATION_ENABLED = true;
 const DB_CLOSED_RETRY_MAX = 2;
 const DB_CLOSED_RETRY_SLEEP_MS = 35;
 type DbCacheEntry = { db: Database; mtimeMs: number; lastUsedMs: number };
+const IMPORT_NOTIFICATION_IDEMPOTENCY_TTL_MS = 20 * 60 * 1000; // 20 minutos de dedup global para job
+const __importNotificationSent = new Map<string, number>(); // key -> timestamp sent
 let cachedPdfParse: PdfParseFn | null = null;
 let cachedPdfModule: unknown | null = null;
 let cachedSqlJs: Promise<SqlJsStatic> | null = null;
@@ -27281,61 +27283,93 @@ function buildEmailTemplateHtml(opts: {
   contentHtml: string;
   title?: string;
   introHtml?: string;
+  accentColor?: string;
 }): string {
   const subtitle = escapeHtml(String(opts.subtitle ?? '').trim());
   const title = escapeHtml(String(opts.title ?? 'Portal Administrativo').trim() || 'Portal Administrativo');
   const logoDataUri = getEmailLogoDataUri();
   const headerBg = '#003641';
-  const topBarColor = '#003641';
+  const topBarColor = opts.accentColor || '#00ae9d';
   const bottomBarColor = '#00ae9d';
   return `<!doctype html>
 <html>
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${title}</title>
+    <!--[if mso]>
+    <style type="text/css">
+      body, table, td, a { font-family: Arial, sans-serif !important; }
+      table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    </style>
+    <![endif]-->
   </head>
-  <body style="margin:0;padding:20px 12px;background:#eef2f7;">
-    <div style="font-family: Arial, sans-serif; max-width: 720px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #d7e0ea; box-shadow: 0 12px 32px rgba(15,23,42,0.08);">
-      ${
-        String(opts.introHtml ?? '').trim()
-          ? `<div style="padding: 22px 24px 18px; background:#ffffff; border-bottom:1px solid #e2e8f0; color:#334155; line-height:1.7;">
-              ${String(opts.introHtml ?? '')}
-            </div>`
-          : ''
-      }
-      <div style="background: ${headerBg}; border-top: 6px solid ${topBarColor}; border-bottom: 4px solid ${bottomBarColor}; padding: 18px 24px 16px;">
-        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse: collapse;">
-          <tr>
-            <td align="left" valign="middle" style="width: 150px; white-space: nowrap;">
-              ${
-                logoDataUri
-                  ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height: 30px; background-color: rgba(255,255,255,0.1); padding: 4px 10px; border-radius: 8px; display: block;">`
-                  : '<span style="color:#ffffff; font-weight:900; font-size:16px;">SICOOB Juriscred</span>'
-              }
-            </td>
-            <td align="center" valign="middle" style="padding:0 10px;white-space:nowrap">
-              <div style="white-space:nowrap;font-size:20px;font-weight:900;letter-spacing:-0.02em;line-height:1.0;color:#ffffff;overflow-wrap:normal;word-break:keep-all;">${title}</div>
-            </td>
-            <td style="width: 150px;">&nbsp;</td>
-          </tr>
-          <tr>
-            <td colspan="3" align="center" style="padding-top:10px;">
-              <div style="font-size:13px;line-height:1.45;color:#e2e8f0;font-weight:600;">${subtitle}</div>
-            </td>
-          </tr>
-        </table>
-      </div>
-
-      <div style="padding: 28px; color: #0f172a; line-height: 1.65; background:#ffffff;">
-        ${String(opts.contentHtml ?? '')}
-      </div>
-
-      <div style="background-color: #003641; border-top:1px solid #004958; padding: 10px 15px; text-align: center; font-size: 11px; color: #e2e8f0; line-height:1.35; font-weight:600;">
-        © 2026 Sicoob Juriscred • Portal Administrativo<br>
-        Desenvolvido Por: Departamento de Tecnologia da Informação - Juriscred<br>
-        🤖 E-mail enviado por agentes de IA - Por favor não responder.
-      </div>
-    </div>
+  <body style="margin:0;padding:24px 8px;background-color:#eef2f7;font-family:Arial,Helvetica,sans-serif;color:#0f172a;-webkit-font-smoothing:antialiased;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:680px;background:#ffffff;border-radius:16px;border:1px solid #d7e0ea;box-shadow:0 12px 32px rgba(15,23,42,0.08);overflow:hidden;">
+            <!-- ======= INTRO PILL STRIP ======= -->
+            ${String(opts.introHtml ?? '').trim()
+              ? `<tr>
+                  <td style="padding:18px 28px 0;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+                      <tr><td align="left">${String(opts.introHtml ?? '')}</td></tr>
+                    </table>
+                  </td>
+                </tr>`
+              : ''
+            }
+            <!-- ======= HEADER BRANDED ======= -->
+            <tr>
+              <td>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:${headerBg};border-top:6px solid ${topBarColor};border-bottom:4px solid ${bottomBarColor};">
+                  <tr>
+                    <td style="padding:20px 28px 16px;">
+                      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+                        <tr>
+                          <td align="left" valign="middle" width="150" style="white-space:nowrap;">
+                            ${logoDataUri
+                                ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height:30px;display:block;background-color:rgba(255,255,255,0.1);padding:4px 10px;border-radius:8px;">`
+                                : `<span style="color:#ffffff;font-weight:900;font-size:16px;">SICOOB Juriscred</span>`
+                            }
+                          </td>
+                          <td align="center" valign="middle" style="padding:0 10px;">
+                            <div style="font-size:22px;font-weight:900;letter-spacing:-0.02em;line-height:1.05;color:#ffffff;white-space:normal;word-break:break-word;">${title}</div>
+                          </td>
+                          <td align="right" valign="middle" width="100" style="white-space:nowrap;">&nbsp;</td>
+                        </tr>
+                        <tr>
+                          <td colspan="3" align="center" style="padding-top:10px;">
+                            <div style="font-size:13px;line-height:1.45;color:#e2e8f0;font-weight:600;white-space:normal;word-break:break-word;">${subtitle}</div>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <!-- ======= CONTENT ======= -->
+            <tr>
+              <td style="padding:28px;background-color:#ffffff;color:#0f172a;line-height:1.65;">
+                ${String(opts.contentHtml ?? '')}
+              </td>
+            </tr>
+            <!-- ======= FOOTER ======= -->
+            <tr>
+              <td style="background-color:#003641;border-top:1px solid #004958;padding:14px 20px;text-align:center;">
+                <div style="font-size:11px;color:#e2e8f0;line-height:1.4;font-weight:600;">
+                  © 2026 Sicoob Juriscred • Portal Administrativo<br>
+                  Desenvolvido Por: Departamento de Tecnologia da Informação - Juriscred<br>
+                  <span style="color:#94a3b8;">🤖 E-mail automático — Por favor não responder.</span>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
   </body>
 </html>`;
 }
@@ -27400,7 +27434,7 @@ function getPortalAdministrativoPublicBaseUrl(): string {
   return raw.replace(/\/+$/g, '');
 }
 
-async function sendImportFinishedEmailNotification(input: {
+export async function sendImportFinishedEmailNotification(input: {
   notificationTo: string | string[] | null | undefined;
   forceKind: string | null | undefined;
   folderUrlPreview: string | null | undefined;
@@ -27419,8 +27453,9 @@ async function sendImportFinishedEmailNotification(input: {
   }>;
   errorMessage?: string | null;
   mode?: string | null;
-}): Promise<{ attempted: boolean; sent: boolean; to: string[]; error?: string | null }> {
-  const out = { attempted: false, sent: false, to: [] as string[], error: null as string | null };
+  jobSentFlagRef?: { value: boolean };
+}): Promise<{ attempted: boolean; sent: boolean; to: string[]; error?: string | null; deduplicated?: boolean }> {
+  const out = { attempted: false, sent: false, to: [] as string[], error: null as string | null, deduplicated: false };
   try {
     const notificationFromEnv = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
     let recipients = splitEmailRecipients(input.notificationTo);
@@ -27473,6 +27508,42 @@ async function sendImportFinishedEmailNotification(input: {
     catch (e) { out.error = `Falha ao obter token Graph: ${e instanceof Error ? e.message : String(e)}`; return out; }
     if (!token) { out.error = 'Token Graph vazio.'; return out; }
 
+    const forceKindDisplay = String(input.forceKind ?? 'Não especificado').trim() || 'Não especificado';
+    const modeDisplay = String(input.mode ?? 'append').trim() || 'append';
+    const folderShort = String(input.folderUrlPreview ?? '').trim().slice(0, 180);
+    const recipientsKey = recipients.map((r) => r.toLowerCase().trim()).sort().join('|');
+    const filesSignature = input.importedFiles.slice(0, 10).map((f) => `${f.fileName}:${f.insertedRows}:${f.skippedRows}`).join('|');
+    const idempotencyRaw = [
+      'import-notification:v1',
+      String(input.outcome || ''),
+      String(input.totalFilesScanned),
+      String(input.totalFilesMatched),
+      String(input.totalRowsInserted),
+      String(input.totalRowsSkipped),
+      forceKindDisplay,
+      folderShort,
+      recipientsKey,
+      filesSignature,
+    ].join('::');
+    const crypto = require('crypto');
+    const idempotencyKey = String(crypto.createHash ? crypto.createHash('sha256').update(idempotencyRaw, 'utf8').digest('hex').slice(0, 32) : idempotencyRaw.slice(0, 32));
+    const nowTs = Date.now();
+    try {
+      for (const [k, ts] of Array.from(__importNotificationSent.entries())) {
+        if (nowTs - ts > IMPORT_NOTIFICATION_IDEMPOTENCY_TTL_MS) __importNotificationSent.delete(k);
+      }
+    } catch { /* ignore prune */ }
+    if (__importNotificationSent.has(idempotencyKey)) {
+      out.deduplicated = true;
+      out.error = `Deduplicado (já enviado há ${Math.floor((nowTs - (__importNotificationSent.get(idempotencyKey) ?? 0)) / 1000)}s).`;
+      return out;
+    }
+    if (input.jobSentFlagRef && input.jobSentFlagRef.value) {
+      out.deduplicated = true;
+      out.error = 'Deduplicado (job já disparou notificação nesta execução).';
+      return out;
+    }
+
     const outcomeConfig: Record<string, {
       title: string; summary: string; accent: string; bg: string; border: string; pillLabel: string; emoji: string;
     }> = {
@@ -27513,9 +27584,6 @@ async function sendImportFinishedEmailNotification(input: {
         emoji: '⏹️',
       },
     };
-    const forceKindDisplay = String(input.forceKind ?? 'Não especificado').trim() || 'Não especificado';
-    const modeDisplay = String(input.mode ?? 'append').trim() || 'append';
-    const folderShort = String(input.folderUrlPreview ?? '').trim().slice(0, 180);
     const isOk = input.totalRowsInserted > 0 && !input.errorMessage;
     const effectiveOutcome = input.outcome === 'success' ? (isOk ? 'success' : (input.totalRowsSkipped > 0 ? 'partial' : 'success')) : input.outcome;
     const display = outcomeConfig[effectiveOutcome] ?? outcomeConfig.failed;
@@ -27626,92 +27694,133 @@ async function sendImportFinishedEmailNotification(input: {
     }
 
     const statusBannerHtml = `
-      <div style="margin:0 0 22px;padding:18px 20px;border-radius:14px;background:${display.bg};border:1px solid ${display.border};">
-        <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px;">
-          <div style="font-size:28px;line-height:1;">${display.emoji}</div>
-          <div style="flex:1;">
-            <div style="font-size:20px;font-weight:900;letter-spacing:-.02em;color:${display.accent};margin-bottom:4px;">${display.title}</div>
-            <div style="font-size:13.5px;line-height:1.55;color:#0f172a;font-weight:600;">${display.summary}</div>
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#fff;">${display.pillLabel}</span>
-          <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#0f172a;color:#f8fafc;">${escapeHtml(forceKindDisplay)}</span>
-          <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#334155;color:#f8fafc;">Modo ${escapeHtml(modeDisplay)}</span>
-        </div>
-      </div>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 22px;border-radius:14px;background:${display.bg};border:1px solid ${display.border};">
+        <tr>
+          <td style="padding:18px 20px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td valign="middle" width="44" style="padding:0 12px 0 0;font-size:28px;line-height:1;">${display.emoji}</td>
+                <td valign="middle" style="padding:0;">
+                  <div style="font-size:20px;font-weight:900;letter-spacing:-.02em;color:${display.accent};line-height:1.35;margin:0 0 6px;">${display.title}</div>
+                  <div style="font-size:13.5px;line-height:1.55;color:#0f172a;font-weight:600;">${display.summary}</div>
+                </td>
+              </tr>
+              <tr><td colspan="2" style="padding:12px 0 0;font-size:0;line-height:0;">&nbsp;</td></tr>
+              <tr>
+                <td colspan="2">
+                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#fff;margin:0 6px 6px 0;">${display.pillLabel}</span>
+                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#0f172a;color:#f8fafc;margin:0 6px 6px 0;">${escapeHtml(forceKindDisplay)}</span>
+                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#334155;color:#f8fafc;margin:0 0 6px;">Modo ${escapeHtml(modeDisplay)}</span>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
     `;
 
     const summaryHtml = `
-      <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin:0 0 22px;">
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;color:#1e3a8a;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;margin-bottom:6px;">Arquivos varridos</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalFilesScanned}</div>
-          <div style="font-size:11px;color:#1e3a8a;margin-top:4px;font-weight:700;">Encontrados na pasta/origem</div>
-        </div>
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;color:#0f766e;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;margin-bottom:6px;">Compatíveis</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalFilesMatched}</div>
-          <div style="font-size:11px;color:#0f766e;margin-top:4px;font-weight:700;">Batem com perfil de importação</div>
-        </div>
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;color:#14532d;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;margin-bottom:6px;">Linhas inseridas</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalRowsInserted}</div>
-          <div style="font-size:11px;color:#14532d;margin-top:4px;font-weight:700;">Gravadas no banco</div>
-        </div>
-        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;color:#92400e;">
-          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;margin-bottom:6px;">Linhas puladas</div>
-          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;">${input.totalRowsSkipped}</div>
-          <div style="font-size:11px;color:#92400e;margin-top:4px;font-weight:700;">Rejeitadas pelo filtro/duplicata</div>
-        </div>
-      </div>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:10px 0;margin:0 0 16px;width:calc(100% + 20px);margin-left:-10px;">
+        <tr>
+          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;">
+            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;margin:0 0 6px;">Arquivos varridos</div>
+            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalFilesScanned}</div>
+            <div style="font-size:11px;color:#1e3a8a;margin-top:5px;font-weight:700;line-height:1.35;">Encontrados na pasta</div>
+          </td>
+          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;">
+            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;margin:0 0 6px;">Compatíveis</div>
+            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalFilesMatched}</div>
+            <div style="font-size:11px;color:#0f766e;margin-top:5px;font-weight:700;line-height:1.35;">Batem com perfil</div>
+          </td>
+          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;">
+            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;margin:0 0 6px;">Linhas inseridas</div>
+            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalRowsInserted}</div>
+            <div style="font-size:11px;color:#14532d;margin-top:5px;font-weight:700;line-height:1.35;">Gravadas no banco</div>
+          </td>
+          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;">
+            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;margin:0 0 6px;">Linhas puladas</div>
+            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalRowsSkipped}</div>
+            <div style="font-size:11px;color:#92400e;margin-top:5px;font-weight:700;line-height:1.35;">Filtro/duplicata</div>
+          </td>
+        </tr>
+      </table>
       ${folderShort
-        ? `<div style="margin:0 0 22px;padding:14px 16px;border-radius:12px;background:#f1f5f9;border:1px solid #cbd5e1;color:#0f172a;font-size:12.5px;line-height:1.65;">
-             <b style="font-weight:900;color:#0f172a;">Origem (SharePoint):</b><br>
-             <a href="${escapeAttr(folderShort)}" style="color:#0369a1;font-weight:800;word-break:break-all;">${escapeHtml(folderShort)}</a>
-           </div>`
+        ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 22px;border-radius:12px;background:#f1f5f9;border:1px solid #cbd5e1;">
+             <tr><td style="padding:14px 16px;">
+               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+                 <td width="52" valign="top" style="padding:0 10px 0 0;"><div style="font-size:22px;line-height:1;">📁</div></td>
+                 <td valign="top" style="font-size:12.5px;line-height:1.55;color:#0f172a;">
+                   <div style="font-weight:900;margin:0 0 4px;">Origem (SharePoint)</div>
+                   <a href="${escapeAttr(folderShort)}" target="_blank" rel="noopener noreferrer" style="color:#0369a1;font-weight:700;word-break:break-all;text-decoration:none;">${escapeHtml(folderShort)}</a>
+                 </td>
+               </tr></table>
+             </td></tr>
+           </table>`
         : ''
       }
     `;
 
     const issuesHtml = issues.length > 0
-      ? `
-        <div style="margin:0 0 26px;">
-          <div style="font-size:16px;font-weight:900;letter-spacing:-.01em;color:${issues.some(i => i.severity === 'Ação necessária') ? '#b91c1c' : '#b45309'};margin-bottom:12px;">
-            ⚠️ Problemas encontrados — causa e o que fazer
-          </div>
-          ${issues.map((it) => {
-            const sevColor =
-              it.severity === 'Ação necessária'
-                ? { bg: '#fef2f2', border: '#fecaca', label: '#b91c1c' }
-                : it.severity === 'Verificar'
-                ? { bg: '#fffbeb', border: '#fde68a', label: '#b45309' }
-                : { bg: '#f1f5f9', border: '#cbd5e1', label: '#334155' };
+      ? (() => {
+          const headerColor = issues.some(i => i.severity === 'Ação necessária') ? '#b91c1c' : '#b45309';
+          const cards = issues.map((it) => {
+            const sevColor = it.severity === 'Ação necessária'
+              ? { bg: '#fef2f2', border: '#fecaca', label: '#b91c1c', icon: '🔴' }
+              : it.severity === 'Verificar'
+              ? { bg: '#fffbeb', border: '#fde68a', label: '#b45309', icon: '🟡' }
+              : { bg: '#f1f5f9', border: '#cbd5e1', label: '#334155', icon: '🔵' };
             return `
-              <div style="margin-bottom:12px;padding:16px 18px;border-radius:14px;background:${sevColor.bg};border:1px solid ${sevColor.border};">
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
-                  <span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${sevColor.label};color:#fff;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">${it.severity}</span>
-                  <div style="font-size:15px;font-weight:900;color:#0f172a;line-height:1.3;">${escapeHtml(it.title)}</div>
-                </div>
-                <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:12px;margin-top:4px;">
-                  <div>
-                    <div style="font-size:11px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin-bottom:4px;">Causa provável</div>
-                    <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;">${escapeHtml(it.cause)}</div>
-                  </div>
-                  <div>
-                    <div style="font-size:11px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin-bottom:4px;">Ação recomendada</div>
-                    <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;white-space:pre-wrap;">${escapeHtml(it.action)}</div>
-                  </div>
-                </div>
-                ${it.detail ? `<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.7);border:1px dashed ${sevColor.border};font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#111827;white-space:pre-wrap;word-break:break-word;">${escapeHtml(String(it.detail).slice(0, 1500))}</div>` : ''}
-              </div>`;
-          }).join('')}
-        </div>`
-      : `
-        <div style="margin:0 0 26px;padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#bbf7d0 100%);border:1px solid #86efac;color:#14532d;">
-          <div style="font-weight:900;font-size:14px;margin-bottom:4px;">✅ Nenhum problema detectado</div>
-          <div style="font-size:12.5px;line-height:1.55;font-weight:600;">Tudo correu bem. Pode fechar este e-mail.</div>
-        </div>`;
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:12px;border-radius:14px;background:${sevColor.bg};border-left:5px solid ${sevColor.label};border-top:1px solid ${sevColor.border};border-right:1px solid ${sevColor.border};border-bottom:1px solid ${sevColor.border};">
+                <tr>
+                  <td style="padding:14px 16px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+                      <tr>
+                        <td width="22" valign="top" style="font-size:14px;padding:2px 10px 0 0;line-height:1;">${sevColor.icon}</td>
+                        <td valign="top">
+                          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+                            <td valign="middle" style="padding:0 8px 8px 0;">
+                              <span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${sevColor.label};color:#fff;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">${it.severity}</span>
+                            </td>
+                          </tr></table>
+                          <div style="font-size:14.5px;font-weight:900;color:#0f172a;line-height:1.35;margin:0 0 10px;">${escapeHtml(it.title)}</div>
+                          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:12px 0;width:calc(100% + 24px);margin-left:-12px;">
+                            <tr>
+                              <td width="50%" valign="top" style="background:rgba(255,255,255,.55);border-radius:10px;padding:10px 12px;border:1px solid rgba(0,0,0,0.04);">
+                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">🧭 Causa provável</div>
+                                <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;">${escapeHtml(it.cause)}</div>
+                              </td>
+                              <td width="50%" valign="top" style="background:#ffffff;border-radius:10px;padding:10px 12px;border:1px solid ${sevColor.border};">
+                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">✅ Ação recomendada</div>
+                                <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;white-space:pre-wrap;">${escapeHtml(it.action)}</div>
+                              </td>
+                            </tr>
+                          </table>
+                          ${it.detail ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:10px;"><tr><td style="padding:10px 12px;border-radius:8px;background:rgba(255,255,255,.7);border:1px dashed ${sevColor.border};font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#111827;white-space:pre-wrap;word-break:break-word;">${escapeHtml(String(it.detail).slice(0, 1500))}</td></tr></table>` : ''}
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            `;
+          }).join('');
+          return `
+            <div style="margin:0 0 26px;">
+              <div style="font-size:16px;font-weight:900;letter-spacing:-.01em;color:${headerColor};margin-bottom:12px;">⚠️ Problemas encontrados</div>
+              ${cards}
+            </div>`;
+        })()
+      : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 26px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#bbf7d0 100%);border:1px solid #86efac;">
+           <tr><td style="padding:16px 18px;">
+             <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+               <td width="30" valign="middle" style="font-size:20px;padding:0 10px 0 0;line-height:1;">✅</td>
+               <td valign="middle">
+                 <div style="font-weight:900;font-size:14px;color:#14532d;margin:0 0 3px;line-height:1.2;">Nenhum problema detectado</div>
+                 <div style="font-size:12.5px;line-height:1.55;color:#14532d;font-weight:600;">Tudo correu bem. Pode fechar este e-mail.</div>
+               </td>
+             </tr></table>
+           </td></tr>
+         </table>`;
 
     const tableRowsHtml = input.importedFiles.length > 0
       ? `<table width="100%" cellpadding="8" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px;color:#0f172a;background:#ffffff;border:1px solid #cbd5e1;border-radius:14px;overflow:hidden;">
@@ -27748,28 +27857,37 @@ async function sendImportFinishedEmailNotification(input: {
       : `<div style="padding:16px 18px;border-radius:12px;background:#fef2f2;border:1px dashed #fca5a5;color:#991b1b;font-size:13px;font-weight:700;">Nenhum arquivo foi processado nesta execução.</div>`;
 
     const techHtml = `
-      <details style="margin-top:26px;padding:14px 16px;border-radius:12px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
-        <summary style="cursor:pointer;font-weight:900;font-size:13px;letter-spacing:.02em;color:#334155;">ℹ️ Dados técnicos (só para a TI)</summary>
-        <div style="margin-top:12px;display:grid;grid-template-columns:repeat(2, 1fr);gap:10px;font-size:12px;line-height:1.55;">
-          <div><b style="font-weight:800;">Tipo importação:</b> ${escapeHtml(forceKindDisplay)}</div>
-          <div><b style="font-weight:800;">Modo:</b> ${escapeHtml(modeDisplay)}</div>
-          <div><b style="font-weight:800;">Outcome raw:</b> ${escapeHtml(input.outcome)}</div>
-          <div><b style="font-weight:800;">Outcome efetivo:</b> ${escapeHtml(effectiveOutcome)}</div>
-          <div style="grid-column:1 / -1;"><b style="font-weight:800;">Perfis usados:</b> ${input.importedFiles.length === 0 ? 'Nenhum' : input.importedFiles.map(f => `${escapeHtml(f.fileName)} → ${escapeHtml(f.profileId || '(sem perfil)')}`).join('<br>')}</div>
-          ${err ? `<div style="grid-column:1 / -1;margin-top:8px;padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;"><b style="font-weight:900;">Stack/mensagem bruta:</b><br>${escapeHtml(err)}</div>` : ''}
-        </div>
-      </details>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:26px;border-radius:12px;background:#f8fafc;border:1px solid #cbd5e1;">
+        <tr><td style="padding:14px 16px;">
+          <div style="font-weight:900;font-size:12.5px;letter-spacing:.02em;color:#334155;margin:0 0 10px;">ℹ️ Dados técnicos (só para TI)</div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+            <tr>
+              <td width="50%" valign="top" style="padding:0 12px 8px 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Tipo importação:</b> ${escapeHtml(forceKindDisplay)}</td>
+              <td width="50%" valign="top" style="padding:0 0 8px 12px;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Modo:</b> ${escapeHtml(modeDisplay)}</td>
+            </tr>
+            <tr>
+              <td valign="top" style="padding:0 12px 8px 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Outcome raw:</b> ${escapeHtml(input.outcome)}</td>
+              <td valign="top" style="padding:0 0 8px 12px;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Outcome efetivo:</b> ${escapeHtml(effectiveOutcome)}</td>
+            </tr>
+            <tr>
+              <td colspan="2" valign="top" style="padding:4px 0 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Perfis usados:</b> ${input.importedFiles.length === 0 ? 'Nenhum' : input.importedFiles.map(f => `${escapeHtml(f.fileName)} → ${escapeHtml(f.profileId || '(sem perfil)')}`).join('<br>')}</td>
+            </tr>
+          </table>
+          ${err ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:10px;"><tr><td style="padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.45;"><b style="font-weight:900;">Stack/mensagem bruta:</b><br>${escapeHtml(err)}</td></tr></table>` : ''}
+        </td></tr>
+      </table>
     `;
 
     const finalContentHtml = statusBannerHtml + summaryHtml + issuesHtml +
-      `<div style="margin:0 0 6px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">📄 Arquivos processados</div>` +
+      `<div style="margin:0 0 8px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">📄 Arquivos processados</div>` +
       tableRowsHtml + techHtml;
 
     const html = buildEmailTemplateHtml({
       title: display.title,
       subtitle: `${display.summary} • ${forceKindDisplay} • ${modeDisplay.toUpperCase()}`,
       contentHtml: finalContentHtml,
-      introHtml: `<div style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${display.emoji} ${display.pillLabel}</div>`,
+      accentColor: display.accent,
+      introHtml: `<span style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${display.emoji} ${display.pillLabel}</span>`,
     });
     const dataIso = new Date().toISOString().replace('T', ' ').slice(0, 16);
     const subjectPrefix =
@@ -27790,6 +27908,8 @@ async function sendImportFinishedEmailNotification(input: {
       importance: effectiveOutcome === 'success' ? 'normal' : 'high',
     });
     out.sent = true;
+    __importNotificationSent.set(idempotencyKey, Date.now());
+    if (input.jobSentFlagRef) input.jobSentFlagRef.value = true;
     return out;
   } catch (e) {
     out.attempted = out.attempted || true;
@@ -29527,6 +29647,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   let modeLabel: 'append' | 'replace' = 'append';
   const targetTableNameRef: { value: string | null } = { value: null };
   const movedToImportadosTracker: { ok: boolean; count: number; firstError: string } = { ok: false, count: 0, firstError: '' };
+  const __jobNotificationSentRef: { value: boolean } = { value: false };
   const __dbgTop = __dbg_loaded({ env: true });
   let folderUrl = String(opts.folderUrl ?? '').trim();
   const importedFiles: Array<{
@@ -31593,6 +31714,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             importedFiles,
             errorMessage: errMsg,
             mode: modeLabel,
+            jobSentFlagRef: __jobNotificationSentRef,
           });
         } catch (eNotify) {
           notificationEmail = {
@@ -31615,6 +31737,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         totalRowsSkipped,
         importedFiles,
         mode: modeLabel,
+        jobSentFlagRef: __jobNotificationSentRef,
       });
     } catch (eNotify) {
       notificationEmail = {
@@ -31665,7 +31788,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     }
     // #endregion
     try {
-      await sendImportFinishedEmailNotification({
+      if (!__jobNotificationSentRef.value) await sendImportFinishedEmailNotification({
         notificationTo: opts?.notificationTo,
         forceKind: opts?.forceKind ?? forceKindLower,
         folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
@@ -31677,6 +31800,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         importedFiles,
         errorMessage: e instanceof Error ? e.message : String(e ?? 'Falha desconhecida na importação.'),
         mode: modeLabel,
+        jobSentFlagRef: __jobNotificationSentRef,
       });
     } catch { /* ignore notification errors on failure path */ }
     throw wrapGraphAutomationError(
@@ -31694,7 +31818,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       /* ignore */
     }
     try {
-      await sendImportFinishedEmailNotification({
+      if (!__jobNotificationSentRef.value) await sendImportFinishedEmailNotification({
         notificationTo: opts?.notificationTo,
         forceKind: opts?.forceKind ?? '',
         folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
@@ -31706,6 +31830,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         importedFiles,
         errorMessage: topErr instanceof Error ? topErr.message : String(topErr ?? 'Erro desconhecido na importação.'),
         mode: modeLabel,
+        jobSentFlagRef: __jobNotificationSentRef,
       });
     } catch { /* ignore notification errors on top failure path */ }
     throw topErr instanceof Error ? topErr : new Error(String(topErr ?? 'Erro desconhecido na importação.'));
