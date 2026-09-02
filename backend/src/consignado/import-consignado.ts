@@ -20724,6 +20724,49 @@ const CONFIG_KEY_OCCURRENCES_PANORAMA_DIRETORIA_EMAIL =
 const CONFIG_KEY_OCCURRENCES_PANORAMA_GERENTES_EMAIL =
   'occurrencesPanoramaGerentesEmail';
 const CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT = 'occurrencesPanoramaLastSentAt';
+const PANORAMA_DAILY_KEY_PREFIX = 'occurrencesPanoramaDaily::v1::';
+const PANORAMA_DAILY_SENDING_TTL_MS = 15 * 60 * 1000;
+let _panoramaDailyMemoDateKey: string | null = null;
+
+function getPanoramaDailyDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function panoramaDailyKey(dateKey: string, field: 'status' | 'updatedAtIso'): string {
+  return `${PANORAMA_DAILY_KEY_PREFIX}${dateKey}::${field}`;
+}
+
+function panoramaDailyReadLock(db: Database, dateKey: string): { status: 'none' | 'sending' | 'sent'; updatedAtMs: number | null; raw: string | null; } {
+  const raw = getConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'status'));
+  const updatedAtRaw = getConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'updatedAtIso'));
+  const updatedAtMs = updatedAtRaw ? new Date(updatedAtRaw).getTime() || null : null;
+  if (!raw || raw === 'none') return { status: 'none', updatedAtMs, raw };
+  if (raw === 'sent') return { status: 'sent', updatedAtMs, raw };
+  if (raw === 'sending') return { status: 'sending', updatedAtMs, raw };
+  return { status: 'none', updatedAtMs, raw };
+}
+
+function panoramaDailyWriteLock(db: Database, dateKey: string, status: 'sending' | 'sent'): void {
+  const nowIso = new Date().toISOString();
+  setConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'status'), status);
+  setConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'updatedAtIso'), nowIso);
+}
+
+function panoramaDailyAcquireSendLock(db: Database, dateKey: string, forceSend: boolean): { acquired: boolean; alreadySent: boolean; stale: boolean; } {
+  if (forceSend) return { acquired: true, alreadySent: false, stale: false };
+  const nowMs = Date.now();
+  const info = panoramaDailyReadLock(db, dateKey);
+  if (info.status === 'sent') return { acquired: false, alreadySent: true, stale: false };
+  if (info.status === 'sending' && info.updatedAtMs != null && nowMs - info.updatedAtMs <= PANORAMA_DAILY_SENDING_TTL_MS) {
+    return { acquired: false, alreadySent: false, stale: false };
+  }
+  const stale = info.status === 'sending' && info.updatedAtMs != null && nowMs - info.updatedAtMs > PANORAMA_DAILY_SENDING_TTL_MS;
+  panoramaDailyWriteLock(db, dateKey, 'sending');
+  return { acquired: true, alreadySent: false, stale };
+}
 const CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN =
   'notificationTeamsDelegatedRefreshToken';
 const CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE =
@@ -34207,6 +34250,7 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
   effectiveSubject?: string;
   countsByMonth: Record<string, { total: number; byAction: Record<string, number> }>;
   slaBreaches?: Array<{ ocorrenciaId: number; stage: string; status: string; month: string; orgao: string; nome: string; cpf: string; action: string; value: string; slaStartedAt: string | null; slaDueAt: string | null; atrasoHoras: number; }>;
+  skippedReason?: 'memoSameDay' | 'dailySentPersisted' | 'sendingLock' | 'legacyLastSentAt';
 }> {
   const forceSend = Boolean(_opts?.force ?? false);
   const legacyTemplate = Boolean(_opts?.legacyTemplate ?? false);
@@ -34298,16 +34342,28 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
 
   const now = new Date();
   const todayPtBr = formatDatePtBr(now);
-  // --- FIX (antigo, mantido: evitar enviar o mesmo panorama múltiplas vezes por dia ---
-  // O scheduler roda a cada 1 hora; mas esta função só envia 1 vez por dia (hoje)
-  // comparando occurrencesPanoramaLastSentAt == hoje.
-  // NOTA 2026-08-17: forceSend já foi declarado NO TOPO DA FUNÇÃO (desativação geral).
+  const dateKey = getPanoramaDailyDateKey(now);
+
+  // Guard persistente 1 envio/dia — ANTES de qualquer processamento.
+  // Mesmo que reinicie o sistema, se status='sent' estiver gravado, NÃO envia de novo.
+  // Se status='sending' por mais de 15min (crash no meio do envio), stale => liberar.
+  if (!forceSend && _panoramaDailyMemoDateKey === dateKey) {
+    return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches, skippedReason: 'memoSameDay' };
+  }
+  const dailyLock = panoramaDailyAcquireSendLock(db, dateKey, forceSend);
+  if (dailyLock.alreadySent || !dailyLock.acquired) {
+    if (!forceSend) _panoramaDailyMemoDateKey = dateKey;
+    return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches, skippedReason: dailyLock.alreadySent ? 'dailySentPersisted' : 'sendingLock' };
+  }
+  // Legacy guard LAST_SENT_AT mantido por compat.
   if (!forceSend) {
     const lastSentAt = String(
       getConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT) ?? '',
     ).trim();
     if (lastSentAt && lastSentAt === todayPtBr) {
-      return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches };
+      panoramaDailyWriteLock(db, dateKey, 'sent');
+      _panoramaDailyMemoDateKey = dateKey;
+      return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches, skippedReason: 'legacyLastSentAt' };
     }
   }
   const slaCount = legacyTemplate ? 0 : slaBreaches.length;
@@ -34539,6 +34595,8 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
     try {
       if (!isCustomRecipient) {
         setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr);
+        panoramaDailyWriteLock(db, dateKey, 'sent');
+        _panoramaDailyMemoDateKey = dateKey;
       }
     } catch { /* ignore, não bloqueia retorno do envio */ }
     return { sent: true, recipients, subjectPrefix, effectiveSubject, countsByMonth, slaBreaches };
