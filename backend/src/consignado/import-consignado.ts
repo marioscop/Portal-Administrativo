@@ -83,13 +83,23 @@ function safeLogError(context: string, err: unknown): void {
   }
 }
 
+function safeCloseDb(db: Database | null | undefined): void {
+  if (!db) return;
+  try {
+    if (typeof (db as any).close === 'function') (db as any).close();
+  } catch {
+    /* melhor esforço: handle pode já estar fechado */
+  }
+}
+
 function evictOldDbCacheEntriesIfNeeded(): void {
   if (cachedDbByPath.size <= DB_CACHE_MAX_ENTRIES) return;
   const sorted = Array.from(cachedDbByPath.entries()).sort(
     (a, b) => a[1].lastUsedMs - b[1].lastUsedMs,
   );
   const toRemove = sorted.slice(0, cachedDbByPath.size - DB_CACHE_MAX_ENTRIES);
-  for (const [resolvedPath] of toRemove) {
+  for (const [resolvedPath, entry] of toRemove) {
+    safeCloseDb(entry.db);
     cachedDbByPath.delete(resolvedPath);
   }
 }
@@ -97,6 +107,7 @@ function evictOldDbCacheEntriesIfNeeded(): void {
 function evictExpiredDbCacheEntriesIfNeeded(nowMs: number): void {
   for (const [resolvedPath, entry] of Array.from(cachedDbByPath.entries())) {
     if (nowMs - entry.lastUsedMs > DB_CACHE_TTL_MS) {
+      safeCloseDb(entry.db);
       cachedDbByPath.delete(resolvedPath);
     }
   }
@@ -5061,12 +5072,13 @@ async function openDatabase(dbPath: string): Promise<Database> {
       return cached.db;
     }
     safeLogError(
-      `openDatabase cached handle DEAD for ${resolvedPath} (will reopen fresh, no .close())`,
+      `openDatabase cached handle DEAD for ${resolvedPath} (will reopen fresh, close+purge)`,
       new Error('cached handle SELECT 1 failed'),
     );
+    safeCloseDb(cached.db);
     try { cachedDbByPath.delete(resolvedPath); } catch {}
-  }
-  if (cached) {
+  } else if (cached) {
+    safeCloseDb(cached.db);
     cachedDbByPath.delete(resolvedPath);
   }
 
