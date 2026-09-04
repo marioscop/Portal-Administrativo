@@ -7368,6 +7368,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Orgão/MPGO', 'Relatório Orgão/MP', 'MPGO', 'MP'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — EXTRATO RECURSO TRE-GO + TRT-GO (Justiça Eleitoral + Trabalho, PERFIL ESPECÍFICO PRIORIDADE ALTA) =========
@@ -31073,7 +31074,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       const strictMinMatches = Number(profile.resolvedOptions?.strictColumnMinMatches ?? 5) || 0;
       const extractCompet = Boolean(profile.resolvedOptions?.extractCompetenciaFromTopHeader ?? false);
       // Mover para Importados: default TRUE quando kind=relatorio (regra oficial), a menos que explicitamente desativado via resolvedOptions.
-      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra';
+      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_mpgo';
       const moveToImportados = profile.resolvedOptions?.moveToImportadosSubfolderAfterImport === false
         ? false
         : Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? moveToImportadosDefaultForKind);
