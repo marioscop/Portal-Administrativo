@@ -7330,6 +7330,19 @@ function ensureDefaultLearningProfiles(db: Database) {
       moveToImportadosSubfolderAfterImport: true,
     },
   });
+  // ========= REGRA OFICIAL APLICADA 2026-09-04 — RECURSO NEOCONSIG (Demais Orgãos) — perfil recurso_neoconsig_demais =========
+  // Usuário confirmou: Extrair competência também de NOME DO ARQUIVO com MÊS + 1 (padrão ADFEGO/ELETRO/TRT/TRE).
+  // Exemplo: NEOCONSIG-AGOSTO-2026.xlsx → AGOSTO=08 → +1 → 09/2026.
+  // Pipeline IDÊNTICO ao RECURSO ADFEGO / ELETRO (garante compatibilidade com os arquivos NEOCONSIG usados hoje):
+  //   [R1] Strict whitelist 9 colunas: Nome/CPF/Desc Finalidade/Contrato/N° Parcela/Qtd Parcelas/Vencimento/Critério de Débito/Valor Parcela (minMatches=5).
+  //   [R2] Competência = Vencimento convertido (Aug-26 → 08/2026 · ago/26 → 08/2026 · Julho/2026 → 07/2026). Fallback extrai do cabeçalho Excel.
+  //        + EXTRA (regra nova usuário): extrai competência de NOME DO ARQUIVO com MÊS + 1 (AGOSTO→09/2026).
+  //   [R3] Fill-down 8 colunas: Nome/CPF/Desc Finalidade/Contrato/Qtd Parcelas/Vencimento/Critério de Débito/Valor Parcela.
+  //   [R4] Blacklist Nome órgão/relatório.
+  //   [R5] Remove linhas TOTAL / vazias / cabeçalho fantasma.
+  //   [R6] Vencimento data nascimento ano ≤ 2019 → zera.
+  //   [R7] Dedup intra-arquivo.
+  //   [R8] Nome UPPER / CPF máscara / Valor R$ / padrão ADFEGO.
   upsertLearningProfile(db, {
     id: 'recurso_neoconsig_demais',
     kind: 'recurso_neoconsig_demais',
@@ -7341,6 +7354,28 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Demais Orgão'],
       ignoreImportados: false,
       checkDuplicateContent: true,
+      competenciaMesArquivoSemIncremento: false,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      fillDown8Cols: true,
+      keep16ExcelExtrasColumnas: true,
+      nomeUpperTrimSpSimples: true,
+      cpfMascara11dig: true,
+      valorParcelaPrefixoRSimbolo: true,
+      descFinalidadeDefaultCreditoConsignado: true,
+      contratoNormalizadoBrMilhar: true,
+      strictColumnWhitelist: [
+        'Nome',
+        'CPF',
+        'Desc Finalidade',
+        'Contrato',
+        'N° Parcela',
+        'Qtd Parcelas',
+        'Vencimento',
+        'Critério de Débito',
+        'Valor Parcela',
+      ],
+      strictColumnMinMatches: 5,
       moveToImportadosSubfolderAfterImport: true,
     },
   });
@@ -31183,7 +31218,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Regra: DEPOIS de extrair o parsedFinal.headers e ANTES do whitelist matching / fill-down de 10 colunas principais,
       // criamos um header aliases bidirecional: (1) se header original = alias → substitui headers por canônico;
       // (2) renomeia chaves em rowsToImport; (3) preserva o valor original em colunas extras (duplicamos antes de sobrescrever).
-      if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
+      if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_neoconsig_demais') {
         const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
           { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
           { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
@@ -31215,7 +31250,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         }
       }
       // =================== FIM ALIAS MAPEAMENTO CABEÇALHOS ===================
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo' || kindLower === 'recurso_neoconsig_demais') {
         competFromHeader = extractCompet ? (parsedFinal.extractedCompetenciaMmAaaa ?? null) : null;
         // ===== 🔑 EXTRAIR COPETÊNCIA DE NOME DO ARQUIVO =====
         //   TRT/SISBR default → competenciaMesArquivoSemIncremento=FALSE: MÊS+1 (JULHO→08/2026)
@@ -32976,7 +33011,7 @@ export async function debugOneshotTrtLocalImport(opts: {
         let competFromHeader: string | null = null;
 
         // ALIAS MAPEAMENTO CABEÇALHOS
-        if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
+        if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_neoconsig_demais') {
           const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
             { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
             { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
