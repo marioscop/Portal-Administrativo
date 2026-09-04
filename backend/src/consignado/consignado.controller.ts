@@ -465,40 +465,60 @@ export class ConsignadoController {
     const forceKind = String(body?.forceKind ?? scenario === 'success' ? 'Extrato TODOS' : scenario === 'partial' ? 'Extratos Recurso' : 'Extratos Recurso (SP)').trim() || 'Extrato TODOS';
 
     const buildDemoPayload = (outcome: 'success' | 'partial' | 'failed') => {
-      const baseDupOkFiles = [
-        { fileName: 'ELETRA - FUNDACAO DE PREVIDENCIA PRIVADA.pdf', targetTable: 'relatorio_consignado', kind: forceKind, profileId: 'relatorio_orgao_sisbr', insertedRows: 0, skippedRows: 2 },
-        { fileName: 'GOIAS MP PROCURADORIA GERAL DE JUSTICA.pdf', targetTable: 'relatorio_consignado', kind: forceKind, profileId: 'relatorio_orgao_sisbr', insertedRows: 0, skippedRows: 248 },
-      ];
+      const forceLc = String(forceKind ?? '').toLowerCase();
+      const isMpgo = forceLc.includes('mpgo');
+      const isSisbr = forceLc.includes('sisbr') || forceLc.includes('relatorio') || forceLc.includes('orgao');
+      const baseFiles = isMpgo
+        ? [
+            { fileName: 'MPGO-AGOSTO-2026.pdf', targetTable: 'Recurso MPGO', kind: forceKind, profileId: 'recurso_mpgo', insertedRows: 0, skippedRows: 0 },
+            { fileName: 'MPGO JULHO 2026.pdf', targetTable: 'Recurso MPGO', kind: forceKind, profileId: 'recurso_mpgo', insertedRows: 0, skippedRows: 0 },
+          ]
+        : [
+            { fileName: 'ELETRA - FUNDACAO DE PREVIDENCIA PRIVADA.pdf', targetTable: 'relatorio_consignado', kind: forceKind, profileId: 'relatorio_orgao_sisbr', insertedRows: 0, skippedRows: 2 },
+            { fileName: 'GOIAS MP PROCURADORIA GERAL DE JUSTICA.pdf', targetTable: 'relatorio_consignado', kind: forceKind, profileId: 'relatorio_orgao_sisbr', insertedRows: 0, skippedRows: 248 },
+          ];
+      const scannedList = isMpgo
+        ? outcome === 'failed'
+          ? ['TJGO-AGOSTO-2026.xlsx', 'NOTA-MPGO.msg']
+          : ['MPGO-AGOSTO-2026.pdf', 'MPGO JULHO 2026.pdf']
+        : outcome === 'failed'
+          ? ['arquivo_tjgo_agosto.xlsx', 'boleto.pdf', 'relatorio.docx', 'foto.zip']
+          : baseFiles.map(f => f.fileName);
       if (outcome === 'success') {
         return {
           outcome: 'success' as const,
-          totalFilesScanned: 8,
-          totalFilesMatched: 2,
+          totalFilesScanned: scannedList.length,
+          totalFilesMatched: baseFiles.length,
           totalRowsInserted: 100,
           totalRowsSkipped: 0,
-          importedFiles: baseDupOkFiles.map((f, i) => ({ ...f, insertedRows: i === 0 ? 69 : 31, skippedRows: 0 })),
+          scannedFileNames: scannedList,
+          importedFiles: baseFiles.map((f, i) => ({ ...f, insertedRows: i === 0 ? 69 : 31, skippedRows: 0 })),
           errorMessage: null as string | null,
         };
       }
       if (outcome === 'partial') {
         return {
           outcome: 'partial' as const,
-          totalFilesScanned: 8,
-          totalFilesMatched: 2,
+          totalFilesScanned: scannedList.length,
+          totalFilesMatched: baseFiles.length,
           totalRowsInserted: 0,
           totalRowsSkipped: 250,
-          importedFiles: baseDupOkFiles,
+          scannedFileNames: scannedList,
+          importedFiles: baseFiles.map((f, i) => ({ ...f, insertedRows: 0, skippedRows: i === 0 ? 2 : 248 })),
           errorMessage: null as string | null,
         };
       }
       return {
         outcome: 'failed' as const,
-        totalFilesScanned: 8,
+        totalFilesScanned: scannedList.length,
         totalFilesMatched: 0,
         totalRowsInserted: 0,
         totalRowsSkipped: 0,
-        importedFiles: [] as typeof baseDupOkFiles,
-        errorMessage: 'Nenhum arquivo bateu com o perfil de aprendizado. Verifique Tipo de importação e nome dos arquivos.' as string | null,
+        scannedFileNames: scannedList,
+        importedFiles: [] as typeof baseFiles,
+        errorMessage: isMpgo
+          ? 'Nenhum arquivo bateu com o perfil recurso_mpgo (espera PDF com "MPGO" no nome). Verifique Tipo de importação e nome dos arquivos.'
+          : 'Nenhum arquivo bateu com o perfil de aprendizado. Verifique Tipo de importação e nome dos arquivos.' as string | null,
       };
     };
 

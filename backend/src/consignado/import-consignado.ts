@@ -1244,12 +1244,18 @@ async function expandRecursoAdfegoFileCandidates(opts: {
     maxYear: Number.isFinite(opts.maxYear as number) ? (opts.maxYear as number) : undefined,
   });
   const isDoc = (n: string) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(n ?? '').trim());
+  const isRelevantFile = (n: string): boolean => {
+    if (isDoc(n)) return true;
+    const lower = String(n ?? '').trim().toLowerCase();
+    return /\.(pdf)$/i.test(lower) &&
+      /(relat[oó]rio|extrato|recurso|tribunal|justi[cç]a|contas|eleitoral|trabalho|ministerio|mpgo|eletra|alego|neoconsig|tjgo|tce|tcm|tre|trt|adfego|sisbr|convenio|mp\s|precatorio)/i.test(lower);
+  };
   const pushFile = (
     f: { id: string; name: string; lastModifiedDateTime?: string },
     folderPath: string,
     parentId?: string,
   ) => {
-    if (!isDoc(f.name)) return;
+    if (!isRelevantFile(f.name)) return;
     if (out.find((x) => x.id === f.id)) return;
     out.push({ id: f.id, name: f.name, lastModifiedDateTime: f.lastModifiedDateTime, folderPath, parentId });
   };
@@ -1304,7 +1310,7 @@ async function expandRecursoAdfegoFileCandidates(opts: {
           }
         }
         for (const c of kids) {
-          if (c.file && isDoc(String(c.name ?? ''))) {
+          if (c.file && isRelevantFile(String(c.name ?? ''))) {
             pushFile(
               c as { id: string; name: string; lastModifiedDateTime?: string },
               cur.path,
@@ -5138,6 +5144,259 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
   return { headers, rows };
 }
 
+// ============================================================================
+// Parser MPGO PDF (Recurso MPGO — Ministério Público GO)
+// Layout oficial: "Relatório de Movimento Financeiro - Período: MM/AAAA"
+// Cada linha de registro = servidor com campos posicionais:
+//   Sit. Contrato  Sit. Parcela  DataIni(MM/AAAA)  NoParc  PGT  PRZ  VlrParc  VlrAde  DataInc(DD/MM/AAAA)  Servico  Corresp  NoADE  - Nome -  CPF  DataFim(MM/AAAA)
+// Exemplo linha: "Em Andamento      12/2023 33  33  120  551,30  551,30  20/11/2023  2751  42499  114520 - ZELMA XAVIER BEZERRA - 759.207.941-00  11/2033"
+// ============================================================================
+export async function readMpgoPdfTable(
+  fileName: string,
+  file: Buffer,
+): Promise<{
+  headers: string[];
+  rows: Array<Record<string, unknown>>;
+}> {
+  const looksLikePdf = (() => {
+    const idx = file.indexOf(Buffer.from('%PDF'));
+    return idx !== -1 && idx < 1024;
+  })();
+  if (!isPdfFile(fileName) && !looksLikePdf) return readSheetTable(file);
+
+  const pdfParseFn = await getPdfParse();
+  const parsed = await pdfParseFn(file);
+  const rawText = typeof (parsed as any)?.text === 'string' ? (parsed as any).text : String(parsed ?? '');
+  const allLines = rawText
+    .split(/\r?\n/g)
+    .map((l) => l.trim().replace(/[ ]{2,}/g, ' '))
+    .filter(Boolean);
+
+  const MPGO_RESULT_HEADERS: string[] = [
+    'Cat. Servidor',
+    'Sit. Contrato',
+    'Sit. Parcela',
+    'Data Ini',
+    'No Parc',
+    'PGT',
+    'PRZ',
+    'Valor Parcela',
+    'Vlr. ADE',
+    'Data Inc',
+    'Servico',
+    'Corresp',
+    'No ADE',
+    'Nome',
+    'CPF',
+    'Data Fim',
+    'Copetencia',
+    'Orgao',
+    'Arquivo',
+  ];
+
+  const cpfReOnly = /^\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/;
+  const mmAaaaFinalRe = /^\s*(\d{2}\/\d{4})\s*$/;
+  const moneyRe = /\b\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d+\.\d{2}\b/;
+  const moneyG = new RegExp('\\b(\\d{1,3}(?:\\.\\d{3})*,\\d{2}|\\d+,\\d{2}|\\d+\\.\\d{2})\\b', 'g');
+  const dataIniRe = /\b\d{2}\/\d{4}\b.*\b\d{2}\/\d{2}\/\d{4}\b/;
+  const dateMmAaaaOnly = /\b(\d{2}\/\d{4})\b/;
+  const dateDdMmYyyyOnly = /\b(\d{2}\/\d{2}\/\d{4})\b/;
+  const skipRe = /relat|periodo|consignat|sub-orga|unidade|estabelec|sicoob|cat\. do|servidor|sit\. da|sit\. do|contrato|nº|vlr\.|subtotal|total de|^\d+\s+de\s+\d+$/i;
+  const cpfAny = /\b(\d{3}\.\d{3}\.\d{3}-\d{2})\b/;
+  const cpfLineName = /^\s*(?:(.+?)\s*-\s*)?(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/;
+  const normalizeStr = (s: unknown) => String(s ?? '').replace(/\s+/g, ' ').trim();
+  const formatCpf = (digits: string) => {
+    const d = String(digits ?? '').replace(/\D/g, '');
+    if (d.length !== 11) return d;
+    return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+  };
+  const sitParcelaKw = /^(folha|liquidada|baixada|ativa|em andamento|pago|quitado|cancelado|suspenso|concluído|concluido)$/i;
+
+  let copetencia = '';
+  const periodoHeaderRe = /PER[ÍI]ODO\s*[=:：]\s*(\d{2})\s*[\/\.\-]\s*(\d{2,4})/i;
+  const pm = periodoHeaderRe.exec(rawText);
+  if (pm) {
+    const mm = pm[1];
+    const anoRaw = pm[2];
+    const ano = /^\d{2}$/.test(anoRaw) ? '20' + anoRaw : anoRaw;
+    if (/^\d{4}$/.test(ano) && /^0[1-9]|1[0-2]$/.test(mm)) copetencia = `${mm}/${ano}`;
+  }
+  if (!copetencia) {
+    const fnNorm = String(fileName ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+    const mmNome: Record<string, number> = {
+      janeiro:1, fev:2, fevereiro:2, mar:3, marco:3, março:3, abril:4, mai:5, maio:5,
+      jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8, set:9, sep:9, setembro:9,
+      out:10, outu:10, outubro:10, nov:11, novembro:11, dez:12, dezembro:12,
+    };
+    const anoM = fnNorm.match(/\b(20\d{2})\b/);
+    let mmTok = '';
+    const sortedKeys = Object.keys(mmNome).sort((a, b) => b.length - a.length);
+    for (const k of sortedKeys) {
+      const re = new RegExp('(^|[ _-])' + k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '([ _-]|$)','i');
+      if (re.test(fnNorm)) { mmTok = k; break; }
+    }
+    if (anoM && mmTok) {
+      const mm = mmNome[mmTok];
+      if (mm >= 1 && mm <= 12) copetencia = `${String(mm).padStart(2,'0')}/${anoM[1]}`;
+    }
+  }
+  if (!copetencia) copetencia = '';
+
+  let orgaoHeader = '';
+  const orgaoHeaderRe = /(?:ÓRGÃO|ORGÃO|ORGAO)\s*:\s*([^\n\r]{0,200}?)(?:\n|$|GOIAS|Goiás|\(GO\))/i;
+  const om = orgaoHeaderRe.exec(rawText);
+  if (om && om[1]) orgaoHeader = normalizeStr(om[1]);
+  if (!orgaoHeader) orgaoHeader = 'MPGO - Ministério Público do Estado de Goiás';
+
+  const outRows: Array<Record<string, unknown>> = [];
+
+  for (let i = 1; i < allLines.length - 1; i++) {
+    const l = allLines[i];
+    if (skipRe.test(l)) continue;
+    if (!(moneyRe.test(l) && dataIniRe.test(l))) continue;
+    if (l.length < 40) continue;
+
+    const mainLine = normalizeStr(l);
+    const dataIniMatch = mainLine.match(dateMmAaaaOnly);
+    const dataIncMatch = mainLine.match(dateDdMmYyyyOnly);
+    const dataIni = dataIniMatch ? dataIniMatch[1] : '';
+    const dataInc = dataIncMatch ? dataIncMatch[1] : '';
+    if (!dataIni || !dataInc) continue;
+
+    const moneys = Array.from(mainLine.matchAll(moneyG)).map((m) => m[1]);
+    if (moneys.length < 2) continue;
+    const valorParcela = moneys[moneys.length - 2] ?? '';
+    const vlrAde = moneys[moneys.length - 1] ?? '';
+    if (!valorParcela || !vlrAde) continue;
+
+    const lastDashIdx = mainLine.lastIndexOf(' - ');
+    let parte1Nome = '';
+    let beforeNameSegment = mainLine;
+    if (lastDashIdx >= 0) {
+      parte1Nome = normalizeStr(mainLine.slice(lastDashIdx + 3));
+      beforeNameSegment = mainLine.slice(0, lastDashIdx);
+    }
+    if (parte1Nome.endsWith('-')) parte1Nome = normalizeStr(parte1Nome.slice(0, -1));
+
+    const dataIniIdx = beforeNameSegment.indexOf(dataIni);
+    const dataIncIdx = beforeNameSegment.indexOf(dataInc);
+    let sitContrato = '';
+    if (dataIniIdx > 0) {
+      sitContrato = normalizeStr(beforeNameSegment.slice(0, dataIniIdx));
+      sitContrato = sitContrato.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ\s\-]/g, '').replace(/\s{2,}/g, ' ').trim();
+    }
+
+    let noParc = '';
+    let pgt = '';
+    let prz = '';
+    if (dataIniIdx >= 0 && dataIncIdx > dataIniIdx) {
+      const seg1 = beforeNameSegment.slice(dataIniIdx + dataIni.length, dataIncIdx);
+      const ints1 = seg1.split(/\s+/).filter((t) => /^\d+$/.test(t));
+      if (ints1.length >= 3) {
+        noParc = ints1[0];
+        pgt = ints1[1];
+        prz = ints1[2];
+      } else if (ints1.length === 2) {
+        noParc = ints1[0];
+        pgt = ints1[1];
+      }
+    }
+
+    let servico = '';
+    let corresp = '';
+    let noAde = '';
+    if (dataIncIdx >= 0) {
+      const seg2 = beforeNameSegment.slice(dataIncIdx + dataInc.length);
+      const ints2 = seg2.split(/\s+/).filter((t) => /^\d+$/.test(t));
+      if (ints2.length >= 3) {
+        servico = ints2[ints2.length - 3];
+        corresp = ints2[ints2.length - 2];
+        noAde = ints2[ints2.length - 1];
+      } else if (ints2.length === 2) {
+        servico = ints2[0];
+        noAde = ints2[1];
+      } else if (ints2.length === 1) {
+        noAde = ints2[0];
+      }
+    }
+
+    const prev = normalizeStr(allLines[i - 1] ?? '');
+    let sitParcela = '';
+    if (prev && prev.length < 50 && sitParcelaKw.test(prev)) sitParcela = prev;
+
+    let cpf = '';
+    let dataFim = '';
+    const extraNome: string[] = [];
+    let j = i + 1;
+    const jLimit = Math.min(i + 8, allLines.length);
+    let used = 0;
+    while (j < jLimit) {
+      const nl = normalizeStr(allLines[j]);
+      if (!nl) { j++; continue; }
+      if (skipRe.test(nl) || /^\d+\s*de\s*\d+$/i.test(nl)) break;
+      if (sitParcelaKw.test(nl) && used > 0) break;
+
+      const m1 = nl.match(cpfLineName);
+      if (m1) {
+        if (m1[1]) extraNome.push(normalizeStr(m1[1]));
+        cpf = formatCpf(m1[2]); used++; j++; break;
+      }
+      const m2 = nl.match(cpfReOnly);
+      if (m2) { cpf = formatCpf(m2[1]); used++; j++; break; }
+      const m3 = nl.match(cpfAny);
+      if (m3) {
+        cpf = formatCpf(m3[1]); const cpfIdx = nl.indexOf(m3[0]);
+        if (cpfIdx > 0) extraNome.push(normalizeStr(nl.slice(0, cpfIdx).replace(/-\s*$/, '')));
+        used++; j++; break;
+      }
+      if (mmAaaaFinalRe.test(nl)) break;
+      const mdf = nl.match(dateMmAaaaOnly);
+      if (mdf && used >= 1) break;
+      extraNome.push(normalizeStr(nl).replace(/\s*-\s*$/, '').replace(/^\s*-\s*/, ''));
+      used++; j++;
+    }
+    while (j < jLimit) {
+      const nl = normalizeStr(allLines[j]);
+      if (!nl) { j++; continue; }
+      const m = nl.match(mmAaaaFinalRe);
+      if (m) { dataFim = m[1]; break; }
+      const m2 = nl.match(dateMmAaaaOnly);
+      if (m2) { dataFim = m2[1]; break; }
+      if (skipRe.test(nl) || /^\d+\s*de\s*\d+$/i.test(nl)) break;
+      j++;
+    }
+
+    const parte2 = normalizeStr(extraNome.filter(Boolean).join(' ')).replace(/\s{2,}/g, ' ').trim().replace(/^-+|-+$/g, '');
+    let nomeFull = normalizeStr(`${parte1Nome} ${parte2}`).trim();
+    if (!nomeFull) nomeFull = parte1Nome || parte2;
+    nomeFull = nomeFull.replace(/\s{2,}/g, ' ').trim();
+
+    outRows.push({
+      'Cat. Servidor': '',
+      'Sit. Contrato': sitContrato,
+      'Sit. Parcela': sitParcela,
+      'Data Ini': dataIni,
+      'No Parc': noParc,
+      PGT: pgt,
+      PRZ: prz,
+      'Valor Parcela': valorParcela,
+      'Vlr. ADE': vlrAde,
+      'Data Inc': dataInc,
+      Servico: servico,
+      Corresp: corresp,
+      'No ADE': noAde,
+      Nome: nomeFull,
+      CPF: cpf,
+      'Data Fim': dataFim,
+      Copetencia: copetencia || dataIni,
+      Orgao: orgaoHeader,
+      Arquivo: String(fileName ?? ''),
+    });
+  }
+
+  return { headers: MPGO_RESULT_HEADERS, rows: outRows };
+}
+
 export async function debugLocalSisbrPdfFile(
   filePathAbs: string,
 ): Promise<{
@@ -7106,6 +7365,7 @@ function ensureDefaultLearningProfiles(db: Database) {
     targetTable: 'Recurso MPGO',
     options: {
       mode: 'append',
+      folderCandidates: ['Relatório Orgão/MPGO', 'Relatório Orgão/MP', 'MPGO', 'MP'],
       ignoreImportados: true,
       checkDuplicateContent: true,
     },
@@ -27694,6 +27954,7 @@ export async function sendImportFinishedEmailNotification(input: {
     skippedRows: number;
     debugSisbr?: unknown;
   }>;
+  scannedFileNames?: string[];
   errorMessage?: string | null;
   mode?: string | null;
   jobSentFlagRef?: { value: boolean };
@@ -27755,6 +28016,10 @@ export async function sendImportFinishedEmailNotification(input: {
     const modeDisplay = String(input.mode ?? 'append').trim() || 'append';
 
     const forceKindLower = forceKindDisplay.toLowerCase();
+    const scannedNames = Array.isArray(input.scannedFileNames) ? input.scannedFileNames.slice(0, 8) : [];
+    const scannedNamesDisplay = scannedNames.length > 0
+      ? scannedNames.map(n => `<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:999px;background:#dbeafe;border:1px solid #93c5fd;color:#1e3a8a;font-size:11px;font-weight:700;line-height:1.3;">${escapeHtml(n)}</span>`).join('')
+      : '';
     let perfilInfo = {
       nomePerfilAmigavel: forceKindDisplay,
       tipoArquivoEsperado: 'Excel (.xlsx) ou PDF',
@@ -27770,12 +28035,20 @@ export async function sendImportFinishedEmailNotification(input: {
         pastaAlvo: 'a subpasta "Relatório Sisbr" (única pasta pesquisada para este perfil)',
         notasPerfil: 'Este perfil NÃO filtra por nome do arquivo — valida APENAS a estrutura interna (6+ colunas do SISBR).',
       };
-    } else if (forceKindLower.includes('mpgo') || forceKindLower.includes('recurso') || forceKindLower.includes('recursos')) {
+    } else if (forceKindLower.includes('mpgo')) {
       perfilInfo = {
-        nomePerfilAmigavel: 'Recursos MPGO (Recurso vs Relatório)',
-        tipoArquivoEsperado: 'Excel (.xlsx) — Arquivos de Recurso / Arquivos de Relatório separados',
-        exemploNomeArquivos: 'Ex.: "Recursos_AGOSTO_2026.xlsx", "Relatórios_AGOSTO_2026.xlsx", abas com colunas Data / Valor / Histórico / Favorecido',
-        pastaAlvo: 'a pasta do mês/ano correspondente em Recuperação de Crédito',
+        nomePerfilAmigavel: 'Recursos MPGO (Ministério Público GO)',
+        tipoArquivoEsperado: 'PDF — relatório emitido pelo MPGO',
+        exemploNomeArquivos: 'Ex.: "MPGO-AGOSTO-2026.pdf", "MPGO JULHO 2026.pdf" — nome do arquivo deve conter "MPGO" e ser .pdf',
+        pastaAlvo: 'a pasta do mês/ano correspondente em "9.Recuperação de Crédito / {Ano} / {Mês} / Relatório Orgão / MPGO',
+        notasPerfil: 'Este perfil espera SOMENTE PDF do MPGO. Não confundir com planilhas Recurso/Relatório que são perfis separados.',
+      };
+    } else if (forceKindLower.includes('recurso') || forceKindLower.includes('recursos')) {
+      perfilInfo = {
+        nomePerfilAmigavel: 'Recursos / Precatórios (TRE/TRT/TJGO/ADFEGO/TCE/TCM/ALEGO/Eletra/Demais',
+        tipoArquivoEsperado: 'Excel (.xlsx) — planilha fornecida pelo órgão fórum/precatório',
+        exemploNomeArquivos: 'Ex.: "TRE-GO_AGOSTO_2026.xlsx", "TJGO JULHO 2026.xlsx"',
+        pastaAlvo: 'a pasta do mês/ano correspondente em Recuperação de Crédito / {Ano} / {Mês} / Relatório Orgão / {Nome do órgão}',
         notasPerfil: 'Se não bater, confira: (a) aba/sheet correta; (b) se não foi salvo como PDF em vez de XLSX; (c) se a 1ª linha é cabeçalho.',
       };
     } else if (forceKindLower.includes('extrato') || forceKindLower.includes('todos')) {
@@ -27913,15 +28186,18 @@ export async function sendImportFinishedEmailNotification(input: {
       issues.push({
         title: `Nenhum arquivo encontrado na pasta (Perfil: ${perfilInfo.nomePerfilAmigavel})`,
         cause: `O perfil selecionado foi "${perfilInfo.nomePerfilAmigavel}" — ele espera arquivos do tipo: ${perfilInfo.tipoArquivoEsperado}.\nNão encontrei NENHUM arquivo (nem PDF, nem XLSX) em ${perfilInfo.pastaAlvo}.\nCausas mais comuns: (a) Ainda não colocaram os arquivos este mês; (b) A pasta está vazia; (c) EU NÃO TENHO PERMISSÃO DE LEITURA na pasta SharePoint (veja se você consegue abrir a URL abaixo manualmente); (d) O mês/ano escolhido ainda não tem documentação.`,
-        action: `1) ABRA A PASTA SharePoint clicando no link abaixo — se aparecer "Você não tem acesso" → PEÇA PERMISSÃO ao dono da pasta. 2) Confira se existem arquivos. 3) Confirme que os arquivos estão no formato certo: ${perfilInfo.tipoArquivoEsperado}. 4) Se Recursos MPGO, certifique-se de ter separado os arquivos de Recurso e Relatório em XLSX (não PDF).`,
+        action: `1) ABRA A PASTA SharePoint clicando no link abaixo — se aparecer "Você não tem acesso" → PEÇA PERMISSÃO ao dono da pasta. 2) Confira se existem arquivos. 3) Confirme que os arquivos estão no formato certo: ${perfilInfo.tipoArquivoEsperado}. 4) Se for perfil de planilha (XLSX), certifique-se de não estar com arquivo PDF disfarçado salvo como .xlsx.`,
         severity: 'Ação necessária',
       });
     }
     if (input.totalFilesScanned > 0 && input.totalFilesMatched <= 0) {
+      const namesHint = scannedNames.length > 0
+        ? `\n\n📋 Arquivos QUE FORAM ENCONTRADOS: ${scannedNames.join(' | ')}`
+        : '';
       issues.push({
         title: `${input.totalFilesScanned} arquivo(s) encontrados — NENHUM compatível com "${perfilInfo.nomePerfilAmigavel}"`,
-        cause: `Foram encontrados ${input.totalFilesScanned} arquivo(s) na pasta, mas NENHUM bate com o perfil selecionado.\n\n📋 Perfil SELECIONADO AGORA: "${perfilInfo.nomePerfilAmigavel}"\n✅ Formato ESPERADO: ${perfilInfo.tipoArquivoEsperado}\n💡 Exemplos de nomes/formatos QUE FUNCIONAM: ${perfilInfo.exemploNomeArquivos}\n📂 Pasta pesquisada: ${perfilInfo.pastaAlvo}\n${perfilInfo.notasPerfil ? 'ℹ️ ' + perfilInfo.notasPerfil : ''}\n\nCausas MAIS COMUNS por ordem: (1) Você selecionou TIPO ERRADO na tela Automação (ex: marcou "Extrato TODOS" mas a pasta só tem PDF Relatório SISBR); (2) Arquivo veio em PDF MAS o perfil espera XLSX (ou vice-versa); (3) Layout do órgão/banco MUDOU; (4) Arquivo salvo com extensão errada (ex: renomeou .pdf para .xlsx manualmente sem converter).`,
-        action: `1) NA TELA AUTOMAÇÃO → CLIQUE EM "Tipo de importação" e confirme se é "${perfilInfo.nomePerfilAmigavel}". Mude se necessário. 2) Confira EXTENSÃO do arquivo (clique com botão direito → Propriedades). O nome parecer .xlsx MAS pode ser .pdf disfarçado. 3) Abra o arquivo e confira COLUNAS e ABA CORRETA. 4) Se TUDO certo e ainda não bate → ENVIAR o arquivo para TI para atualizar o perfil.`,
+        cause: `Foram encontrados ${input.totalFilesScanned} arquivo(s) na pasta, mas NENHUM bate com o perfil selecionado.\n\n📋 Perfil SELECIONADO AGORA: "${perfilInfo.nomePerfilAmigavel}"\n✅ Formato ESPERADO: ${perfilInfo.tipoArquivoEsperado}\n💡 Exemplos de nomes/formatos QUE FUNCIONAM: ${perfilInfo.exemploNomeArquivos}\n📂 Pasta pesquisada: ${perfilInfo.pastaAlvo}${namesHint}\n${perfilInfo.notasPerfil ? 'ℹ️ ' + perfilInfo.notasPerfil : ''}\n\nCausas MAIS COMUNS: (1) Tipo de importação errado na tela Automação; (2) Arquivo veio como PDF mas perfil espera XLSX (ou vice-versa); (3) Layout do órgão/banco MUDOU; (4) Extensão salva errada (ex: .pdf renomeado para .xlsx sem converter).`,
+        action: `1) NA TELA AUTOMAÇÃO → confira o campo "Tipo de importação" está correto. 2) Confira a EXTENSÃO do arquivo (botão direito → Propriedades): o nome pode parecer .xlsx mas ser .pdf disfarçado. 3) Abra o arquivo e confira o conteúdo: ${perfilInfo.tipoArquivoEsperado}. 4) Se tudo certo e ainda não bate → envie o arquivo para a TI atualizar o perfil.`,
         severity: 'Ação necessária',
       });
     }
@@ -28047,6 +28323,7 @@ export async function sendImportFinishedEmailNotification(input: {
             <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;margin:0 0 6px;">Arquivos varridos</div>
             <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalFilesScanned}</div>
             <div style="font-size:11px;color:#1e3a8a;margin-top:5px;font-weight:700;line-height:1.35;">Encontrados na pasta</div>
+            ${scannedNamesDisplay ? `<div style="margin-top:8px;">${scannedNamesDisplay}</div>` : ''}
           </td>
           <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;">
             <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;margin:0 0 6px;">Compatíveis</div>
@@ -29978,12 +30255,14 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   dbFilePath: string | null;
 }> {
   return withRetryOnDbClosed('importByLearningProfileFromFolderUrl', async (attempt) => {
+  type FileCandidate = { id: string; name: string; lastModifiedDateTime?: string; folderPath?: string; parentId?: string | null };
   let modeLabel: 'append' | 'replace' = 'append';
   const targetTableNameRef: { value: string | null } = { value: null };
   const movedToImportadosTracker: { ok: boolean; count: number; firstError: string } = { ok: false, count: 0, firstError: '' };
   const __jobNotificationSentRef: { value: boolean } = { value: false };
   const __dbgTop = __dbg_loaded({ env: true });
   let folderUrl = String(opts.folderUrl ?? '').trim();
+  const candidates: FileCandidate[] = [];
   const importedFiles: Array<{
     fileName: string;
     targetTable: string;
@@ -30161,23 +30440,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   const tokenPair = await getSharePointAndTeamsDelegatedTokenForAutomation(db);
   const accessToken = tokenPair.accessToken;
 
-  const importedFiles: Array<{
-    fileName: string;
-    targetTable: string;
-    kind: string;
-    profileId: string;
-    insertedRows: number;
-    skippedRows: number;
-    headers: string[];
-    skippedReason?: string;
-    debugSisbr?: unknown;
-  }> = [];
-
-  let totalFilesScanned = 0;
-  let totalFilesMatched = 0;
-  let totalRowsInserted = 0;
-  let totalRowsSkipped = 0;
-
   try {
     try {
     // Step 1: resolve folder or specificFile (with ADFEGO expansion fallback for security trimming)
@@ -30194,8 +30456,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       folderUrl = fallbackDbUrl;
     }
 
-    type FileCandidate = { id: string; name: string; lastModifiedDateTime?: string; folderPath?: string; parentId?: string | null };
-    const candidates: FileCandidate[] = [];
     const seenIds = new Set<string>();
     const pushCandidate = (c: FileCandidate) => {
       if (!c?.id) return;
@@ -30547,6 +30807,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         const queue: Array<{ id: string; depth: number; path: string }> = [{ id: rootFolderId, depth: 0, path: resolvedItemName }];
         const visited = new Set<string>();
         const isDoc = (n: string) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(n ?? '').trim());
+        const isRelevantFileBfs = (n: string): boolean => {
+          if (isDoc(n)) return true;
+          const lower = String(n ?? '').trim().toLowerCase();
+          return /\.(pdf)$/i.test(lower) &&
+            /(relat[oó]rio|extrato|recurso|tribunal|justi[cç]a|contas|eleitoral|trabalho|ministerio|mpgo|eletra|alego|neoconsig|tjgo|tce|tcm|tre|trt|adfego|sisbr|convenio|mp\s|precatorio)/i.test(lower);
+        };
         while (queue.length > 0) {
           const cur = queue.shift();
           if (!cur) break;
@@ -30559,7 +30825,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             children = [];
           }
           for (const c of children) {
-            if (c.file && isDoc(String(c.name ?? ''))) {
+            if (c.file && isRelevantFileBfs(String(c.name ?? ''))) {
               totalFilesScanned += 1;
               pushCandidate({
                 id: c.id,
@@ -30828,9 +31094,10 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
 
       // ============================================================
-      // SWITCH EXCLUSIVO SISBR PDF — SOMENTE aqui, sem impactar outros fluxos:
-      // Condição de ativação (TODAS): kind=relatorio AND arquivo=PDF AND (pasta com "sisbr" OU perfil BD=relatorio_orgao_sisbr)
-      // Qualquer outro caso → Excel via SheetJS readSheetTable.
+      // SWITCH PDF EXCLUSIVOS:
+      //   1) SISBR:     kind=relatorio AND PDF AND (pasta sisbr OR perfil relatorio_orgao_sisbr)
+      //   2) MPGO:      kind=recurso_mpgo AND PDF (Relatório de Movimento Financeiro MP GO)
+      //   Qualquer outro caso → Excel via SheetJS readSheetTable.
       // ============================================================
       const temSisbrNaPasta: boolean = (() => {
         const k = normalizeNameForMatch(String((file as any).folderPath ?? ''));
@@ -30843,17 +31110,16 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         return magic !== -1 && magic < 1024;
       })();
       const usarParserPdfSisbr = kindLower === 'relatorio' && ehPdfReal && (temSisbrNaPasta || perfilSisbrExplicito);
+      const usarParserPdfMpgo = kindLower === 'recurso_mpgo' && ehPdfReal;
+      const usarAlgumParserPdf = usarParserPdfSisbr || usarParserPdfMpgo;
 
       const parsedFinal: {
         headers: string[];
         rows: Array<Record<string, unknown>>;
         extractedCompetenciaMmAaaa: string | null;
         topHeaderLines: string[];
-      } = usarParserPdfSisbr
+      } = usarAlgumParserPdf
         ? (() => {
-            // IIFE async não é necessário aqui abaixo, pois já estamos num escopo async com await.
-            // No entanto, para satisfazer TypeScript sem asserção bruta, montamos inline:
-            // (será sobreescrito abaixo com await para evitar Promises não resolvidas)
             return {
               headers: [],
               rows: [],
@@ -30866,6 +31132,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Resolver definitivamente (escopo já é async):
       if (usarParserPdfSisbr) {
         const pdf = await readRelatorioTable(String(file.name ?? ''), buffer);
+        (parsedFinal as any).headers = pdf.headers;
+        (parsedFinal as any).rows = pdf.rows;
+        (parsedFinal as any).extractedCompetenciaMmAaaa = null;
+        (parsedFinal as any).topHeaderLines = [];
+      } else if (usarParserPdfMpgo) {
+        const pdf = await readMpgoPdfTable(String(file.name ?? ''), buffer);
         (parsedFinal as any).headers = pdf.headers;
         (parsedFinal as any).rows = pdf.rows;
         (parsedFinal as any).extractedCompetenciaMmAaaa = null;
@@ -30915,13 +31187,15 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         }
       }
       // =================== FIM ALIAS MAPEAMENTO CABEÇALHOS ===================
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo') {
         competFromHeader = extractCompet ? (parsedFinal.extractedCompetenciaMmAaaa ?? null) : null;
-        // ===== 🔑 EXTRAIR COPETÊNCIA DE NOME DO ARQUIVO (padrão TRT-JULHO-2026.xlsx / TRE-MAIO-2026.xlsm / etc) =====
-        // Regra do perfil TRT oficial (R17):
-        //   competenciaMesArquivoSemIncremento=FALSE (TRT/SISBR default) → MÊS+1, JULHO→08/2026. Dezembro→janeiro do ANO+1.
-        //   competenciaMesArquivoSemIncremento=TRUE (outros perfis) → MÊS do arquivo sem +1.
-        if (Boolean(profile.resolvedOptions?.extractCompetenciaFromFileName ?? false) || Boolean(profile.resolvedOptions?.competenciaMesArquivoSemIncremento ?? false)) {
+        // ===== 🔑 EXTRAIR COPETÊNCIA DE NOME DO ARQUIVO =====
+        //   TRT/SISBR default → competenciaMesArquivoSemIncremento=FALSE: MÊS+1 (JULHO→08/2026)
+        //   MPGO (forçado) / outros com flag TRUE → MÊS do arquivo SEM +1 (AGOSTO→08/2026)
+        const extraiCompetArquivoHabilitado = kindLower === 'recurso_mpgo'
+          || Boolean(profile.resolvedOptions?.extractCompetenciaFromFileName ?? false)
+          || Boolean(profile.resolvedOptions?.competenciaMesArquivoSemIncremento ?? false);
+        if (extraiCompetArquivoHabilitado) {
           const mmNome: Record<string, number> = {
             janeiro:1, fev:2, fevereiro:2, feve:2, mar:3, marco:3, março:3, marÇo:3,
             abr:4, abril:4, mai:5, maio:5, jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8,
@@ -30958,7 +31232,11 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 else { mmFinal = mm + 1; }
               }
               const cop = `${String(mmFinal).padStart(2,'0')}/${String(anoFinal)}`;
-              if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) competFromHeader = cop;
+              if (kindLower === 'recurso_mpgo') {
+                competFromHeader = cop;
+              } else if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) {
+                competFromHeader = cop;
+              }
             }
           }
         }
@@ -32066,6 +32344,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             totalRowsInserted,
             totalRowsSkipped,
             importedFiles,
+            scannedFileNames: candidates.slice(0, 10).map(c => c.name),
             errorMessage: errMsg,
             mode: modeLabel,
             jobSentFlagRef: __jobNotificationSentRef,
@@ -32090,6 +32369,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         totalRowsInserted,
         totalRowsSkipped,
         importedFiles,
+        scannedFileNames: candidates.slice(0, 10).map(c => c.name),
         mode: modeLabel,
         jobSentFlagRef: __jobNotificationSentRef,
       });
@@ -32152,6 +32432,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         totalRowsInserted,
         totalRowsSkipped,
         importedFiles,
+        scannedFileNames: candidates.slice(0, 10).map(c => c.name),
         errorMessage: e instanceof Error ? e.message : String(e ?? 'Falha desconhecida na importação.'),
         mode: modeLabel,
         jobSentFlagRef: __jobNotificationSentRef,
@@ -32182,6 +32463,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         totalRowsInserted,
         totalRowsSkipped,
         importedFiles,
+        scannedFileNames: candidates.slice(0, 10).map(c => c.name),
         errorMessage: topErr instanceof Error ? topErr.message : String(topErr ?? 'Erro desconhecido na importação.'),
         mode: modeLabel,
         jobSentFlagRef: __jobNotificationSentRef,
