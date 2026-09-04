@@ -4693,8 +4693,42 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
   //   PULAR: Total Cliente/Empresa/Cooperativa/Central/Geral, headers repetidos, TOTAIS, EMP-158, -- X of Y --
   // ============================================================================
   try {
-    const sisbrHeaderRe = /(?:SISBR\s+2\.0|Relatório\s+de\s+Parcelas\s+a\s+Vencer)/;
-    if (sisbrHeaderRe.test(text)) {
+    const sisbrHeaderLiteralRe = /(?:SISBR\s+2\.0|Relatório\s+de\s+Parcelas\s+a\s+Vencer|RELATORIO\s+DE\s+PARCELAS\s+A\s+VENCER|Relat[óo]rio\s+(?:de\s+)?(?:Parcelas|Consignado|Consignada|Consignados|Consignadas)|SISBR)/i;
+    const cliReProbe = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*(?:[A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?\s*\t\s*)?(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/gim;
+    const opReProbe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
+    const opReProbe10 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
+    const clienteMatches = text.match(cliReProbe) ?? [];
+    const operacaoMatches11 = text.match(opReProbe11) ?? [];
+    const operacaoMatches10 = text.match(opReProbe10) ?? [];
+    const clienteCount = clienteMatches.length;
+    const operacaoCount = operacaoMatches11.length + operacaoMatches10.length;
+    const isSisbrByStructure = clienteCount >= 3 || operacaoCount >= 5;
+    const sisbrHeaderLiteralMatch = sisbrHeaderLiteralRe.test(text);
+    const __sisbrDebugInfo: Record<string, unknown> = {
+      fileName,
+      sisbrHeaderLiteralMatch,
+      sisbrHeaderLiteralMatches: Array.from(new Set([
+        ... (text.match(/SISBR\s+2\.0/gi) ?? []),
+        ... (text.match(/Relatório\s+de\s+Parcelas\s+a\s+Vencer/gi) ?? []),
+        ... (text.match(/Relat[óo]rio\s+(?:de\s+)?(?:Parcelas|Consignado|Consignada|Consignados|Consignadas)/gi) ?? []),
+      ])).slice(0, 10),
+      clienteCount,
+      operacaoCount,
+      operacaoCount11: operacaoMatches11.length,
+      operacaoCount10: operacaoMatches10.length,
+      isSisbrByStructure,
+      enteredSisbrPositional: false,
+      empresaHeaderExtraido: '',
+      copetenciaExtraida: '',
+      vencimentoDefaultExtraido: '',
+    };
+    try {
+      const globalStore = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
+      if (!globalStore.__sisbrDebugLastByFile) globalStore.__sisbrDebugLastByFile = new Map();
+      globalStore.__sisbrDebugLastByFile.set(fileName, __sisbrDebugInfo);
+    } catch { /* ignore */ }
+    if (sisbrHeaderLiteralMatch || isSisbrByStructure) {
+      __sisbrDebugInfo.enteredSisbrPositional = true;
       // ---------------- EMPRESA ----------------
       let empresaHeader = '';
       const orgaoRe = /(?:^|\n)\s*([^\n]{0,200}?\d{3,6}\s*-\s*[^\n]{0,200}?)\s*ÓRGÃO\s*:/s;
@@ -4709,26 +4743,165 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
       if (!empresaHeader) {
         empresaHeader = fileName.replace(/\.pdf$/i, '').trim();
       }
+      __sisbrDebugInfo.empresaHeaderExtraido = empresaHeader;
       // ---------------- COPETENCIA (MM/YYYY) ----------------
       let copetencia = '';
-      const perRe = /PERÍODO\s*:\s*(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/;
-      const mPer = text.match(perRe);
-      if (mPer && mPer[2]) {
-        const parts = mPer[2].split('/'); if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
-      } else if (mPer && mPer[1]) {
-        const parts = mPer[1].split('/'); if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
+      let copetenciaFonte = '';
+      const copetFromParts = (mmRaw: string, aaaaRaw: string): string => {
+        const mm = String(mmRaw ?? '').padStart(2, '0').slice(-2);
+        const aaRaw = String(aaaaRaw ?? '').trim();
+        const curYearN = new Date().getFullYear();
+        const curYear = String(curYearN);
+        const razoavel = (anoN: number) => Math.abs(anoN - curYearN) <= 10;
+
+        let candAno = '';
+        if (/^\d{4}$/.test(aaRaw)) {
+          candAno = aaRaw;
+        } else {
+          let tentativas: string[] = [];
+          if (/^\d{1}$/.test(aaRaw)) {
+            tentativas.push(aaRaw + curYear.slice(-3));
+            tentativas.push(curYear.slice(0, 3) + aaRaw);
+          } else if (/^\d{2}$/.test(aaRaw)) {
+            tentativas.push(aaRaw + curYear.slice(-2));
+            tentativas.push(curYear.slice(0, 2) + aaRaw);
+          } else if (/^\d{3}$/.test(aaRaw)) {
+            tentativas.push(aaRaw + curYear.slice(-1));
+            tentativas.push(curYear.slice(0, 1) + aaRaw);
+          }
+          const razoaveis = tentativas.filter(a => /^\d{4}$/.test(a) && razoavel(parseInt(a, 10)));
+          if (razoaveis.length) {
+            candAno = razoaveis.sort((a, b) => Math.abs(parseInt(a, 10) - curYearN) - Math.abs(parseInt(b, 10) - curYearN))[0];
+          } else if (tentativas.filter(a => /^\d{4}$/.test(a)).length) {
+            candAno = tentativas.find(a => /^\d{4}$/.test(a)) || '';
+          }
+        }
+        if (!/^\d{4}$/.test(candAno)) return '';
+        if (!/^\d{2}$/.test(mm)) return '';
+        const mmN = parseInt(mm, 10);
+        if (mmN < 1 || mmN > 12) return '';
+        return `${mm}/${candAno}`;
+      };
+      const dataPtRe = (anchor: string): RegExp => {
+        const src = `(?:^|\\s|\\b)${anchor}(\\d{1,2})[\\/\\.\\-](\\d{1,2})[\\/\\.\\-](\\d{1,4})(?:\\b|$)`;
+        return new RegExp(src, 'i');
+      };
+      const perReList: Array<{ re: RegExp; peso: number; rotulo: string }> = [
+        { peso: 5, rotulo: 'perRe_comA_espaco', re: /PER[ÍI]ODO\s*[=:：]\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})\s*(?:a|ate|até|à|at\xe9|–|—|-{1,3})\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
+        { peso: 4, rotulo: 'perRe_duasDatas_espaco',  re: /PER[ÍI]ODO\s*[=:：]\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})\s+(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
+        { peso: 3, rotulo: 'perRe_umaData_fim',      re: /PER[ÍI]ODO\s*[=:：]\s*(?:de\s*)?(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
+        { peso: 2, rotulo: 'perRe_mesAno_nomeExtenso', re: /PER[ÍI]ODO\s*[=:：]\s*(?:de\s*)?(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)[\s\-\/de]+(\d{2,4})/i },
+      ];
+      let best: { comp: string; peso: number; rotulo: string } | null = null;
+      for (const item of perReList) {
+        const m = text.match(item.re);
+        if (!m) continue;
+        let cand = '';
+        try {
+          if (item.rotulo === 'perRe_mesAno_nomeExtenso') {
+            const mes = String(m[1] ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            const mapa: Record<string, string> = {janeiro:'01',fevereiro:'02',marco:'03',abril:'04',maio:'05',junho:'06',julho:'07',agosto:'08',setembro:'09',outubro:'10',novembro:'11',dezembro:'12'};
+            const mm = mapa[mes] ?? '';
+            if (!mm) continue;
+            cand = copetFromParts(mm, m[2] ?? '');
+          } else {
+            const dtFim = m[2] ?? m[1] ?? '';
+            const dRe = dataPtRe('');
+            const dm = dtFim.match(dRe) ?? dtFim.match(/(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/);
+            if (!dm) { const dReGuloso = /(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/; const m2 = dtFim.match(dReGuloso); if (!m2) continue; cand = copetFromParts(m2[2], m2[3]); } else cand = copetFromParts(dm[2], dm[3]);
+          }
+        } catch { continue; }
+        if (!cand) continue;
+        if (!best || item.peso > best.peso) best = { comp: cand, peso: item.peso, rotulo: item.rotulo };
       }
+      if (best) { copetencia = best.comp; copetenciaFonte = best.rotulo; }
+      // Fallback 2: colher Competência/Mês/Ano Referência da primeira linha do PDF (ex: Competência: 08/2026)
+      if (!copetencia) {
+        const reFallback = /(?:Compet[eêê]ncia|Competencia|Compete?ncia|M[eê]s\/Ano Refer[eêê]ncia|Período Ref\.|Período de Apuração)\s*[=:：]\s*(\d{1,2})[\/\.\-](\d{2,4})/i;
+        const fb = text.match(reFallback);
+        if (fb) {
+          const cand = copetFromParts(fb[1] ?? '', fb[2] ?? '');
+          if (cand) { copetencia = cand; copetenciaFonte = 'header_competencia_fallback'; }
+        }
+      }
+      // Fallback 3: vencimentoDefault extraído do título (Relatório de Parcelas a Vencer DD/MM/AAAA) -> usar como copetencia
+      if (!copetencia) {
+        const venRe = /Relat[óo]rio\s+(?:de\s+)?Parcelas\s+a\s+Vencer\s+(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/i;
+        const mv = text.match(venRe);
+        if (mv) {
+          const cand = copetFromParts(mv[2] ?? '', mv[3] ?? '');
+          if (cand) { copetencia = cand; copetenciaFonte = 'titulo_vencimento_default'; }
+        }
+      }
+      // Fallback 4: primeira data encontrada no texto (VENCTO / vencimento header)
+      if (!copetencia) {
+        const primeiraData = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+        if (primeiraData) {
+          const cand = copetFromParts(primeiraData[2], primeiraData[3]);
+          if (cand) { copetencia = cand; copetenciaFonte = 'primeira_data_texto_pdf'; }
+        }
+      }
+      __sisbrDebugInfo.copetenciaExtraida = copetencia;
+      __sisbrDebugInfo.copetenciaExtraidaFonte = copetenciaFonte;
       // ---------------- VENCIMENTO DEFAULT (para opRe10 = 10 campos sem Vencimento) ----------------
-      // Extrai de "Relatório de Parcelas a Vencer 25/08/2026"
       let vencimentoDefault = '';
-      const venDefRe = /Relatório\s+de\s+Parcelas\s+a\s+Vencer\s+(\d{2}\/\d{2}\/\d{4})/;
-      const mVenDef = text.match(venDefRe);
-      if (mVenDef && mVenDef[1]) vencimentoDefault = mVenDef[1].trim();
-      // Fallback: data final do PERÍODO se não achar no título
-      if (!vencimentoDefault && mPer && mPer[2]) {
-        const parts = mPer[2].split('/');
-        if (parts.length === 3) vencimentoDefault = `25/${parts[1]}/${parts[2]}`;
+      let vencimentoDefaultFonte = '';
+      const extraiDataCompletaPt = (raw: string): string => {
+        const m = raw.match(/(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/);
+        if (!m) return '';
+        const dd = String(m[1]).padStart(2,'0');
+        const mm = String(m[2]).padStart(2,'0');
+        const aaRaw = String(m[3]);
+        const curYearN = new Date().getFullYear();
+        const curYear = String(curYearN);
+        const razoavel = (anoN: number) => Math.abs(anoN - curYearN) <= 10;
+
+        let candAno = '';
+        if (/^\d{4}$/.test(aaRaw)) {
+          candAno = aaRaw;
+        } else {
+          let tentativas: string[] = [];
+          if (/^\d{1}$/.test(aaRaw)) {
+            tentativas.push(aaRaw + curYear.slice(-3));
+            tentativas.push(curYear.slice(0, 3) + aaRaw);
+          } else if (/^\d{2}$/.test(aaRaw)) {
+            tentativas.push(aaRaw + curYear.slice(-2));
+            tentativas.push(curYear.slice(0, 2) + aaRaw);
+          } else if (/^\d{3}$/.test(aaRaw)) {
+            tentativas.push(aaRaw + curYear.slice(-1));
+            tentativas.push(curYear.slice(0, 1) + aaRaw);
+          }
+          const razoaveis = tentativas.filter(a => /^\d{4}$/.test(a) && razoavel(parseInt(a, 10)));
+          if (razoaveis.length) {
+            candAno = razoaveis.sort((a, b) => Math.abs(parseInt(a, 10) - curYearN) - Math.abs(parseInt(b, 10) - curYearN))[0];
+          } else if (tentativas.filter(a => /^\d{4}$/.test(a)).length) {
+            candAno = tentativas.find(a => /^\d{4}$/.test(a)) || '';
+          }
+        }
+        if (!/^\d{4}$/.test(candAno)) return '';
+        return `${dd}/${mm}/${candAno}`;
+      };
+      const venDefReList: Array<{ re: RegExp; rotulo: string }> = [
+        { rotulo: 'tituloRelatorioVencer', re: /Relat[óo]rio\s+(?:de\s+)?Parcelas\s+a\s+Vencer\s+(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
+        { rotulo: 'periFim_perRe',  re: /PER[ÍI]ODO\s*[=:：]\s*(?:\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})\s*(?:a|ate|até|à|–|—|-{1,3})\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
+        { rotulo: 'periIni_perRe',  re: /PER[ÍI]ODO\s*[=:：]\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})(?:\s|$)/i },
+      ];
+      for (const item of venDefReList) {
+        const m = text.match(item.re);
+        if (!m) continue;
+        const cand = extraiDataCompletaPt(m[1] ?? '');
+        if (!cand) continue;
+        vencimentoDefault = cand;
+        vencimentoDefaultFonte = item.rotulo;
+        break;
       }
+      if (!vencimentoDefault && copetencia) {
+        const [mm, aaaa] = copetencia.split('/');
+        vencimentoDefault = `25/${mm}/${aaaa}`;
+        vencimentoDefaultFonte = 'copetencia_fallback_dia25';
+      }
+      __sisbrDebugInfo.vencimentoDefaultExtraido = vencimentoDefault;
+      __sisbrDebugInfo.vencimentoDefaultExtraidoFonte = vencimentoDefaultFonte;
       // ---------------- REGEX LINHAS ----------------
       // Op 11 campos (COM Vencimento explícito na 6ª posição):
       const opRe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
@@ -4829,6 +5002,9 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
           continue;
         }
       }
+      try {
+        __sisbrDebugInfo.resultRowsPositional = resultRows.length;
+      } catch { /* ignore */ }
       if (resultRows.length > 0) return { headers: resultHeaders, rows: resultRows };
     }
   } catch (_eSisbrPos) {
@@ -4981,6 +5157,7 @@ export async function debugLocalSisbrPdfFile(
   rowsFirst20: Array<Record<string, unknown>>;
   allMoneysCount: number;
   allMoneysFirst30: string[];
+  debugSisbr?: Record<string, unknown>;
   error?: string;
 }> {
   type R = Awaited<ReturnType<typeof debugLocalSisbrPdfFile>>;
@@ -5036,6 +5213,12 @@ export async function debugLocalSisbrPdfFile(
       sampleRow0: extracted.rows[0]?.[h] ?? null,
       sampleRow1: extracted.rows[1]?.[h] ?? null,
     }));
+    try {
+      const globalStore = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
+      if (globalStore.__sisbrDebugLastByFile && globalStore.__sisbrDebugLastByFile.has(result.fileName)) {
+        result.debugSisbr = globalStore.__sisbrDebugLastByFile.get(result.fileName) ?? undefined;
+      }
+    } catch { /* ignore */ }
     return result;
   } catch (e) {
     result.ok = false;
@@ -5063,21 +5246,27 @@ async function openDatabase(dbPath: string): Promise<Database> {
   }
 
   const cached = cachedDbByPath.get(resolvedPath);
+  const syncRunning = Boolean((globalThis as any).__importSyncRunning === true);
   if (
     cached &&
     Math.abs(cached.mtimeMs - currentMtimeMs) <= DB_MTIME_SAFETY_DELTA_MS
   ) {
-    if (!DB_HANDLE_VALIDATION_ENABLED || dbHandleLooksAlive(cached.db)) {
+    if (!DB_HANDLE_VALIDATION_ENABLED || syncRunning || dbHandleLooksAlive(cached.db)) {
       cached.lastUsedMs = nowMs;
       return cached.db;
     }
     safeLogError(
-      `openDatabase cached handle DEAD for ${resolvedPath} (will reopen fresh, close+purge)`,
+      `openDatabase cached handle DEAD for ${resolvedPath} (will reopen fresh, close+purge)${syncRunning ? ' [BYPASS SKIPPED — __importSyncRunning=true]' : ''}`,
       new Error('cached handle SELECT 1 failed'),
     );
     safeCloseDb(cached.db);
     try { cachedDbByPath.delete(resolvedPath); } catch {}
   } else if (cached) {
+    if (syncRunning) {
+      cached.lastUsedMs = nowMs;
+      try { cached.mtimeMs = currentMtimeMs || cached.mtimeMs; } catch {}
+      return cached.db;
+    }
     safeCloseDb(cached.db);
     cachedDbByPath.delete(resolvedPath);
   }
@@ -7234,23 +7423,21 @@ function ensureDefaultLearningProfiles(db: Database) {
       sisbrSkipTotalsStrict: true,
       mode: 'append',
       folderCandidates: [
-        'Relatórios de Órgão',
-        'Relatório de Órgão',
-        'Relatorios de Orgao',
-        'Relatorio de Orgao',
-        'Relatórios Orgão',
-        'Relatório Orgão',
-        'Relatorios Orgao',
-        'Relatorio Orgao',
         'Relatório Sisbr',
-        'Relatorios Sisbr',
-        'Sisbr',
-        'SISBR',
       ],
       ignoreImportados: true,
       checkDuplicateContent: true,
-      strictColumnWhitelist: null,
-      strictColumnMinMatches: 0,
+      strictColumnWhitelist: [
+        'EMPRESA',
+        'Cliente',
+        'Matrícula', 'Matricula',
+        'Operação', 'Operacao',
+        'Modalidade',
+        'Copetencia', 'Competência', 'Competencia',
+        'Vencimento',
+        'Valor Parcela',
+      ],
+      strictColumnMinMatches: 6,
       extractCompetenciaFromTopHeader: true,
       moveToImportadosSubfolderAfterImport: true,
     },
@@ -27505,6 +27692,7 @@ export async function sendImportFinishedEmailNotification(input: {
     profileId: string;
     insertedRows: number;
     skippedRows: number;
+    debugSisbr?: unknown;
   }>;
   errorMessage?: string | null;
   mode?: string | null;
@@ -29669,6 +29857,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     skippedRows: number;
     headers: string[];
     skippedReason?: string;
+    debugSisbr?: unknown;
   }>;
   totalFilesScanned: number;
   totalFilesMatched: number;
@@ -29699,6 +29888,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   }>;
   dbFilePath: string | null;
 }> {
+  return withRetryOnDbClosed('importByLearningProfileFromFolderUrl', async (attempt) => {
   let modeLabel: 'append' | 'replace' = 'append';
   const targetTableNameRef: { value: string | null } = { value: null };
   const movedToImportadosTracker: { ok: boolean; count: number; firstError: string } = { ok: false, count: 0, firstError: '' };
@@ -29714,6 +29904,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     skippedRows: number;
     headers: string[];
     skippedReason?: string;
+    debugSisbr?: unknown;
   }> = [];
   let totalFilesScanned = 0;
   let totalFilesMatched = 0;
@@ -29890,6 +30081,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     skippedRows: number;
     headers: string[];
     skippedReason?: string;
+    debugSisbr?: unknown;
   }> = [];
 
   let totalFilesScanned = 0;
@@ -30474,6 +30666,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             skippedRows: 0,
             headers: [],
             skippedReason: `idempotente: bytes idênticos já importados em ${atLabel}`,
+            debugSisbr: (() => {
+              try {
+                const store = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
+                return store?.__sisbrDebugLastByFile?.get?.(file.name) ?? null;
+              } catch { return null; }
+            })(),
           });
           totalRowsSkipped += 0;
           continue;
@@ -30725,6 +30923,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               skippedRows: parsedFinal.rows.length,
               headers: parsedFinal.headers,
               skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatches}`,
+              debugSisbr: (() => {
+                try {
+                  const store = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
+                  return store?.__sisbrDebugLastByFile?.get?.(file.name) ?? null;
+                } catch { return null; }
+              })(),
             });
             totalRowsSkipped += parsedFinal.rows.length;
             {
@@ -31651,6 +31855,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                   : `Parser retornou ${parsedFinal.rows.length} linhas, mas nenhuma inserida nem pulada. Causa provável: linhas vazias, duplicatas pré-processadas, ou colunas não compatíveis.`
               )
             : undefined,
+        debugSisbr: (() => {
+          try {
+            const store = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
+            return store?.__sisbrDebugLastByFile?.get?.(file.name) ?? null;
+          } catch { return null; }
+        })(),
       });
       if (res.insertedRows === 0 && res.skippedRows === 0) {
         const __dbg = __dbg_loaded({ env: true });
@@ -31901,6 +32111,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       /* ignore */
     }
   }
+  }, 5);
 }
 
 // #region debug-temp: endpoint para validar expandRecursoExtratos sem UI (tre-import-wrong-columns S4)
@@ -33758,6 +33969,10 @@ export async function runImportConsignado(opts: {
   notificationEmail?: { attempted: boolean; sent: boolean; to: string[]; error?: string | null };
   notificationEmailsByKind?: Record<string, { attempted: boolean; sent: boolean; to: string[]; error?: string | null }>;
 }> {
+  const prevSyncRunning = (globalThis as any).__importSyncRunning === true;
+  (globalThis as any).__importSyncRunning = true;
+  try {
+  return await withRetryOnDbClosed('runImportConsignado', async (attempt) => {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
@@ -33895,6 +34110,7 @@ export async function runImportConsignado(opts: {
         tablesCreated: [],
         dbFilePath: null,
       };
+      if (isDatabaseClosedError(e)) throw e;
     }
   }
   const notificationEmailsByKind: Record<string, { attempted: boolean; sent: boolean; to: string[]; error?: string | null }> = {};
@@ -33930,6 +34146,12 @@ export async function runImportConsignado(opts: {
     notificationEmail: primaryNotificationEmail,
     notificationEmailsByKind,
   };
+  }, 5);
+  } finally {
+    if (!prevSyncRunning) {
+      (globalThis as any).__importSyncRunning = false;
+    }
+  }
 }
 
 function formatOccurrencesPanoramaOrgaoLabel(orgaoRaw: unknown): string {
@@ -36485,6 +36707,7 @@ class _ImportJobsManagerSingleton {
     };
     const isCancelled = (): boolean => Boolean(rec.cancelled);
     try {
+      try { (globalThis as any).__importSyncRunning = true; } catch { /* ignore */ }
       const result = await run({ onProgress, isCancelled });
       rec.status = 'succeeded';
       rec.finishedAtIso = _jobNowIso();
@@ -36505,6 +36728,7 @@ class _ImportJobsManagerSingleton {
       void _jobPersist(null, rec);
       this._emit(rec.jobId, 'status', { status: rec.status, errorMessage: rec.errorMessage });
     } finally {
+      try { (globalThis as any).__importSyncRunning = false; } catch { /* ignore */ }
       this.active = Math.max(0, this.active - 1);
       void this._drain();
     }
@@ -37095,6 +37319,7 @@ export async function runAutomationScheduleNow(id: string): Promise<{ ok: boolea
 
 async function _schedulerTickOnce(): Promise<void> {
   try {
+    if ((globalThis as any).__importSyncRunning === true) return;
     _schedState.tickCount += 1;
     _schedState.lastTickAtIso = new Date().toISOString();
     const cfg = await getAutomationConfig();
