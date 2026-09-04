@@ -27753,6 +27753,49 @@ export async function sendImportFinishedEmailNotification(input: {
 
     const forceKindDisplay = String(input.forceKind ?? 'Não especificado').trim() || 'Não especificado';
     const modeDisplay = String(input.mode ?? 'append').trim() || 'append';
+
+    const forceKindLower = forceKindDisplay.toLowerCase();
+    let perfilInfo = {
+      nomePerfilAmigavel: forceKindDisplay,
+      tipoArquivoEsperado: 'Excel (.xlsx) ou PDF',
+      exemploNomeArquivos: 'arquivos compatíveis com o perfil selecionado',
+      pastaAlvo: 'a pasta correspondente ao perfil',
+      notasPerfil: '',
+    };
+    if (forceKindLower.includes('sisbr') || forceKindLower.includes('relatorio') || forceKindLower.includes('orgao')) {
+      perfilInfo = {
+        nomePerfilAmigavel: 'Relatório SISBR (Convênios / Órgãos)',
+        tipoArquivoEsperado: 'PDF posicional (relatórios emitidos pelo SISBR)',
+        exemploNomeArquivos: 'Ex.: "ELETRA - FUNDACAO PREVIDENCIA.pdf", "GOIAS MP PROCURADORIA.pdf" — NÃO importa o nome do arquivo, só o layout interno com colunas Cliente / Matrícula / Operação / Competência / Vencimento / Valor Parcela',
+        pastaAlvo: 'a subpasta "Relatório Sisbr" (única pasta pesquisada para este perfil)',
+        notasPerfil: 'Este perfil NÃO filtra por nome do arquivo — valida APENAS a estrutura interna (6+ colunas do SISBR).',
+      };
+    } else if (forceKindLower.includes('mpgo') || forceKindLower.includes('recurso') || forceKindLower.includes('recursos')) {
+      perfilInfo = {
+        nomePerfilAmigavel: 'Recursos MPGO (Recurso vs Relatório)',
+        tipoArquivoEsperado: 'Excel (.xlsx) — Arquivos de Recurso / Arquivos de Relatório separados',
+        exemploNomeArquivos: 'Ex.: "Recursos_AGOSTO_2026.xlsx", "Relatórios_AGOSTO_2026.xlsx", abas com colunas Data / Valor / Histórico / Favorecido',
+        pastaAlvo: 'a pasta do mês/ano correspondente em Recuperação de Crédito',
+        notasPerfil: 'Se não bater, confira: (a) aba/sheet correta; (b) se não foi salvo como PDF em vez de XLSX; (c) se a 1ª linha é cabeçalho.',
+      };
+    } else if (forceKindLower.includes('extrato') || forceKindLower.includes('todos')) {
+      perfilInfo = {
+        nomePerfilAmigavel: 'Extratos Bancários (TODOS / ALEGO / ADFEGO)',
+        tipoArquivoEsperado: 'Excel (.xlsx) — exportação direta do internet banking',
+        exemploNomeArquivos: 'Ex.: "TODOS-AGOSTO-2026.xlsx", "ALEGO-AGOSTO-2026.xlsx", "CRÉD.TED-STR-*.xlsx" — colunas Data / Histórico / Valor / Saldo (ou equivalentes)',
+        pastaAlvo: 'a pasta do mês/ano correspondente (Ex.: Extratos / 2026 / 08 Agosto)',
+        notasPerfil: 'Se não bater, confira: (a) extensão .xlsx (CSV não funciona); (b) colunas Data, Valor, Histórico presentes; (c) não é um arquivo ZIP de PDF de boleto.',
+      };
+    } else if (forceKindLower.includes('tre') || forceKindLower.includes('trt') || forceKindLower.includes('tjgo') || forceKindLower.includes('adfego')) {
+      perfilInfo = {
+        nomePerfilAmigavel: `${forceKindDisplay} (Fórum / Precatório / Convênio)`,
+        tipoArquivoEsperado: 'Excel (.xlsx) — planilha fornecida pelo órgão / fórum',
+        exemploNomeArquivos: 'Arquivos nomeados com TRE/TRT/TJGO/ADFEGO + Mês/Ano, com colunas identificáveis de operação / vencimento / valor / cliente',
+        pastaAlvo: 'a pasta correspondente ao órgão / mês',
+        notasPerfil: 'Se não bater, provavelmente o layout do relatório do órgão mudou — avise a TI para atualizar o perfil.',
+      };
+    }
+
     const folderShort = String(input.folderUrlPreview ?? '').trim().slice(0, 180);
     const recipientsKey = recipients.map((r) => r.toLowerCase().trim()).sort().join('|');
     const filesSignature = input.importedFiles.slice(0, 10).map((f) => `${f.fileName}:${f.insertedRows}:${f.skippedRows}`).join('|');
@@ -27792,16 +27835,25 @@ export async function sendImportFinishedEmailNotification(input: {
     }> = {
       success: {
         title: 'Importação concluída com sucesso',
-        summary: 'Todos os arquivos foram processados sem erros.',
+        summary: 'Todos os arquivos foram processados e as linhas foram gravadas no banco.',
         accent: '#15803d',
         bg: 'linear-gradient(135deg,#ecfdf5 0%,#bbf7d0 100%)',
         border: '#86efac',
         pillLabel: 'Sucesso',
         emoji: '✅',
       },
+      dup_ok: {
+        title: 'Nenhum dado novo encontrado',
+        summary: 'Os arquivos já haviam sido importados antes — proteção contra duplicata ativou automaticamente. Nenhuma ação necessária.',
+        accent: '#075985',
+        bg: 'linear-gradient(135deg,#eff6ff 0%,#bfdbfe 100%)',
+        border: '#93c5fd',
+        pillLabel: 'Tudo já salvo',
+        emoji: '📬',
+      },
       partial: {
-        title: 'Importação parcial — precisa conferir',
-        summary: 'Alguns arquivos tiveram linhas puladas ou não foram importados — veja os problemas abaixo.',
+        title: 'Algumas linhas ficaram de fora',
+        summary: 'Uma parte dos dados foi gravada e outra não. Veja abaixo o que aconteceu e o que fazer.',
         accent: '#b45309',
         bg: 'linear-gradient(135deg,#fffbeb 0%,#fde68a 100%)',
         border: '#fcd34d',
@@ -27809,7 +27861,7 @@ export async function sendImportFinishedEmailNotification(input: {
         emoji: '⚠️',
       },
       failed: {
-        title: 'Falha na importação — precisa corrigir',
+        title: 'Não foi possível importar',
         summary: 'Ocorreu um problema durante o processamento. Veja a causa e o que fazer abaixo.',
         accent: '#b91c1c',
         bg: 'linear-gradient(135deg,#fef2f2 0%,#fecaca 100%)',
@@ -27828,7 +27880,14 @@ export async function sendImportFinishedEmailNotification(input: {
       },
     };
     const isOk = input.totalRowsInserted > 0 && !input.errorMessage;
-    const effectiveOutcome = input.outcome === 'success' ? (isOk ? 'success' : (input.totalRowsSkipped > 0 ? 'partial' : 'success')) : input.outcome;
+    const hasAnyInsert = input.totalRowsInserted > 0;
+    const hasAnySkip = input.totalRowsSkipped > 0;
+    const matchedSomething = input.totalFilesMatched > 0;
+    const allSkippedZeroInsert = matchedSomething && !hasAnyInsert && hasAnySkip;
+    let effectiveOutcome: keyof typeof outcomeConfig = input.outcome === 'success'
+      ? (isOk ? 'success' : (hasAnySkip ? 'partial' : 'success'))
+      : (input.outcome && (input.outcome in outcomeConfig) ? (input.outcome as keyof typeof outcomeConfig) : 'failed');
+    if (allSkippedZeroInsert && effectiveOutcome !== 'cancelled') effectiveOutcome = 'dup_ok';
     const display = outcomeConfig[effectiveOutcome] ?? outcomeConfig.failed;
 
     type IssueEntry = {
@@ -27844,43 +27903,60 @@ export async function sendImportFinishedEmailNotification(input: {
 
     if (effectiveOutcome === 'cancelled') {
       issues.push({
-        title: 'Importação cancelada pelo sistema ou usuário',
-        cause: 'A execução foi interrompida antes de concluir (cancelamento manual, timeout, ou reinício do backend).',
+        title: 'Importação cancelada',
+        cause: 'A execução foi interrompida antes de concluir (cancelamento manual, tempo esgotado, ou sistema reiniciado).',
         action: 'Rode a importação novamente. Se cancelou de propósito, pode ignorar este e-mail.',
         severity: 'Informativo',
       });
     }
     if (input.totalFilesScanned <= 0 && effectiveOutcome !== 'cancelled') {
       issues.push({
-        title: 'Nenhum arquivo foi encontrado na pasta/origem',
-        cause: 'A pasta/origem está vazia, ou o link da pasta SharePoint está errado (ex: aponta para uma subpasta sem arquivos ou com ano/mês incorreto).',
-        action: '1) Abra a URL SharePoint informada abaixo e confira se existem arquivos .xlsx/.xls/.xlsm dentro; 2) Se URL termina com /ANO, ajuste para apontar para a raiz da automação; 3) Confira se o nome dos arquivos bate com o perfil (ex: TODOS-MÊS-ANO.xlsx).',
+        title: `Nenhum arquivo encontrado na pasta (Perfil: ${perfilInfo.nomePerfilAmigavel})`,
+        cause: `O perfil selecionado foi "${perfilInfo.nomePerfilAmigavel}" — ele espera arquivos do tipo: ${perfilInfo.tipoArquivoEsperado}.\nNão encontrei NENHUM arquivo (nem PDF, nem XLSX) em ${perfilInfo.pastaAlvo}.\nCausas mais comuns: (a) Ainda não colocaram os arquivos este mês; (b) A pasta está vazia; (c) EU NÃO TENHO PERMISSÃO DE LEITURA na pasta SharePoint (veja se você consegue abrir a URL abaixo manualmente); (d) O mês/ano escolhido ainda não tem documentação.`,
+        action: `1) ABRA A PASTA SharePoint clicando no link abaixo — se aparecer "Você não tem acesso" → PEÇA PERMISSÃO ao dono da pasta. 2) Confira se existem arquivos. 3) Confirme que os arquivos estão no formato certo: ${perfilInfo.tipoArquivoEsperado}. 4) Se Recursos MPGO, certifique-se de ter separado os arquivos de Recurso e Relatório em XLSX (não PDF).`,
         severity: 'Ação necessária',
       });
     }
     if (input.totalFilesScanned > 0 && input.totalFilesMatched <= 0) {
       issues.push({
-        title: 'Encontrei arquivos mas nenhum bate com o perfil de importação',
-        cause: 'O nome/layout dos arquivos não combina com nenhum perfil de aprendizado cadastrado, ou você escolheu o Tipo de importação errado no painel (ex: usou "Extratos Recurso" genérico ao invés de "Extrato TODOS").',
-        action: '1) No painel Automação, confira o Tipo selecionado — use o perfil específico do arquivo (ex: Extrato TODOS); 2) Confira se o nome do arquivo segue o padrão (ex: ORGAO-MES-ANO.xlsx); 3) Cadastre/ajuste o perfil de aprendizado se o layout mudou.',
+        title: `${input.totalFilesScanned} arquivo(s) encontrados — NENHUM compatível com "${perfilInfo.nomePerfilAmigavel}"`,
+        cause: `Foram encontrados ${input.totalFilesScanned} arquivo(s) na pasta, mas NENHUM bate com o perfil selecionado.\n\n📋 Perfil SELECIONADO AGORA: "${perfilInfo.nomePerfilAmigavel}"\n✅ Formato ESPERADO: ${perfilInfo.tipoArquivoEsperado}\n💡 Exemplos de nomes/formatos QUE FUNCIONAM: ${perfilInfo.exemploNomeArquivos}\n📂 Pasta pesquisada: ${perfilInfo.pastaAlvo}\n${perfilInfo.notasPerfil ? 'ℹ️ ' + perfilInfo.notasPerfil : ''}\n\nCausas MAIS COMUNS por ordem: (1) Você selecionou TIPO ERRADO na tela Automação (ex: marcou "Extrato TODOS" mas a pasta só tem PDF Relatório SISBR); (2) Arquivo veio em PDF MAS o perfil espera XLSX (ou vice-versa); (3) Layout do órgão/banco MUDOU; (4) Arquivo salvo com extensão errada (ex: renomeou .pdf para .xlsx manualmente sem converter).`,
+        action: `1) NA TELA AUTOMAÇÃO → CLIQUE EM "Tipo de importação" e confirme se é "${perfilInfo.nomePerfilAmigavel}". Mude se necessário. 2) Confira EXTENSÃO do arquivo (clique com botão direito → Propriedades). O nome parecer .xlsx MAS pode ser .pdf disfarçado. 3) Abra o arquivo e confira COLUNAS e ABA CORRETA. 4) Se TUDO certo e ainda não bate → ENVIAR o arquivo para TI para atualizar o perfil.`,
         severity: 'Ação necessária',
       });
     }
-    if (input.totalFilesMatched > 0 && input.totalRowsInserted <= 0 && input.totalRowsSkipped <= 0 && effectiveOutcome !== 'cancelled') {
+    if (input.totalFilesMatched > 0 && input.totalRowsInserted <= 0 && input.totalRowsSkipped <= 0 && effectiveOutcome !== 'cancelled' && effectiveOutcome !== 'dup_ok') {
       issues.push({
-        title: 'Arquivo bateu com perfil mas não inseriu nenhuma linha',
-        cause: 'Arquivo está vazio, a planilha tem layout incorreto (ex: o cabeçalho está em outra linha), ou a aba/sheet principal está vazia.',
-        action: 'Abra o arquivo Excel e confira: 1) se existe uma aba com a tabela; 2) se o cabeçalho está na linha 2 quando A1 contém "EXTRATO CONTA CORRENTE"; 3) se existem linhas de dados abaixo do cabeçalho.',
+        title: `${input.totalFilesMatched} arquivo(s) reconhecido(s) mas VAZIOS (sem linhas de dados) — ${perfilInfo.nomePerfilAmigavel}`,
+        cause: `O arquivo foi identificado como "${perfilInfo.nomePerfilAmigavel}" corretamente, mas NÃO TEM LINHAS para gravar.\nMais comum: (a) Planilha só tem a 1ª linha (cabeçalho) SEM dados abaixo; (b) PDF tem só as capas sem a tabela de operações; (c) ABA/sheet da planilha foi apagada ou renomeada; (d) Arquivo salvo em branco.`,
+        action: `1) Abra o arquivo MANUALMENTE (Excel para XLSX / navegador para PDF). 2) ROLA PARA BAIXO → confirme se existem linhas de dados (não só cabeçalho). 3) Se XLSX, confirme a ABA (sheet) ativa é a correta. 4) Se PDF SISBR → confira se as colunas Cliente / Matrícula / Operação aparecem com dados abaixo.`,
         severity: 'Ação necessária',
       });
     }
-    if (input.totalRowsSkipped > 0 && effectiveOutcome !== 'cancelled') {
-      issues.push({
-        title: `${input.totalRowsSkipped} linha(s) pulada(s) no arquivo`,
-        cause: 'Linhas foram rejeitadas automaticamente por: 1) conteúdo não bate com o filtro do perfil (ex: HISTÓRICO diferente de "CRÉD.TED-STR"); 2) linha já havia sido importada antes (hash duplicado — proteção contra importar o mesmo arquivo duas vezes).',
-        action: '1) Confira se você já rodou esse arquivo antes — se sim, pulada é esperado; 2) Se NÃO rodou ainda, abra o arquivo e confira se o HISTÓRICO está exatamente no formato exigido pelo perfil; 3) Veja o detalhamento por arquivo no final do e-mail.',
-        severity: 'Verificar',
-      });
+    if (hasAnySkip && effectiveOutcome !== 'cancelled') {
+      const totalFiles = Math.max(1, input.importedFiles.length);
+      const filesAllDup = input.importedFiles.filter(f => Number(f.skippedRows || 0) > 0 && Number(f.insertedRows || 0) === 0).length;
+      const filesPartialDup = input.importedFiles.filter(f => Number(f.skippedRows || 0) > 0 && Number(f.insertedRows || 0) > 0).length;
+      if (allSkippedZeroInsert && effectiveOutcome === 'dup_ok') {
+        issues.push({
+          title: `${input.totalRowsSkipped} linha(s) já existiam e foram preservadas (${perfilInfo.nomePerfilAmigavel})`,
+          cause: `Sistema de segurança (hash SHA-256 por linha) ativou automaticamente — você nunca importará o mesmo dado 2x por engano.\n\nTodos os arquivos desta rodada (${filesAllDup}/${totalFiles}) já haviam sido importados completamente em uma ocasião anterior.\n\n✅ NÃO é um erro. É comportamento desejado.`,
+          action: `Nenhuma ação necessária. Se QUISER MESMO reimportar (porque alterou dado do arquivo e quer substituir), primeiro remova as linhas antigas da tabela (solicite à TI se não tiver acesso) e rode novamente.`,
+          severity: 'Informativo',
+        });
+      } else {
+        const dupCause = filesAllDup === totalFiles
+          ? `Todos os ${totalFiles} arquivo(s) já foram importados ANTES no seu TODO (100% duplicata, antiduplicata).`
+          : filesPartialDup > 0
+          ? `${filesPartialDup} arquivo(s) são PARCIAIS: parte entrou como NOVA e parte já existia (pulou as antigas).`
+          : `Algumas linhas já existiam ou foram puladas.`;
+        issues.push({
+          title: `${input.totalRowsSkipped} linha(s) pulada(s) no perfil ${perfilInfo.nomePerfilAmigavel}`,
+          cause: `${dupCause}\n\nOutro motivo possível (SE NÃO é duplicata): algumas linhas do arquivo NÃO passaram pelos CRITÉRIOS do perfil "${perfilInfo.nomePerfilAmigavel}". Exemplo: coluna "Competência" vazia; valor na coluna diferente do esperado; linha com R$ 0,00 ou data inválida.`,
+          action: `1) PRIMEIRO → abra a tabela "Arquivos processados" ABAIXO e veja em QUAL arquivo pulou mais linhas. 2) SEGUNDO → confira se VOCÊ JÁ RODOU este arquivo antes (nessa caso é NORMAL). 3) TERCEIRO → se NUNCA rodou e pulou mesmo assim, abra o arquivo XLSX/PDF e confira as colunas esperadas: ${perfilInfo.tipoArquivoEsperado}.`,
+          severity: hasAnyInsert ? 'Verificar' : 'Ação necessária',
+        });
+      }
     }
     if (err.length > 0) {
       if (isDatabaseClosedError(err as unknown as Error)) {
@@ -27892,37 +27968,37 @@ export async function sendImportFinishedEmailNotification(input: {
         });
       } else if (/unauthorized|401|403|forbidden|access.?denied|permiss/i.test(errLower)) {
         issues.push({
-          title: 'Sem permissão para acessar o SharePoint / Graph',
-          cause: 'Credencial Graph expirou, ou o usuário/serviço não tem permissão de leitura na pasta SharePoint informada.',
-          action: '1) Teste abrindo a URL SharePoint com o mesmo usuário da automação — se não abre lá, peça acesso ao dono da pasta; 2) Se permissão está ok, valide AZURE_TENANT_ID / CLIENT_ID / CLIENT_SECRET no .env do backend.',
+          title: `🚫 SEM PERMISSÃO de leitura na pasta SharePoint (Perfil: ${perfilInfo.nomePerfilAmigavel})`,
+          cause: `O serviço NÃO consegue ler a pasta. Isso NÃO é bug do código.\n\nDiagnóstico exato: a credencial do Graph está SEM ACESSO na URL do SharePoint que você configurou para "${perfilInfo.nomePerfilAmigavel}".\n\nAs 3 causas + ações, em ordem de probabilidade:\n\n1) 🚫 MAIS COMUM: VOCÊ (usuário humano) NÃO TEM PERMISSÃO na pasta. Para testar: COLE a URL SharePoint ABAIXO no seu navegador. Se aparecer "Desculpe, você não tem acesso → o erro é PERMISSÃO DA PASTA.\n2) 🚫 SEGUNDO MAIS COMUM: o Service Principal (aplicativo Azure) não foi adicionado à permissão "Leitura" do Site/Site SharePoint.\n3) Terceiro: Client Secret do Azure AD expirou.`,
+          action: `PASSO-A-PASSO PARA CORRIGIR:\n\n(a) ABRA a URL SharePoint no final deste e-mail usando SEU USUÁRIO.\n(b) Se você NÃO CONSEGUIR abrir → CLIQUE em "Solicitar acesso" ou peça ao DONO DA PASTA (gestor da área) para adicionar VOCÊ (e a TI) com PERMISSÃO DE LEITURA.\n(c) Se VOCÊ CONSEGUIR abrir mas o sistema não → informe a TI: "Adicionar Service Principal App Registration Portal Administrativo como Leitura no site SharePoint."\n(d) Espere 2 minutos após dar permissão e rode a importação novamente.`,
           severity: 'Ação necessária',
         });
       } else if (/not.?found|404|itemNotFound/i.test(errLower)) {
         issues.push({
-          title: 'Pasta ou arquivo não encontrado no SharePoint',
-          cause: 'URL da pasta SharePoint foi alterada, ou a subpasta (ANO/MÊS) não existe ainda.',
-          action: '1) Cole a URL SharePoint no navegador e confirme que a pasta abre; 2) Se mudou o ano/mês, ajuste a URL na configuração de automação.',
+          title: `Pasta SharePoint NÃO EXISTE ou URL mudou (Perfil: ${perfilInfo.nomePerfilAmigavel})`,
+          cause: `A URL configurada na Automação para ${perfilInfo.pastaAlvo} foi removida, renomeada, ou o ANO/MÊS selecionado ainda não foi criado.`,
+          action: `1) Abra a URL SharePoint NO FINAL do e-mail. Se der erro 404 → URL ERRADA. 2) Na tela Automação, atualize a URL Configuração → Colar a URL NOVA. 3) Não se esqueça de criar a subpasta "Relatório Sisbr" no caso do perfil SISBR, ou a pasta do MÊS/ANO.`,
           severity: 'Ação necessária',
         });
       } else if (/corrupt|invalid file|unsupported format|password|protect|couldn'?t be parsed|buffer|xlsx|sheet|workbook/i.test(errLower)) {
         issues.push({
-          title: 'Arquivo Excel inválido, corrompido ou protegido por senha',
-          cause: 'Arquivo não pôde ser lido: pode estar incompleto (download interrompido), protegido por senha, salvo em formato antigo, ou ainda aberto/lockado no Excel de outra pessoa.',
-          action: '1) Tente abrir o arquivo manualmente no Excel — se pede senha, salve uma cópia sem senha; 2) Salve novamente como .xlsx; 3) Certifique-se que ninguém mais está com o arquivo aberto.',
+          title: `⚠️ Arquivo inválido, corrompido ou com senha (${perfilInfo.nomePerfilAmigavel})`,
+          cause: `Não consegui abrir um dos arquivos.\n\nCausas típicas no ${perfilInfo.nomePerfilAmigavel}: (a) arquivo estava aberto NO EXCEL de outra pessoa (LOCKED); (b) download de e-mail incompleto; (c) arquivo protegido por SENHA; (d) renomeou extensão manualmente (ex: .msg → .xlsx SEM converter); (e) planilha tem MACROS e corrupção do Excel; (f) PDF criptografado pelo emissor.`,
+          action: `1) FECHE o arquivo se estiver aberto no Excel/PDF Reader de OUTRAS PESSOAS. 2) Tente ABRIR o arquivo MANUALMENTE — se pede SENHA → Salvar como → remover senha. 3) Se foi baixado de e-mail, baixe NOVAMENTE. 4) Se XLSX: Arquivo → Informações → Verificar se tem "Pasta de Trabalho Protegida" → Clique em "Habilitar Edição".`,
           severity: 'Ação necessária',
         });
       } else if (/duplicate|hash|já exist|already exis|same file|same content|imported_row_hashes/i.test(errLower) || (input.totalRowsInserted === 0 && input.totalRowsSkipped > 0)) {
         issues.push({
-          title: 'Arquivo ou linhas já haviam sido importadas antes',
-          cause: 'Antiduplicata ativou — hash do arquivo ou das linhas já existe no banco. É esperado se você rodou o mesmo arquivo mais de uma vez.',
+          title: `Arquivo ou linhas já haviam sido importadas (${perfilInfo.nomePerfilAmigavel})`,
+          cause: `Antiduplicata ativou — hash do arquivo ou das linhas já existe no banco. É esperado se você rodou o mesmo arquivo mais de uma vez no ${perfilInfo.nomePerfilAmigavel}.`,
           action: 'Se quer importar de novo, primeiro remova as linhas antigas da tabela ou use um arquivo com dados novos.',
           severity: 'Informativo',
         });
       } else if (/historicoStrict|cred\.?ted|histórico|filtro histó|skipped by historico strict/i.test(errLower)) {
         issues.push({
-          title: 'Filtro estrito do perfil rejeitou linhas',
-          cause: 'O perfil exige um valor exato para alguma coluna (ex: HISTÓRICO = CRÉD.TED-STR) e algumas linhas tem valor diferente.',
-          action: 'Confira no arquivo se todas as linhas que quer importar possuem exatamente o valor esperado no filtro do perfil.',
+          title: `Filtro estrito do perfil rejeitou linhas (${perfilInfo.nomePerfilAmigavel})`,
+          cause: `O perfil "${perfilInfo.nomePerfilAmigavel}" exige um valor exato para alguma coluna (ex: HISTÓRICO = CRÉD.TED-STR em alguns perfis de EXTRATO) e algumas linhas tem valor DIFERENTE.\n\n${perfilInfo.notasPerfil ? 'Nota do perfil: ' + perfilInfo.notasPerfil : ''}`,
+          action: 'Confira no arquivo se todas as linhas que quer importar possuem exatamente o valor esperado no filtro do perfil. Abra a tabela Excel e filtre a coluna HISTÓRICO / correspondente para ver valores diferentes.',
           severity: 'Verificar',
         });
       } else {
@@ -27952,6 +28028,8 @@ export async function sendImportFinishedEmailNotification(input: {
               <tr>
                 <td colspan="2">
                   <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#fff;margin:0 6px 6px 0;">${display.pillLabel}</span>
+                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:900;background:#1e3a8a;color:#eff6ff;margin:0 6px 6px 0;">📋 Perfil: ${escapeHtml(perfilInfo.nomePerfilAmigavel)}</span>
+                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#065f46;color:#ecfdf5;margin:0 6px 6px 0;">✅ Espera: ${escapeHtml(perfilInfo.tipoArquivoEsperado)}</span>
                   <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#0f172a;color:#f8fafc;margin:0 6px 6px 0;">${escapeHtml(forceKindDisplay)}</span>
                   <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#334155;color:#f8fafc;margin:0 0 6px;">Modo ${escapeHtml(modeDisplay)}</span>
                 </td>
@@ -28005,13 +28083,22 @@ export async function sendImportFinishedEmailNotification(input: {
 
     const issuesHtml = issues.length > 0
       ? (() => {
-          const headerColor = issues.some(i => i.severity === 'Ação necessária') ? '#b91c1c' : '#b45309';
+          const hasAcao = issues.some(i => i.severity === 'Ação necessária');
+          const hasVer = issues.some(i => i.severity === 'Verificar');
+          const hasInfo = issues.some(i => i.severity === 'Informativo');
+          const headerColor = hasAcao ? '#b91c1c' : hasVer ? '#b45309' : '#075985';
+          const headerText = hasAcao
+            ? '🔴 Atenção: é preciso agir'
+            : hasVer
+            ? '⚠️ Atenção: recomendamos verificar'
+            : '📋 Observações';
           const cards = issues.map((it) => {
             const sevColor = it.severity === 'Ação necessária'
               ? { bg: '#fef2f2', border: '#fecaca', label: '#b91c1c', icon: '🔴' }
               : it.severity === 'Verificar'
               ? { bg: '#fffbeb', border: '#fde68a', label: '#b45309', icon: '🟡' }
-              : { bg: '#f1f5f9', border: '#cbd5e1', label: '#334155', icon: '🔵' };
+              : { bg: '#eff6ff', border: '#bfdbfe', label: '#075985', icon: '🔵' };
+            const sevLabel = it.severity === 'Informativo' ? 'Informativo' : it.severity;
             return `
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:12px;border-radius:14px;background:${sevColor.bg};border-left:5px solid ${sevColor.label};border-top:1px solid ${sevColor.border};border-right:1px solid ${sevColor.border};border-bottom:1px solid ${sevColor.border};">
                 <tr>
@@ -28022,18 +28109,18 @@ export async function sendImportFinishedEmailNotification(input: {
                         <td valign="top">
                           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
                             <td valign="middle" style="padding:0 8px 8px 0;">
-                              <span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${sevColor.label};color:#fff;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">${it.severity}</span>
+                              <span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${sevColor.label};color:#fff;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">${sevLabel}</span>
                             </td>
                           </tr></table>
                           <div style="font-size:14.5px;font-weight:900;color:#0f172a;line-height:1.35;margin:0 0 10px;">${escapeHtml(it.title)}</div>
                           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:12px 0;width:calc(100% + 24px);margin-left:-12px;">
                             <tr>
                               <td width="50%" valign="top" style="background:rgba(255,255,255,.55);border-radius:10px;padding:10px 12px;border:1px solid rgba(0,0,0,0.04);">
-                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">🧭 Causa provável</div>
-                                <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;">${escapeHtml(it.cause)}</div>
+                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">🧭 Por que aconteceu</div>
+                                <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;white-space:pre-wrap;">${escapeHtml(it.cause)}</div>
                               </td>
                               <td width="50%" valign="top" style="background:#ffffff;border-radius:10px;padding:10px 12px;border:1px solid ${sevColor.border};">
-                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">✅ Ação recomendada</div>
+                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">✅ O que fazer</div>
                                 <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;white-space:pre-wrap;">${escapeHtml(it.action)}</div>
                               </td>
                             </tr>
@@ -28049,7 +28136,7 @@ export async function sendImportFinishedEmailNotification(input: {
           }).join('');
           return `
             <div style="margin:0 0 26px;">
-              <div style="font-size:16px;font-weight:900;letter-spacing:-.01em;color:${headerColor};margin-bottom:12px;">⚠️ Problemas encontrados</div>
+              <div style="font-size:16px;font-weight:900;letter-spacing:-.01em;color:${headerColor};margin-bottom:12px;">${headerText}</div>
               ${cards}
             </div>`;
         })()
@@ -28058,8 +28145,8 @@ export async function sendImportFinishedEmailNotification(input: {
              <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
                <td width="30" valign="middle" style="font-size:20px;padding:0 10px 0 0;line-height:1;">✅</td>
                <td valign="middle">
-                 <div style="font-weight:900;font-size:14px;color:#14532d;margin:0 0 3px;line-height:1.2;">Nenhum problema detectado</div>
-                 <div style="font-size:12.5px;line-height:1.55;color:#14532d;font-weight:600;">Tudo correu bem. Pode fechar este e-mail.</div>
+                 <div style="font-weight:900;font-size:14px;color:#14532d;margin:0 0 3px;line-height:1.2;">Tudo certo</div>
+                 <div style="font-size:12.5px;line-height:1.55;color:#14532d;font-weight:600;">Nenhum problema encontrado. Pode fechar este e-mail.</div>
                </td>
              </tr></table>
            </td></tr>
@@ -28070,10 +28157,10 @@ export async function sendImportFinishedEmailNotification(input: {
           <thead>
             <tr style="background:#0f172a;color:#f8fafc;">
               <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Arquivo</th>
-              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Tabela alvo</th>
-              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Inseridas</th>
-              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Puladas</th>
-              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Resultado</th>
+              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Onde foi salvo</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Novas</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Já existiam</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Situação</th>
             </tr>
           </thead>
           <tbody>
@@ -28082,9 +28169,9 @@ export async function sendImportFinishedEmailNotification(input: {
               const skip = Number(f.skippedRows || 0);
               let statusLabel = '—';
               let statusColor = '#334155';
-              if (insOk && skip === 0) { statusLabel = '100% importado'; statusColor = '#14532d'; }
-              else if (insOk && skip > 0) { statusLabel = 'Parcial (tem pulada)'; statusColor = '#92400e'; }
-              else if (!insOk && skip > 0) { statusLabel = 'Pulado/tudo duplicado'; statusColor = '#991b1b'; }
+              if (insOk && skip === 0) { statusLabel = 'Tudo novo salvo'; statusColor = '#14532d'; }
+              else if (insOk && skip > 0) { statusLabel = 'Salvo (tem repetido)'; statusColor = '#92400e'; }
+              else if (!insOk && skip > 0) { statusLabel = 'Já importado antes'; statusColor = '#075985'; }
               else { statusLabel = 'Sem alterações'; statusColor = '#334155'; }
               const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
               return `<tr style="background:${rowBg};color:#0f172a;">
@@ -28102,21 +28189,21 @@ export async function sendImportFinishedEmailNotification(input: {
     const techHtml = `
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:26px;border-radius:12px;background:#f8fafc;border:1px solid #cbd5e1;">
         <tr><td style="padding:14px 16px;">
-          <div style="font-weight:900;font-size:12.5px;letter-spacing:.02em;color:#334155;margin:0 0 10px;">ℹ️ Dados técnicos (só para TI)</div>
+          <div style="font-weight:900;font-size:12.5px;letter-spacing:.02em;color:#334155;margin:0 0 10px;">ℹ️ Dados técnicos (só para a TI)</div>
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
             <tr>
               <td width="50%" valign="top" style="padding:0 12px 8px 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Tipo importação:</b> ${escapeHtml(forceKindDisplay)}</td>
               <td width="50%" valign="top" style="padding:0 0 8px 12px;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Modo:</b> ${escapeHtml(modeDisplay)}</td>
             </tr>
             <tr>
-              <td valign="top" style="padding:0 12px 8px 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Outcome raw:</b> ${escapeHtml(input.outcome)}</td>
-              <td valign="top" style="padding:0 0 8px 12px;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Outcome efetivo:</b> ${escapeHtml(effectiveOutcome)}</td>
+              <td valign="top" style="padding:0 12px 8px 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Resultado sistema:</b> ${escapeHtml(input.outcome)}</td>
+              <td valign="top" style="padding:0 0 8px 12px;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Resultado exibido:</b> ${escapeHtml(effectiveOutcome)}</td>
             </tr>
             <tr>
               <td colspan="2" valign="top" style="padding:4px 0 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Perfis usados:</b> ${input.importedFiles.length === 0 ? 'Nenhum' : input.importedFiles.map(f => `${escapeHtml(f.fileName)} → ${escapeHtml(f.profileId || '(sem perfil)')}`).join('<br>')}</td>
             </tr>
           </table>
-          ${err ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:10px;"><tr><td style="padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.45;"><b style="font-weight:900;">Stack/mensagem bruta:</b><br>${escapeHtml(err)}</td></tr></table>` : ''}
+          ${err ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:10px;"><tr><td style="padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.45;"><b style="font-weight:900;">Detalhe técnico:</b><br>${escapeHtml(err)}</td></tr></table>` : ''}
         </td></tr>
       </table>
     `;
@@ -28126,8 +28213,8 @@ export async function sendImportFinishedEmailNotification(input: {
       tableRowsHtml + techHtml;
 
     const html = buildEmailTemplateHtml({
-      title: display.title,
-      subtitle: `${display.summary} • ${forceKindDisplay} • ${modeDisplay.toUpperCase()}`,
+      title: 'Portal Administrativo',
+      subtitle: `${display.emoji} ${display.title} • ${forceKindDisplay}`,
       contentHtml: finalContentHtml,
       accentColor: display.accent,
       introHtml: `<span style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${display.emoji} ${display.pillLabel}</span>`,
@@ -28135,10 +28222,12 @@ export async function sendImportFinishedEmailNotification(input: {
     const dataIso = new Date().toISOString().replace('T', ' ').slice(0, 16);
     const subjectPrefix =
       effectiveOutcome === 'success' ? '✅' :
+      effectiveOutcome === 'dup_ok'  ? '📬' :
       effectiveOutcome === 'partial' ? '⚠️' :
       effectiveOutcome === 'failed'  ? '❌' : '⏹️';
     const subjectStatus =
       effectiveOutcome === 'success' ? 'OK' :
+      effectiveOutcome === 'dup_ok'  ? 'Sem dados novos' :
       effectiveOutcome === 'partial' ? 'PARCIAL' :
       effectiveOutcome === 'failed'  ? 'FALHA' : 'CANCELADA';
     const subject = `[Portal Administrativo] ${subjectPrefix} Importação ${subjectStatus} • ${forceKindDisplay} (${dataIso})`;

@@ -465,9 +465,9 @@ export class ConsignadoController {
     const forceKind = String(body?.forceKind ?? scenario === 'success' ? 'Extrato TODOS' : scenario === 'partial' ? 'Extratos Recurso' : 'Extratos Recurso (SP)').trim() || 'Extrato TODOS';
 
     const buildDemoPayload = (outcome: 'success' | 'partial' | 'failed') => {
-      const baseFiles = [
-        { fileName: 'TODOS-AGOSTO-2026.xlsx', targetTable: 'extratos_todos_ago2026', kind: forceKind, profileId: 'extratos_todos_go', insertedRows: 69, skippedRows: 0 },
-        { fileName: 'TODOS-AGOSTO-2026-APOIO.xlsx', targetTable: 'extratos_todos_ago2026_apoio', kind: forceKind, profileId: 'extratos_todos_go', insertedRows: 31, skippedRows: 3 },
+      const baseDupOkFiles = [
+        { fileName: 'ELETRA - FUNDACAO DE PREVIDENCIA PRIVADA.pdf', targetTable: 'relatorio_consignado', kind: forceKind, profileId: 'relatorio_orgao_sisbr', insertedRows: 0, skippedRows: 2 },
+        { fileName: 'GOIAS MP PROCURADORIA GERAL DE JUSTICA.pdf', targetTable: 'relatorio_consignado', kind: forceKind, profileId: 'relatorio_orgao_sisbr', insertedRows: 0, skippedRows: 248 },
       ];
       if (outcome === 'success') {
         return {
@@ -476,7 +476,7 @@ export class ConsignadoController {
           totalFilesMatched: 2,
           totalRowsInserted: 100,
           totalRowsSkipped: 0,
-          importedFiles: baseFiles.map(f => ({ ...f, skippedRows: 0 })),
+          importedFiles: baseDupOkFiles.map((f, i) => ({ ...f, insertedRows: i === 0 ? 69 : 31, skippedRows: 0 })),
           errorMessage: null as string | null,
         };
       }
@@ -485,9 +485,9 @@ export class ConsignadoController {
           outcome: 'partial' as const,
           totalFilesScanned: 8,
           totalFilesMatched: 2,
-          totalRowsInserted: 69,
-          totalRowsSkipped: 31,
-          importedFiles: baseFiles,
+          totalRowsInserted: 0,
+          totalRowsSkipped: 250,
+          importedFiles: baseDupOkFiles,
           errorMessage: null as string | null,
         };
       }
@@ -497,7 +497,7 @@ export class ConsignadoController {
         totalFilesMatched: 0,
         totalRowsInserted: 0,
         totalRowsSkipped: 0,
-        importedFiles: [] as typeof baseFiles,
+        importedFiles: [] as typeof baseDupOkFiles,
         errorMessage: 'Nenhum arquivo bateu com o perfil de aprendizado. Verifique Tipo de importação e nome dos arquivos.' as string | null,
       };
     };
