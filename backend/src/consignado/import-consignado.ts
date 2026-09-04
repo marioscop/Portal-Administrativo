@@ -32154,7 +32154,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Mover arquivo para subpasta Importados (Graph API), se perfil pedir e arquivo teve alguma interação OK (inserida ou duplicada pulada)
       let moveResult: { ok: boolean; status?: number; error?: string; destFolder?: string; parentIdUsed?: string; parentIdResolvedFromFolderPath?: boolean; folderPath?: string; driveIdPrefix?: string } = { ok: false };
       if (
-        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo' || kindLower === 'extratos' || kindLower === 'relatorio') &&
+        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo' || kindLower === 'recurso_alego' || kindLower === 'recurso_tjgo' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') &&
         moveToImportados &&
         driveId &&
         file?.id &&
