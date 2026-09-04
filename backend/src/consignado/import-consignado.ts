@@ -7085,6 +7085,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['ALEGO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-17 — RECURSO ADFEGO =========
@@ -7340,6 +7341,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Demais Orgão'],
       ignoreImportados: false,
       checkDuplicateContent: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   upsertLearningProfile(db, {
@@ -7355,6 +7357,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Orgão/TJGO', 'TJGO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   upsertLearningProfile(db, {
@@ -26931,6 +26934,14 @@ export async function setConsignadoAccessEmails(opts: {
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
 
+  // ===== REGRAS IMUTÁVEIS ACESSOS (conforme regra usuário 2026-09-04):
+  //   1. Deploy NUNCA apaga/alterar acessos. Apenas a UI (este setConsignadoAccessEmails) pode alterar.
+  //   2. NÃO permite salvar com menos de 2 e-mails (mínimo fixed admin + pelo menos 1 usuário).
+  //   3. NÃO executa mais DELETE * full (era causa de perder acessos ao salvar com UI carregada vazia).
+  //      Agora é UPSERT incremental: atualiza os que vieram + insere novos; NÃO apaga NINGUÉM
+  //      que exista no banco mesmo que não venha no body (segurança máxima contra perda acidental).
+  // ==================
+
   const incomingEntries = Array.isArray(opts.entries)
     ? opts.entries
     : (opts.emails ?? []).map((email) => ({
@@ -26950,6 +26961,13 @@ export async function setConsignadoAccessEmails(opts: {
     .filter((e) => Boolean(e.email))
     .filter((e, i, arr) => arr.findIndex((x) => x.email === e.email) === i);
 
+  // [REGRA B] Salvar com <2 emails = ERRO 400: mínimo fixed + 1 usuário.
+  if (normalized.length < 2) {
+    throw new Error(
+      `Não é permitido salvar acessos com menos de 2 e-mails (mínimo: 1 administrador fixo + pelo menos 1 usuário). Tamanho recebido=${normalized.length}.`,
+    );
+  }
+
   const fixedSaved = normalized.find((e) => e.email === FIXED_ACCESS_EMAIL);
   const fixedEntry = {
     email: FIXED_ACCESS_EMAIL,
@@ -26963,25 +26981,34 @@ export async function setConsignadoAccessEmails(opts: {
     ? normalized.map((e) => (e.email === FIXED_ACCESS_EMAIL ? fixedEntry : e))
     : [fixedEntry, ...normalized];
 
+  // [REGRA C] UPSERT INCREMENTAL (não executa DELETE FROM full).
+  // Estratégia: BEGIN → UPDATE cada email existente → INSERT OR IGNORE novos → COMMIT
+  // Resultado: e-mails novos aparecem; existentes são atualizados; e-mails do DB que
+  // não vieram no body PERMANECEM intactos (à prova de bug de carregamento UI vazio).
   db.run('BEGIN;');
   try {
-    db.run('DELETE FROM consignado_access_emails;');
     const createdAt = new Date().toISOString();
-    const stmt = db.prepare(
+    const stmtUpd = db.prepare(
+      `UPDATE consignado_access_emails SET role=?, menu_permissions_json=?, flow_stage_permissions_json=? WHERE email=?;`,
+    );
+    const stmtIns = db.prepare(
       `INSERT OR IGNORE INTO consignado_access_emails (email, role, menu_permissions_json, flow_stage_permissions_json, created_at) VALUES (?, ?, ?, ?, ?);`,
     );
     try {
       for (const e of entries) {
-        stmt.run([
-          e.email,
-          e.role,
-          JSON.stringify(e.menus),
-          JSON.stringify(e.flowStages),
-          createdAt,
-        ]);
+        const menusJson = JSON.stringify(e.menus);
+        const flowJson = JSON.stringify(e.flowStages);
+        const changesBefore = db.getRowsModified();
+        stmtUpd.run([e.role, menusJson, flowJson, e.email]);
+        const upd = db.getRowsModified() - changesBefore;
+        if (!upd) {
+          // UPDATE não alterou → e-mail não existe → INSERT OR IGNORE novo
+          stmtIns.run([e.email, e.role, menusJson, flowJson, createdAt]);
+        }
       }
     } finally {
-      try { if (stmt && typeof stmt.free === 'function') stmt.free(); } catch {}
+      try { if (stmtUpd && typeof stmtUpd.free === 'function') stmtUpd.free(); } catch {}
+      try { if (stmtIns && typeof stmtIns.free === 'function') stmtIns.free(); } catch {}
     }
     db.run('COMMIT;');
   } catch (e) {
@@ -31052,7 +31079,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         : String(file.name);
       const anyFile = file as unknown as { folderPath?: string; parentId?: string };
       let parentFolderId: string | null = null;
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_alego' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'recurso_tjgo' || kindLower === 'recurso_mpgo' || kindLower === 'extratos' || kindLower === 'relatorio') {
         parentFolderId = typeof anyFile.parentId === 'string' && anyFile.parentId.trim() ? anyFile.parentId.trim() : null;
         // Fallback: se não veio parentId mas temos folderPath (agora JÁ é caminho completo) + driveId → resolver via path direto.
         if (!parentFolderId && driveId && typeof anyFile.folderPath === 'string' && anyFile.folderPath.length > 0 && anyFile.folderPath !== 'base') {
@@ -31074,7 +31101,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       const strictMinMatches = Number(profile.resolvedOptions?.strictColumnMinMatches ?? 5) || 0;
       const extractCompet = Boolean(profile.resolvedOptions?.extractCompetenciaFromTopHeader ?? false);
       // Mover para Importados: default TRUE quando kind=relatorio (regra oficial), a menos que explicitamente desativado via resolvedOptions.
-      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_mpgo';
+      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_alego' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'recurso_tjgo' || kindLower === 'recurso_mpgo';
       const moveToImportados = profile.resolvedOptions?.moveToImportadosSubfolderAfterImport === false
         ? false
         : Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? moveToImportadosDefaultForKind);
@@ -32092,7 +32119,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Mover arquivo para subpasta Importados (Graph API), se perfil pedir e arquivo teve alguma interação OK (inserida ou duplicada pulada)
       let moveResult: { ok: boolean; status?: number; error?: string; destFolder?: string; parentIdUsed?: string; parentIdResolvedFromFolderPath?: boolean; folderPath?: string; driveIdPrefix?: string } = { ok: false };
       if (
-        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') &&
+        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo' || kindLower === 'extratos' || kindLower === 'relatorio') &&
         moveToImportados &&
         driveId &&
         file?.id &&
