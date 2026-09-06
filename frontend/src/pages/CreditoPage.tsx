@@ -35,6 +35,16 @@ import {
   Printer,
   FileSpreadsheet,
   GitBranch,
+  Edit3,
+  Save,
+  ToggleLeft,
+  ToggleRight,
+  Bell,
+  BellOff,
+  PlayCircle,
+  CalendarClock,
+  RefreshCcwDot,
+  Settings2,
 } from 'lucide-react'
 
 import ReactECharts from 'echarts-for-react'
@@ -97,6 +107,84 @@ const ACCESS_FLOW_STAGE_OPTIONS: Array<{
   { id: 'credito', label: 'Crédito' },
   { id: 'negocios', label: 'Negócios' },
 ]
+
+type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+interface ScheduleHorarioEntry { hora: number; minuto: number }
+interface AutomationScheduleRecord {
+  id: string
+  title: string
+  kind: 'runImportConsignado' | 'importByLearningProfileFromFolderUrl'
+  target?: string | null
+  folderUrl?: string | null
+  /** @deprecated */
+  hora: number
+  /** @deprecated */
+  minuto: number
+  horarios?: ScheduleHorarioEntry[]
+  diasUteisOnly: boolean
+  diasSemana?: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>
+  enabled: boolean
+  createdAtIso: string
+  updatedAtIso?: string
+  lastRunAtIso?: string
+  lastRunAtPerHorario?: Record<string, string>
+  lastJobId?: string
+  lastStatus?: JobStatus
+  nextRunAtIso?: string
+  notificationTeams?: boolean
+}
+
+const SCHED_KIND_LABELS: Record<AutomationScheduleRecord['kind'], string> = {
+  runImportConsignado: 'Lote Geral (padrão)',
+  importByLearningProfileFromFolderUrl: 'Perfil específico (pasta)',
+}
+
+const SCHED_TARGETS: Array<{ value: string; label: string; desc: string }> = [
+  { value: 'both', label: 'Completo (Extratos + Relatório + Recursos)', desc: 'Roda todos os órgãos em série (padrão)' },
+  { value: 'extratos', label: 'Apenas Extratos', desc: 'Conciliação bancária de margem' },
+  { value: 'relatorio', label: 'Apenas Relatório SISBR', desc: 'CSV enviado pela matriz Sicoob' },
+  { value: 'recurso_alego', label: 'Recurso ALEGO', desc: 'Assembleia Legislativa de Goiás' },
+  { value: 'recurso_adfego', label: 'Recurso ADFEGO', desc: 'Depósitos judiciais FEGO' },
+  { value: 'recurso_tce', label: 'Recurso TCE-GO', desc: 'Tribunal de Contas do Estado' },
+  { value: 'recurso_tcm', label: 'Recurso TCM-GO', desc: 'Tribunal de Contas dos Municípios' },
+  { value: 'recurso_tre', label: 'Recurso TRE-GO', desc: 'Tribunal Regional Eleitoral' },
+  { value: 'recurso_trt', label: 'Recurso TRT-18', desc: 'Tribunal Regional do Trabalho' },
+  { value: 'recurso_eletra', label: 'Recurso ELETRO-GO', desc: 'Goiás Energia S.A.' },
+  { value: 'recurso_mpgo', label: 'Recurso MPGO', desc: 'Ministério Público de Goiás' },
+  { value: 'recurso_tjgo', label: 'Recurso TJGO', desc: 'Tribunal de Justiça de Goiás' },
+  { value: 'recurso_neoconsig_demais', label: 'Demais Neoconsig', desc: 'Outros órgãos via padrão Neoconsig' },
+  { value: 'extratos_todos', label: 'Extrato TODOS', desc: 'TODOS-MÊS-ANO.xlsx / Conta Corrente (CRÉD.TED-STR)' },
+]
+
+const WEEKDAYS_PT: Record<0 | 1 | 2 | 3 | 4 | 5 | 6, string> = {
+  0: 'Dom', 1: 'Seg', 2: 'Ter', 3: 'Qua', 4: 'Qui', 5: 'Sex', 6: 'Sáb',
+}
+
+function schedFmtHora(h: ScheduleHorarioEntry): string {
+  const pad = (n: number) => (n < 10 ? '0' + n : String(n))
+  return `${pad(h.hora)}:${pad(h.minuto)}`
+}
+function schedFmtIso(iso?: string): string {
+  if (!iso) return '–'
+  try {
+    const d = new Date(iso)
+    if (isNaN(d.getTime())) return iso
+    return d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'medium' })
+  } catch { return iso }
+}
+function schedLblStyle(): React.CSSProperties {
+  return { display: 'block', fontSize: 11.5, fontWeight: 750, color: 'rgba(15, 23, 42, 0.78)', marginBottom: 6, letterSpacing: 0.02 }
+}
+function schedInputStyle(): React.CSSProperties {
+  return { width: '100%', padding: '10px 12px', borderRadius: 11, border: '1px solid #e2e8f0', background: '#fff', color: '#0f172a', fontSize: 13, fontWeight: 550, outline: 'none', transition: 'border 0.15s, box-shadow 0.15s' }
+}
+function schedBtnSecondary(): React.CSSProperties {
+  return { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '8px 12px', borderRadius: 10, border: '1px solid #e2e8f0', background: '#fff', color: '#0f172a', fontWeight: 650, fontSize: 12, cursor: 'pointer' }
+}
+function schedThStyle(opts?: { textAlign?: string }): React.CSSProperties {
+  return { textAlign: (opts?.textAlign || 'left') as any, padding: '10px 14px', fontSize: 10.5, fontWeight: 800, letterSpacing: 0.08, textTransform: 'uppercase' as const, color: '#475569', borderBottom: '1px solid #e2e8f0' }
+}
 
 function normalizeAccessMenuPermissions(value: unknown): AccessMenuPermission[] {
   const raw = Array.isArray(value) ? value : []
@@ -1427,6 +1515,37 @@ export default function CreditoPage() {
   const [homeConciliacaoStatusesLoading, setHomeConciliacaoStatusesLoading] = useState(false)
   const [homeConciliacaoStatusesError, setHomeConciliacaoStatusesError] = useState<string | null>(null)
 
+  // ---------- SCHEDULES ----------
+  const [schedules, setSchedules] = useState<AutomationScheduleRecord[]>([])
+  const [schedulesLoading, setSchedulesLoading] = useState(false)
+  const [schedModalOpen, setSchedModalOpen] = useState(false)
+  const [schedEditingId, setSchedEditingId] = useState<string | null>(null)
+  const [schedDraft, setSchedDraft] = useState<{
+    title: string
+    kind: AutomationScheduleRecord['kind']
+    target: string
+    folderUrl: string
+    horarios: ScheduleHorarioEntry[]
+    diasUteisOnly: boolean
+    diasSemana: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>
+    enabled: boolean
+    notificationTeams: boolean
+  }>({
+    title: '',
+    kind: 'runImportConsignado',
+    target: 'both',
+    folderUrl: '',
+    horarios: [
+      { hora: 8, minuto: 0 },
+      { hora: 12, minuto: 30 },
+      { hora: 18, minuto: 0 },
+    ],
+    diasUteisOnly: true,
+    diasSemana: [],
+    enabled: true,
+    notificationTeams: false,
+  })
+
   const isMain = view === 'home' || view === 'dashboard'
   const closedVencimentos = Array.isArray((conciliacaoData as any)?.closed?.closedVencimentos)
     ? ((conciliacaoData as any).closed.closedVencimentos as string[])
@@ -2646,6 +2765,194 @@ export default function CreditoPage() {
     }
   }, [view])
 
+  // ---------- SCHEDULES HANDLERS ----------
+  async function loadSchedules() {
+    try {
+      setSchedulesLoading(true)
+      const res = await fetch('/api/consignado/automation/schedules', { credentials: 'same-origin' })
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw new Error(text || `HTTP ${res.status}`)
+      }
+      const list = (await res.json().catch(() => [])) as AutomationScheduleRecord[]
+      setSchedules(Array.isArray(list) ? list : [])
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Falha ao carregar agendamentos.')
+    } finally {
+      setSchedulesLoading(false)
+    }
+  }
+
+  function openSchedCreate() {
+    setSchedEditingId(null)
+    setSchedDraft({
+      title: '',
+      kind: 'runImportConsignado',
+      target: 'both',
+      folderUrl: '',
+      horarios: [
+        { hora: 8, minuto: 0 },
+        { hora: 12, minuto: 30 },
+        { hora: 18, minuto: 0 },
+      ],
+      diasUteisOnly: true,
+      diasSemana: [],
+      enabled: true,
+      notificationTeams: false,
+    })
+    setSchedModalOpen(true)
+  }
+
+  function openSchedEdit(s: AutomationScheduleRecord) {
+    setSchedEditingId(s.id)
+    const normHorarios = (s.horarios && s.horarios.length > 0) ? s.horarios.map(h => ({ hora: h.hora, minuto: h.minuto })) : [{ hora: s.hora || 8, minuto: s.minuto || 0 }]
+    setSchedDraft({
+      title: s.title || '',
+      kind: s.kind,
+      target: String(s.target || 'both'),
+      folderUrl: s.folderUrl || '',
+      horarios: normHorarios,
+      diasUteisOnly: Boolean(s.diasUteisOnly),
+      diasSemana: (s.diasSemana && s.diasSemana.length > 0) ? [...s.diasSemana] : [],
+      enabled: Boolean(s.enabled),
+      notificationTeams: Boolean(s.notificationTeams),
+    })
+    setSchedModalOpen(true)
+  }
+
+  async function handleSchedToggle(id: string, force?: boolean) {
+    try {
+      const res = await fetch(`/api/consignado/automation/schedules/${encodeURIComponent(id)}/toggle`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(typeof force === 'boolean' ? { enabled: force } : {}),
+      })
+      const data = (await res.json().catch(() => null)) as null | { ok: boolean; record?: AutomationScheduleRecord; reason?: string }
+      if (res.ok && data?.ok && data.record) {
+        setSchedules(prev => prev.map(x => x.id === id ? data!.record! : x))
+        toast.success(`Agendamento ${data.record.enabled ? 'HABILITADO' : 'DESABILITADO'}: ${data.record.title}`)
+      } else toast.warning(data?.reason || 'Falha ao alternar agendamento.')
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Falha ao alternar.') }
+  }
+
+  async function handleSchedRunNow(id: string) {
+    try {
+      const res = await fetch(`/api/consignado/automation/schedules/${encodeURIComponent(id)}/run`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      })
+      const data = (await res.json().catch(() => null)) as null | { ok: boolean; reason?: string; jobId?: string; accepted?: boolean }
+      if (res.ok && data?.ok) {
+        toast.success(data.jobId ? `Job ${String(data.jobId).slice(-8)} disparado.` : 'Job disparado com sucesso.')
+        await loadSchedules()
+      } else toast.warning(data?.reason || 'Falha ao disparar.')
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Falha ao executar agora.') }
+  }
+
+  async function handleSchedDelete(id: string) {
+    if (!window.confirm('Tem certeza que deseja EXCLUIR este agendamento? Esta ação não pode ser desfeita.')) return
+    try {
+      const res = await fetch(`/api/consignado/automation/schedules/${encodeURIComponent(id)}`, {
+        method: 'DELETE', credentials: 'same-origin',
+      })
+      const data = (await res.json().catch(() => null)) as null | { ok: boolean; reason?: string }
+      if (res.ok && data?.ok) {
+        setSchedules(prev => prev.filter(x => x.id !== id))
+        toast.success('Agendamento excluído.')
+      } else toast.warning(data?.reason || 'Não foi possível excluir.')
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Falha ao excluir.') }
+  }
+
+  async function handleSchedSave() {
+    try {
+      const titleTrim = schedDraft.title.trim()
+      if (!titleTrim) { toast.warning('Informe um título para o agendamento.'); return }
+      if (!schedDraft.horarios || schedDraft.horarios.length === 0) { toast.warning('Adicione pelo menos 1 horário.'); return }
+      const horariosUniq: ScheduleHorarioEntry[] = []
+      const seen = new Set<string>()
+      for (const h of schedDraft.horarios) {
+        const k = `${h.hora}:${h.minuto}`
+        if (seen.has(k)) continue
+        seen.add(k)
+        horariosUniq.push({ hora: Math.max(0, Math.min(23, Math.floor(h.hora))), minuto: Math.max(0, Math.min(59, Math.floor(h.minuto))) })
+      }
+      if (horariosUniq.length === 0) { toast.warning('Nenhum horário válido.'); return }
+
+      const body: Record<string, unknown> = {
+        title: titleTrim,
+        kind: schedDraft.kind,
+        target: schedDraft.target || 'both',
+        folderUrl: schedDraft.folderUrl.trim() || null,
+        horarios: horariosUniq,
+        diasUteisOnly: schedDraft.diasUteisOnly,
+        diasSemana: schedDraft.diasUteisOnly ? undefined : schedDraft.diasSemana,
+        enabled: schedDraft.enabled,
+        notificationTeams: schedDraft.notificationTeams,
+      }
+      if (schedEditingId) {
+        const res = await fetch(`/api/consignado/automation/schedules/${encodeURIComponent(schedEditingId)}`, {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        const data = (await res.json().catch(() => null)) as null | { ok: boolean; record?: AutomationScheduleRecord; reason?: string }
+        if (res.ok && data?.ok && data.record) {
+          setSchedules(prev => prev.map(x => x.id === data!.record!.id ? data!.record! : x))
+          toast.success('Agendamento atualizado.')
+          setSchedModalOpen(false)
+          await loadSchedules()
+        } else toast.warning(data?.reason || 'Falha ao salvar.')
+      } else {
+        (body as any).createNew = true
+        const res = await fetch('/api/consignado/automation/schedules', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        const data = (await res.json().catch(() => null)) as null | { ok: boolean; record?: AutomationScheduleRecord; reason?: string }
+        if (res.ok && data?.ok && data.record) {
+          setSchedules(prev => [...prev, data.record!])
+          toast.success('Agendamento criado com sucesso.')
+          setSchedModalOpen(false)
+          await loadSchedules()
+        } else toast.warning(data?.reason || 'Falha ao criar.')
+      }
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Falha ao salvar agendamento.') }
+  }
+
+  function schedAddHorario() {
+    setSchedDraft(prev => {
+      const last = prev.horarios[prev.horarios.length - 1] || { hora: 8, minuto: 0 }
+      let nextMin = last.minuto + 30
+      let nextH = last.hora
+      if (nextMin >= 60) { nextMin = 0; nextH += 1 }
+      if (nextH >= 24) { nextH = 23; nextMin = 59 }
+      return { ...prev, horarios: [...prev.horarios, { hora: nextH, minuto: nextMin }] }
+    })
+  }
+  function schedRemoveHorario(idx: number) {
+    setSchedDraft(prev => {
+      if (prev.horarios.length <= 1) return prev
+      return { ...prev, horarios: prev.horarios.filter((_, i) => i !== idx) }
+    })
+  }
+  function schedUpdateHorario(idx: number, patch: Partial<ScheduleHorarioEntry>) {
+    setSchedDraft(prev => ({
+      ...prev,
+      horarios: prev.horarios.map((h, i) => i === idx ? { ...h, ...patch } : h),
+    }))
+  }
+  function schedToggleDiaSemana(d: 0 | 1 | 2 | 3 | 4 | 5 | 6) {
+    setSchedDraft(prev => {
+      const tem = prev.diasSemana.includes(d)
+      const next = tem ? prev.diasSemana.filter(x => x !== d) : [...prev.diasSemana, d].sort() as Array<0 | 1 | 2 | 3 | 4 | 5 | 6>
+      const diasUteisOnly = next.length === 0
+      return { ...prev, diasSemana: next, diasUteisOnly }
+    })
+  }
+
   const saveAutomationConfigToServer = async (next: {
     sharePointFolderUrl: string | null
     relatorioSisbrUrl: string | null
@@ -2919,8 +3226,14 @@ export default function CreditoPage() {
         setSharePointFolderPathLoading(false)
       })
 
+    void loadSchedules()
+    const tSched = window.setInterval(() => {
+      void loadSchedules()
+    }, 45000)
+
     return () => {
       cancelled = true
+      window.clearInterval(tSched)
     }
   }, [view])
 
@@ -10929,86 +11242,318 @@ export default function CreditoPage() {
                   </div>
                 </section>
 
-                <section className="grid">
-                <div className="panel">
+                <section className="panel">
                   <div className="panel-head">
-                    <h2>Agendamento</h2>
-                    <span className="chip">
-                      <Zap size={16} />
-                      Rotina
-                    </span>
+                    <h2>Agendamentos Automáticos</h2>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <button type="button" className="btn" onClick={() => void loadSchedules()} title="Atualizar agendamentos">
+                        <RefreshCcwDot size={14} />
+                        Atualizar
+                      </button>
+                      <button type="button" className="btn btn-primary" onClick={openSchedCreate}>
+                        <Plus size={14} />
+                        Novo Agendamento
+                      </button>
+                      <span className="chip">
+                        <Zap size={14} />
+                        Scheduler 30s
+                      </span>
+                    </div>
                   </div>
                   <div className="panel-body">
-                    <div className="field">
-                      <label>Dias da semana</label>
-                      <div className="days">
-                        {(
-                          [
-                            ['seg', 'Segunda'],
-                            ['ter', 'Terça'],
-                            ['qua', 'Quarta'],
-                            ['qui', 'Quinta'],
-                            ['sex', 'Sexta'],
-                            ['sab', 'Sábado'],
-                            ['dom', 'Domingo'],
-                          ] as const
-                        ).map(([key, label]) => (
-                          <label key={key} className="day">
-                            <input
-                              type="checkbox"
-                              checked={importDays[key]}
-                              onChange={(e) => {
-                                if (settingsLocked) return
-                                setImportDays((prev) => ({
-                                  ...prev,
-                                  [key]: e.target.checked,
-                                }))
-                              }}
-                              disabled={settingsLocked}
-                            />
-                            <span>{label}</span>
-                          </label>
-                        ))}
+                    {schedulesLoading ? (
+                      <div className="help" style={{ textAlign: 'center', padding: 16 }}>
+                        <RefreshCcwDot size={18} className="animate-spin" style={{ display: 'inline-block', marginRight: 8, verticalAlign: '-4px' }} />
+                        Carregando agendamentos...
                       </div>
-                    </div>
-
-                    <div className="field" style={{ marginTop: 12 }}>
-                      <label>Horário</label>
-                      <div className="control-wrap">
-                        <select
-                          ref={timeSelectRef}
-                          className="control"
-                          value={importTime}
-                          onChange={(e) => setImportTime(e.target.value)}
-                          disabled={settingsLocked}
-                        >
-                          {Array.from({ length: 24 }, (_, i) => {
-                            const h = String(i).padStart(2, '0')
-                            const value = `${h}:00`
-                            return (
-                              <option key={value} value={value}>
-                                {value}
-                              </option>
-                            )
-                          })}
-                        </select>
-                        <button
-                          type="button"
-                          className="control-icon"
-                          onClick={() => timeSelectRef.current?.focus()}
-                          aria-label="Selecionar horário"
-                          disabled={settingsLocked}
-                        >
-                          <Clock size={16} />
-                        </button>
+                    ) : schedules.length === 0 ? (
+                      <div className="help" style={{ textAlign: 'center', padding: 16 }}>
+                        <Settings2 size={20} style={{ display: 'block', margin: '0 auto 8px', opacity: 0.55 }} />
+                        Nenhum agendamento configurado. Clique em &quot;Novo Agendamento&quot; para criar.
                       </div>
-                      <div className="help">
-                        Define quando a importação automática será executada.
+                    ) : (
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
+                          <thead>
+                            <tr>
+                              {[
+                                'Título',
+                                'Tipo',
+                                'Alvo',
+                                'Horários',
+                                'Dias',
+                                'Próx. Exec.',
+                                'Última',
+                                'Ações',
+                              ].map((h) => (
+                                <th
+                                  key={h}
+                                  style={{
+                                    textAlign: 'left',
+                                    padding: '8px 10px',
+                                    fontSize: '0.7rem',
+                                    letterSpacing: '0.08em',
+                                    textTransform: 'uppercase',
+                                    color: 'rgba(255,255,255,0.62)',
+                                    borderBottom: '1px solid rgba(255,255,255,0.12)',
+                                    fontWeight: 800,
+                                  }}
+                                >
+                                  {h}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {schedules.map((s) => {
+                              const hs: ScheduleHorarioEntry[] =
+                                s.horarios && s.horarios.length > 0
+                                  ? s.horarios.map((h) => ({ hora: h.hora, minuto: h.minuto }))
+                                  : [{ hora: s.hora || 8, minuto: s.minuto || 0 }]
+                              const lastStatusBadge = s.lastStatus
+                                ? (
+                                  <span
+                                    style={{
+                                      marginLeft: 6,
+                                      fontWeight: 700,
+                                      color:
+                                        s.lastStatus === 'succeeded'
+                                          ? 'rgba(74, 222, 128, 0.98)'
+                                          : s.lastStatus === 'failed'
+                                          ? 'rgba(248, 113, 113, 0.98)'
+                                          : s.lastStatus === 'cancelled'
+                                          ? 'rgba(251, 191, 36, 0.98)'
+                                          : s.lastStatus === 'running'
+                                          ? 'rgba(125, 211, 252, 0.98)'
+                                          : 'rgba(226, 232, 240, 0.9)',
+                                    }}
+                                  >
+                                    · {s.lastStatus}
+                                  </span>
+                                )
+                                : null
+                              return (
+                                <tr
+                                  key={s.id}
+                                  style={{
+                                    borderTop: '1px solid rgba(255,255,255,0.08)',
+                                    background: !s.enabled ? 'rgba(255,255,255,0.02)' : 'transparent',
+                                  }}
+                                >
+                                  <td style={{ padding: '10px 10px', fontWeight: 750, color: s.enabled ? 'rgba(255,255,255,0.95)' : 'rgba(148, 163, 184, 0.85)' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                      {s.title}
+                                      {s.notificationTeams ? (
+                                        <Bell size={12} color="rgba(56, 189, 248, 0.95)" title="Notificação Teams ativada" />
+                                      ) : null}
+                                    </div>
+                                    <div style={{ fontSize: '0.62rem', color: 'rgba(148, 163, 184, 0.8)', fontWeight: 500, marginTop: 2 }}>
+                                      ID: {s.id}
+                                    </div>
+                                  </td>
+                                  <td style={{ padding: '10px 10px' }}>
+                                    <span
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: 4,
+                                        padding: '3px 9px',
+                                        borderRadius: 999,
+                                        fontSize: '0.65rem',
+                                        fontWeight: 750,
+                                        background:
+                                          s.kind === 'runImportConsignado'
+                                            ? 'rgba(0, 174, 157, 0.15)'
+                                            : 'rgba(139, 92, 246, 0.15)',
+                                        color:
+                                          s.kind === 'runImportConsignado'
+                                            ? 'rgba(94, 234, 212, 0.98)'
+                                            : 'rgba(196, 181, 253, 0.98)',
+                                        border:
+                                          s.kind === 'runImportConsignado'
+                                            ? '1px solid rgba(0, 174, 157, 0.3)'
+                                            : '1px solid rgba(139, 92, 246, 0.3)',
+                                      }}
+                                    >
+                                      {SCHED_KIND_LABELS[s.kind]}
+                                    </span>
+                                  </td>
+                                  <td style={{ padding: '10px 10px', color: 'rgba(226, 232, 240, 0.95)', fontWeight: 600 }}>
+                                    {SCHED_TARGETS.find((t) => t.value === (s.target || 'both'))?.label || (s.target || 'both')}
+                                  </td>
+                                  <td style={{ padding: '10px 10px' }}>
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                                      {hs.map((h, i) => (
+                                        <span
+                                          key={i}
+                                          style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            padding: '3px 8px',
+                                            borderRadius: 8,
+                                            fontSize: '0.65rem',
+                                            fontWeight: 800,
+                                            fontFamily: 'ui-monospace, Consolas, monospace',
+                                            background:
+                                              'linear-gradient(135deg, rgba(0, 174, 157, 0.18), rgba(14, 165, 233, 0.18))',
+                                            color: 'rgba(125, 211, 252, 0.98)',
+                                            border: '1px solid rgba(0, 174, 157, 0.3)',
+                                          }}
+                                        >
+                                          <Clock size={10} style={{ marginRight: 3 }} />
+                                          {schedFmtHora(h)}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </td>
+                                  <td style={{ padding: '10px 10px', color: 'rgba(226, 232, 240, 0.92)' }}>
+                                    {s.diasUteisOnly ? (
+                                      <span style={{ fontWeight: 700, color: 'rgba(96, 165, 250, 0.98)' }}>Dias Úteis</span>
+                                    ) : s.diasSemana && s.diasSemana.length > 0 ? (
+                                      s.diasSemana.map((d) => WEEKDAYS_PT[d]).join(', ')
+                                    ) : (
+                                      'Todos'
+                                    )}
+                                  </td>
+                                  <td style={{ padding: '10px 10px', color: 'rgba(74, 222, 128, 0.95)', fontWeight: 750 }}>
+                                    {schedFmtIso(s.nextRunAtIso)}
+                                  </td>
+                                  <td style={{ padding: '10px 10px', color: 'rgba(148, 163, 184, 0.9)', fontSize: '0.7rem' }}>
+                                    {s.lastRunAtIso ? (
+                                      <>
+                                        {schedFmtIso(s.lastRunAtIso)}
+                                        {lastStatusBadge}
+                                      </>
+                                    ) : (
+                                      <span style={{ color: 'rgba(148, 163, 184, 0.5)' }}>Nunca</span>
+                                    )}
+                                  </td>
+                                  <td style={{ padding: '10px 10px' }}>
+                                    <div style={{ display: 'flex', gap: 5, justifyContent: 'flex-end' }}>
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleSchedToggle(s.id)}
+                                        title={s.enabled ? 'Desabilitar' : 'Habilitar'}
+                                        disabled={settingsLocked}
+                                        style={{
+                                          width: 30,
+                                          height: 30,
+                                          padding: 0,
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          borderRadius: 8,
+                                          border: '1px solid rgba(255,255,255,0.12)',
+                                          background: 'rgba(255,255,255,0.04)',
+                                          cursor: settingsLocked ? 'not-allowed' : 'pointer',
+                                          color: s.enabled ? 'rgba(74, 222, 128, 0.95)' : 'rgba(148, 163, 184, 0.85)',
+                                          opacity: settingsLocked ? 0.5 : 1,
+                                        }}
+                                      >
+                                        {s.enabled ? <ToggleRight size={15} /> : <ToggleLeft size={15} />}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleSchedRunNow(s.id)}
+                                        title="Executar agora"
+                                        disabled={settingsLocked}
+                                        style={{
+                                          width: 30,
+                                          height: 30,
+                                          padding: 0,
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          borderRadius: 8,
+                                          border: '1px solid rgba(45, 212, 191, 0.25)',
+                                          background: 'rgba(20, 184, 166, 0.1)',
+                                          color: 'rgba(94, 234, 212, 0.98)',
+                                          cursor: settingsLocked ? 'not-allowed' : 'pointer',
+                                          opacity: settingsLocked ? 0.5 : 1,
+                                        }}
+                                      >
+                                        <PlayCircle size={14} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => openSchedEdit(s)}
+                                        title="Editar"
+                                        disabled={settingsLocked}
+                                        style={{
+                                          width: 30,
+                                          height: 30,
+                                          padding: 0,
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          borderRadius: 8,
+                                          border: '1px solid rgba(255,255,255,0.12)',
+                                          background: 'rgba(255,255,255,0.04)',
+                                          color: 'rgba(226, 232, 240, 0.95)',
+                                          cursor: settingsLocked ? 'not-allowed' : 'pointer',
+                                          opacity: settingsLocked ? 0.5 : 1,
+                                        }}
+                                      >
+                                        <Edit3 size={13} />
+                                      </button>
+                                      {s.id !== 'lot_diario_08h_uteis' ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleSchedDelete(s.id)}
+                                          title="Excluir"
+                                          disabled={settingsLocked}
+                                          style={{
+                                            width: 30,
+                                            height: 30,
+                                            padding: 0,
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            borderRadius: 8,
+                                            border: '1px solid rgba(248, 113, 113, 0.25)',
+                                            background: 'rgba(239, 68, 68, 0.08)',
+                                            color: 'rgba(248, 113, 113, 0.98)',
+                                            cursor: settingsLocked ? 'not-allowed' : 'pointer',
+                                            opacity: settingsLocked ? 0.5 : 1,
+                                          }}
+                                        >
+                                          <Trash2 size={13} />
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          disabled
+                                          title="Agendamento padrão — não pode ser excluído"
+                                          style={{
+                                            width: 30,
+                                            height: 30,
+                                            padding: 0,
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            borderRadius: 8,
+                                            border: '1px solid rgba(255,255,255,0.06)',
+                                            background: 'rgba(255,255,255,0.02)',
+                                            color: 'rgba(148, 163, 184, 0.4)',
+                                            cursor: 'not-allowed',
+                                          }}
+                                        >
+                                          <Trash2 size={13} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
                       </div>
-                    </div>
+                    )}
                   </div>
-                </div>
+                </section>
 
+                <section style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
                 <div className="panel">
                   <div className="panel-head">
                     <h2>Notificações</h2>
@@ -11196,6 +11741,584 @@ export default function CreditoPage() {
                   </div>
                 </div>
                 </section>
+
+                <AnimatePresence>
+                  {schedModalOpen ? (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      style={{
+                        position: 'fixed',
+                        inset: 0,
+                        background: 'rgba(15, 23, 42, 0.7)',
+                        backdropFilter: 'blur(6px)',
+                        WebkitBackdropFilter: 'blur(6px)',
+                        zIndex: 100,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: 16,
+                      }}
+                      onClick={(e) => {
+                        if (e.target === e.currentTarget) setSchedModalOpen(false)
+                      }}
+                    >
+                      <motion.div
+                        initial={{ scale: 0.95, y: 10, opacity: 0 }}
+                        animate={{ scale: 1, y: 0, opacity: 1 }}
+                        exit={{ scale: 0.95, y: 10, opacity: 0 }}
+                        transition={{ duration: 0.2 }}
+                        style={{
+                          width: '100%',
+                          maxWidth: 720,
+                          maxHeight: '90vh',
+                          overflow: 'auto',
+                          background: 'rgba(15, 23, 42, 0.98)',
+                          borderRadius: 20,
+                          border: '1px solid rgba(255, 255, 255, 0.12)',
+                          boxShadow: '0 30px 80px -20px rgba(0,0,0,0.6)',
+                        }}
+                      >
+                        <div
+                          style={{
+                            padding: '18px 22px',
+                            borderBottom: '1px solid rgba(255, 255, 255, 0.10)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            background:
+                              'linear-gradient(135deg, rgba(0, 174, 157, 0.12), rgba(15, 23, 42, 0.98))',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <div
+                              style={{
+                                width: 40,
+                                height: 40,
+                                borderRadius: 12,
+                                background: 'linear-gradient(135deg, #00AE9D, #0891b2)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                color: '#fff',
+                                boxShadow: '0 8px 20px rgba(0, 174, 157, 0.25)',
+                              }}
+                            >
+                              <CalendarClock width={20} height={20} />
+                            </div>
+                            <div>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: 'rgba(255,255,255,0.95)' }}>
+                                {schedEditingId ? 'Editar Agendamento' : 'Novo Agendamento Automático'}
+                              </div>
+                              <div style={{ fontSize: 11, color: 'rgba(148, 163, 184, 0.85)', marginTop: 2 }}>
+                                {schedEditingId
+                                  ? `ID: ${schedEditingId}`
+                                  : 'Agende múltiplos horários por dia para importações automáticas'}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setSchedModalOpen(false)}
+                            style={{
+                              width: 36,
+                              height: 36,
+                              padding: 0,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              borderRadius: 10,
+                              border: '1px solid rgba(255, 255, 255, 0.12)',
+                              background: 'rgba(255, 255, 255, 0.04)',
+                              color: 'rgba(226, 232, 240, 0.95)',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <X width={16} height={16} />
+                          </button>
+                        </div>
+
+                        <div style={{ padding: 22, display: 'flex', flexDirection: 'column', gap: 16 }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                            <div style={{ gridColumn: '1 / -1' }}>
+                              <label style={schedLblStyle()}>Título *</label>
+                              <input
+                                type="text"
+                                value={schedDraft.title}
+                                onChange={(e) => setSchedDraft((p) => ({ ...p, title: e.target.value }))}
+                                placeholder="Ex: Lote diário MPGO, Importação Neoconsig 3 horários..."
+                                style={schedInputStyle()}
+                              />
+                            </div>
+                            <div>
+                              <label style={schedLblStyle()}>Tipo de Importação</label>
+                              <select
+                                value={schedDraft.kind}
+                                onChange={(e) =>
+                                  setSchedDraft((p) => ({ ...p, kind: e.target.value as any }))
+                                }
+                                style={schedInputStyle()}
+                              >
+                                <option value="runImportConsignado">{SCHED_KIND_LABELS.runImportConsignado}</option>
+                                <option value="importByLearningProfileFromFolderUrl">
+                                  {SCHED_KIND_LABELS.importByLearningProfileFromFolderUrl}
+                                </option>
+                              </select>
+                            </div>
+                            <div>
+                              <label style={schedLblStyle()}>Alvo / Órgão</label>
+                              <select
+                                value={schedDraft.target}
+                                onChange={(e) => setSchedDraft((p) => ({ ...p, target: e.target.value }))}
+                                style={schedInputStyle()}
+                              >
+                                {SCHED_TARGETS.map((t) => (
+                                  <option key={t.value} value={t.value}>
+                                    {t.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div style={{ gridColumn: '1 / -1' }}>
+                              <label style={schedLblStyle()}>URL da Pasta SharePoint (opcional)</label>
+                              <input
+                                type="text"
+                                value={schedDraft.folderUrl}
+                                onChange={(e) => setSchedDraft((p) => ({ ...p, folderUrl: e.target.value }))}
+                                placeholder="Deixe vazio para usar URLs padrão / órgão alvo"
+                                style={schedInputStyle()}
+                              />
+                            </div>
+                          </div>
+
+                          <div
+                            style={{
+                              padding: 16,
+                              borderRadius: 14,
+                              border: '1px solid rgba(20, 184, 166, 0.25)',
+                              background:
+                                'linear-gradient(180deg, rgba(20, 184, 166, 0.08), rgba(15, 23, 42, 0.6))',
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                marginBottom: 12,
+                              }}
+                            >
+                              <label style={{ ...schedLblStyle(), margin: 0 }}>
+                                <Clock
+                                  width={14}
+                                  height={14}
+                                  color="rgba(94, 234, 212, 0.98)"
+                                  style={{ display: 'inline-block', verticalAlign: '-2px', marginRight: 6 }}
+                                />
+                                Horários Diários ({schedDraft.horarios.length}) — adicione quantos quiser
+                              </label>
+                              <button type="button" onClick={schedAddHorario} style={schedBtnSecondary()}>
+                                <Plus width={13} height={13} /> Adicionar horário
+                              </button>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {schedDraft.horarios.map((h, i) => (
+                                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                  <div
+                                    style={{
+                                      width: 32,
+                                      height: 32,
+                                      borderRadius: 10,
+                                      background: 'rgba(0, 174, 157, 0.15)',
+                                      color: 'rgba(94, 234, 212, 0.98)',
+                                      fontWeight: 800,
+                                      fontSize: 12,
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      flexShrink: 0,
+                                    }}
+                                  >
+                                    {i + 1}
+                                  </div>
+                                  <div style={{ display: 'flex', gap: 8, flex: 1, alignItems: 'center' }}>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={23}
+                                      step={1}
+                                      value={h.hora}
+                                      onChange={(e) =>
+                                        schedUpdateHorario(i, {
+                                          hora: Math.max(0, Math.min(23, parseInt(e.target.value || '0', 10))),
+                                        })
+                                      }
+                                      style={{
+                                        ...schedInputStyle(),
+                                        width: 80,
+                                        textAlign: 'center',
+                                        fontFamily: 'ui-monospace, Consolas, monospace',
+                                        fontWeight: 700,
+                                      }}
+                                    />
+                                    <span
+                                      style={{
+                                        fontWeight: 800,
+                                        color: 'rgba(226, 232, 240, 0.95)',
+                                        fontSize: 18,
+                                      }}
+                                    >
+                                      :
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={59}
+                                      step={1}
+                                      value={h.minuto}
+                                      onChange={(e) =>
+                                        schedUpdateHorario(i, {
+                                          minuto: Math.max(0, Math.min(59, parseInt(e.target.value || '0', 10))),
+                                        })
+                                      }
+                                      style={{
+                                        ...schedInputStyle(),
+                                        width: 80,
+                                        textAlign: 'center',
+                                        fontFamily: 'ui-monospace, Consolas, monospace',
+                                        fontWeight: 700,
+                                      }}
+                                    />
+                                    <input
+                                      type="time"
+                                      value={`${h.hora < 10 ? '0' : ''}${h.hora}:${h.minuto < 10 ? '0' : ''}${h.minuto}`}
+                                      onChange={(e) => {
+                                        const v = e.target.value
+                                        if (v && v.includes(':')) {
+                                          const [hh, mm] = v.split(':').map((x) => parseInt(x, 10))
+                                          schedUpdateHorario(i, {
+                                            hora: Math.max(0, Math.min(23, hh || 0)),
+                                            minuto: Math.max(0, Math.min(59, mm || 0)),
+                                          })
+                                        }
+                                      }}
+                                      style={{ ...schedInputStyle(), flex: 1, maxWidth: 220 }}
+                                    />
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => schedRemoveHorario(i)}
+                                    disabled={schedDraft.horarios.length <= 1}
+                                    title={schedDraft.horarios.length <= 1 ? 'Mínimo 1 horário' : 'Remover horário'}
+                                    style={{
+                                      width: 34,
+                                      height: 34,
+                                      padding: 0,
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      borderRadius: 10,
+                                      border:
+                                        schedDraft.horarios.length <= 1
+                                          ? '1px solid rgba(255,255,255,0.06)'
+                                          : '1px solid rgba(248, 113, 113, 0.25)',
+                                      background:
+                                        schedDraft.horarios.length <= 1
+                                          ? 'rgba(255,255,255,0.02)'
+                                          : 'rgba(239, 68, 68, 0.08)',
+                                      color:
+                                        schedDraft.horarios.length <= 1
+                                          ? 'rgba(148, 163, 184, 0.4)'
+                                          : 'rgba(248, 113, 113, 0.98)',
+                                      cursor: schedDraft.horarios.length <= 1 ? 'not-allowed' : 'pointer',
+                                      flexShrink: 0,
+                                    }}
+                                  >
+                                    <X width={14} height={14} />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div
+                            style={{
+                              padding: 16,
+                              borderRadius: 14,
+                              border: '1px solid rgba(255, 255, 255, 0.10)',
+                              background: 'rgba(255, 255, 255, 0.03)',
+                            }}
+                          >
+                            <label style={{ ...schedLblStyle(), marginBottom: 10 }}>Dias de execução</label>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSchedDraft((p) => ({ ...p, diasUteisOnly: true, diasSemana: [] }))
+                                }
+                                style={{
+                                  padding: '8px 14px',
+                                  borderRadius: 10,
+                                  border: '1px solid',
+                                  fontWeight: 750,
+                                  fontSize: 12,
+                                  background: schedDraft.diasUteisOnly
+                                    ? 'linear-gradient(135deg, #00AE9D, #0891b2)'
+                                    : 'rgba(255, 255, 255, 0.04)',
+                                  color: schedDraft.diasUteisOnly
+                                    ? '#fff'
+                                    : 'rgba(226, 232, 240, 0.95)',
+                                  borderColor: schedDraft.diasUteisOnly
+                                    ? 'rgba(0, 174, 157, 0.5)'
+                                    : 'rgba(255, 255, 255, 0.12)',
+                                  cursor: 'pointer',
+                                  boxShadow: schedDraft.diasUteisOnly
+                                    ? '0 6px 14px rgba(0, 174, 157, 0.25)'
+                                    : 'none',
+                                }}
+                              >
+                                📅 Dias Úteis (Seg-Sex)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSchedDraft((p) => ({
+                                    ...p,
+                                    diasUteisOnly: false,
+                                    diasSemana: [0, 1, 2, 3, 4, 5, 6],
+                                  }))
+                                }
+                                style={{
+                                  padding: '8px 14px',
+                                  borderRadius: 10,
+                                  border: '1px solid',
+                                  fontWeight: 750,
+                                  fontSize: 12,
+                                  background:
+                                    !schedDraft.diasUteisOnly && schedDraft.diasSemana.length === 7
+                                      ? 'linear-gradient(135deg, #8b5cf6, #6366f1)'
+                                      : 'rgba(255, 255, 255, 0.04)',
+                                  color:
+                                    !schedDraft.diasUteisOnly && schedDraft.diasSemana.length === 7
+                                      ? '#fff'
+                                      : 'rgba(226, 232, 240, 0.95)',
+                                  borderColor:
+                                    !schedDraft.diasUteisOnly && schedDraft.diasSemana.length === 7
+                                      ? 'rgba(139, 92, 246, 0.5)'
+                                      : 'rgba(255, 255, 255, 0.12)',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                🔁 Todos os dias
+                              </button>
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: 'rgba(148, 163, 184, 0.85)',
+                                marginBottom: 8,
+                                fontWeight: 600,
+                              }}
+                            >
+                              Ou selecione manualmente:
+                            </div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {([0, 1, 2, 3, 4, 5, 6] as const).map((d) => {
+                                const sel = schedDraft.diasSemana.includes(d)
+                                return (
+                                  <button
+                                    key={d}
+                                    type="button"
+                                    onClick={() => schedToggleDiaSemana(d)}
+                                    style={{
+                                      width: 46,
+                                      height: 38,
+                                      borderRadius: 10,
+                                      border: '1px solid',
+                                      fontWeight: 750,
+                                      fontSize: 12,
+                                      background: sel ? '#00AE9D' : 'rgba(255, 255, 255, 0.04)',
+                                      color: sel ? '#fff' : 'rgba(226, 232, 240, 0.95)',
+                                      borderColor: sel ? 'rgba(0, 174, 157, 0.5)' : 'rgba(255, 255, 255, 0.12)',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    {WEEKDAYS_PT[d]}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                            <label
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 10,
+                                padding: '12px 14px',
+                                borderRadius: 12,
+                                border: '1px solid rgba(255, 255, 255, 0.10)',
+                                background: 'rgba(255, 255, 255, 0.03)',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                {schedDraft.enabled ? (
+                                  <ToggleRight width={18} height={18} color="rgba(74, 222, 128, 0.98)" />
+                                ) : (
+                                  <ToggleLeft width={18} height={18} color="rgba(148, 163, 184, 0.85)" />
+                                )}
+                                <div>
+                                  <div style={{ fontSize: 12.5, fontWeight: 800, color: 'rgba(255,255,255,0.95)' }}>
+                                    Habilitado
+                                  </div>
+                                  <div style={{ fontSize: 10.5, color: 'rgba(148, 163, 184, 0.85)' }}>
+                                    Ativa o disparo automático
+                                  </div>
+                                </div>
+                              </div>
+                              <input
+                                type="checkbox"
+                                style={{ display: 'none' }}
+                                checked={schedDraft.enabled}
+                                onChange={(e) => setSchedDraft((p) => ({ ...p, enabled: e.target.checked }))}
+                              />
+                              <div
+                                style={{
+                                  width: 42,
+                                  height: 24,
+                                  borderRadius: 999,
+                                  background: schedDraft.enabled
+                                    ? 'linear-gradient(135deg, #10b981, #059669)'
+                                    : 'rgba(148, 163, 184, 0.4)',
+                                  position: 'relative',
+                                  transition: 'background 0.2s',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    position: 'absolute',
+                                    top: 3,
+                                    left: schedDraft.enabled ? 21 : 3,
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: '50%',
+                                    background: '#fff',
+                                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                                    transition: 'left 0.2s',
+                                  }}
+                                />
+                              </div>
+                            </label>
+                            <label
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 10,
+                                padding: '12px 14px',
+                                borderRadius: 12,
+                                border: '1px solid rgba(255, 255, 255, 0.10)',
+                                background: 'rgba(255, 255, 255, 0.03)',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                {schedDraft.notificationTeams ? (
+                                  <Bell width={18} height={18} color="rgba(56, 189, 248, 0.98)" />
+                                ) : (
+                                  <BellOff width={18} height={18} color="rgba(148, 163, 184, 0.85)" />
+                                )}
+                                <div>
+                                  <div style={{ fontSize: 12.5, fontWeight: 800, color: 'rgba(255,255,255,0.95)' }}>
+                                    Notificar Teams
+                                  </div>
+                                  <div style={{ fontSize: 10.5, color: 'rgba(148, 163, 184, 0.85)' }}>
+                                    Canal configurado no sistema
+                                  </div>
+                                </div>
+                              </div>
+                              <input
+                                type="checkbox"
+                                style={{ display: 'none' }}
+                                checked={schedDraft.notificationTeams}
+                                onChange={(e) =>
+                                  setSchedDraft((p) => ({ ...p, notificationTeams: e.target.checked }))
+                                }
+                              />
+                              <div
+                                style={{
+                                  width: 42,
+                                  height: 24,
+                                  borderRadius: 999,
+                                  background: schedDraft.notificationTeams
+                                    ? 'linear-gradient(135deg, #0ea5e9, #0284c7)'
+                                    : 'rgba(148, 163, 184, 0.4)',
+                                  position: 'relative',
+                                  transition: 'background 0.2s',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    position: 'absolute',
+                                    top: 3,
+                                    left: schedDraft.notificationTeams ? 21 : 3,
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: '50%',
+                                    background: '#fff',
+                                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                                    transition: 'left 0.2s',
+                                  }}
+                                />
+                              </div>
+                            </label>
+                          </div>
+                        </div>
+
+                        <div
+                          style={{
+                            padding: '16px 22px',
+                            borderTop: '1px solid rgba(255, 255, 255, 0.10)',
+                            display: 'flex',
+                            justifyContent: 'flex-end',
+                            gap: 10,
+                            background: 'rgba(255, 255, 255, 0.02)',
+                          }}
+                        >
+                          <button type="button" onClick={() => setSchedModalOpen(false)} style={schedBtnSecondary()}>
+                            <X width={14} height={14} /> Cancelar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleSchedSave()}
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              gap: 8,
+                              padding: '10px 18px',
+                              borderRadius: 12,
+                              border: 'none',
+                              background: 'linear-gradient(180deg, #00AE9D, #008C7D)',
+                              color: '#fff',
+                              fontWeight: 800,
+                              fontSize: 13,
+                              cursor: 'pointer',
+                              boxShadow: '0 10px 22px rgba(0, 174, 157, 0.3)',
+                            }}
+                          >
+                            <Save width={15} height={15} />{' '}
+                            {schedEditingId ? 'Salvar Alterações' : 'Criar Agendamento'}
+                          </button>
+                        </div>
+                      </motion.div>
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
               </>
             ) : null}
 

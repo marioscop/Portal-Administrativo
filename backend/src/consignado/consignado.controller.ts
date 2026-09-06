@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Query, Param, Header, Res, UploadedFile, UseInterceptors, InternalServerErrorException, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Body, Query, Param, Header, Res, UploadedFile, UseInterceptors, InternalServerErrorException, BadRequestException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import * as path from 'node:path';
@@ -582,6 +582,49 @@ export class ConsignadoController {
       return { accepted: true, async: true, ...r };
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Falha ao executar agendamento manualmente.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Post(['automation/schedules', 'automation/schedules/:id'])
+  async automationUpsertSchedule(
+    @Param('id') idRaw?: string,
+    @Body() body?: {
+      id?: string;
+      createNew?: boolean;
+      title?: string;
+      kind?: 'runImportConsignado' | 'importByLearningProfileFromFolderUrl';
+      target?: string | null;
+      folderUrl?: string | null;
+      hora?: number;
+      minuto?: number;
+      horarios?: Array<{ hora: number; minuto: number }>;
+      diasUteisOnly?: boolean;
+      diasSemana?: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>;
+      enabled?: boolean;
+      notificationTeams?: boolean;
+    },
+  ) {
+    try {
+      const r = await this.service.upsertAutomationSchedule(idRaw ?? null, body ?? {});
+      if (!r.ok) throw new Error(r.reason || 'falha_ao_salvar');
+      return r;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao salvar agendamento.';
+      throw new InternalServerErrorException(message);
+    }
+  }
+
+  @Delete('automation/schedules/:id')
+  async automationDeleteSchedule(@Param('id') idRaw?: string) {
+    try {
+      const id = String(idRaw ?? '').trim();
+      if (!id) throw new Error('id do agendamento é obrigatório');
+      const r = await this.service.deleteAutomationSchedule(id);
+      if (!r.ok) throw new Error(r.reason || 'falha_ao_excluir');
+      return r;
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha ao excluir agendamento.';
       throw new InternalServerErrorException(message);
     }
   }

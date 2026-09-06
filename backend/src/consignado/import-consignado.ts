@@ -35642,7 +35642,7 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
   effectiveSubject?: string;
   countsByMonth: Record<string, { total: number; byAction: Record<string, number> }>;
   slaBreaches?: Array<{ ocorrenciaId: number; stage: string; status: string; month: string; orgao: string; nome: string; cpf: string; action: string; value: string; slaStartedAt: string | null; slaDueAt: string | null; atrasoHoras: number; }>;
-  skippedReason?: 'memoSameDay' | 'dailySentPersisted' | 'sendingLock' | 'legacyLastSentAt';
+  skippedReason?: 'memoSameDay' | 'dailySentPersisted' | 'sendingLock' | 'legacyLastSentAt' | 'noPendencias';
 }> {
   const forceSend = Boolean(_opts?.force ?? false);
   const legacyTemplate = Boolean(_opts?.legacyTemplate ?? false);
@@ -35735,6 +35735,39 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
   const now = new Date();
   const todayPtBr = formatDatePtBr(now);
   const dateKey = getPanoramaDailyDateKey(now);
+
+  // ---------------------------------------------------------------
+  // REGRA: NÃO dispara e-mail se NÃO HOUVER pendências.
+  // Critérios considerados (basta 1 positivo para considerar "há pendência"):
+  //   A) countsByMonth — soma total de ocorrências abertas (undone_at) > 0
+  //   B) slaBreaches    — ocorrências com SLA 48h estourado > 0
+  //   C) fullPanorama2408.summary.ocorrenciasEmAtraso > 0 (template carta diretoria)
+  // Exceções que PERMITM envio mesmo vazio:
+  //   • forceSend=true           (usuário clicou manualmente / teste)
+  //   • destinatário customizado (_opts.to/_opts.cc) — quem pediu quer receber mesmo vazio
+  // ---------------------------------------------------------------
+  const totalPendenciasAbertas = Object.values(countsByMonth).reduce((s, x) => s + (x?.total ?? 0), 0);
+  let hasPendenciaToReport = totalPendenciasAbertas > 0 || slaBreaches.length > 0;
+  if (!hasPendenciaToReport && withFullPanorama2408) {
+    try {
+      const fpPreview = await buildFullPanorama2408Data(db, _opts?.month);
+      hasPendenciaToReport = (fpPreview?.summary?.ocorrenciasEmAtraso ?? 0) > 0;
+    } catch { /* ignore, assume false */ }
+  }
+  const isCustomRecipientPreliminary = (_opts?.to !== undefined) || (_opts?.cc !== undefined);
+  if (!forceSend && !isCustomRecipientPreliminary && !hasPendenciaToReport) {
+    _panoramaDailyMemoDateKey = dateKey;
+    panoramaDailyWriteLock(db, dateKey, 'sent');
+    try { setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr); } catch { /* ignore */ }
+    return {
+      sent: false,
+      recipients: [],
+      subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`,
+      countsByMonth,
+      slaBreaches,
+      skippedReason: 'noPendencias',
+    };
+  }
 
   // Guard persistente 1 envio/dia — ANTES de qualquer processamento.
   // Mesmo que reinicie o sistema, se status='sent' estiver gravado, NÃO envia de novo.
@@ -38069,20 +38102,30 @@ const KEY_CFG_NOTIFY_TEAMS_ENABLED = `${PREFIX_CFG}teams_notify_enabled`;
 const PREFIX_SCHED = 'automation_schedule::v1::';
 const SCHED_DEFAULT_ID = 'lot_diario_08h_uteis';
 
+export interface ScheduleHorarioEntry {
+  hora: number;
+  minuto: number;
+}
 export interface AutomationScheduleRecord {
   id: string;
   title: string;
   kind: 'runImportConsignado' | 'importByLearningProfileFromFolderUrl';
   target?: string | null;
   folderUrl?: string | null;
+  /** @deprecated — use horarios[] (campo mantido p/ backward compat. Quando horarios[] for vazio, usamos hora/minuto) */
   hora: number;
+  /** @deprecated — use horarios[] */
   minuto: number;
+  /** Múltiplos horários por dia (permite agendar 3+ disparos diários no mesmo schedule). Quando vazio, usa hora/minuto legado. */
+  horarios?: ScheduleHorarioEntry[];
   diasUteisOnly: boolean;
   diasSemana?: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>;
   enabled: boolean;
   createdAtIso: string;
   updatedAtIso?: string;
   lastRunAtIso?: string;
+  /** Chaveado por 'HH:mm' → ISO do último disparo naquele horário. Garante que 3 horários/dia rodem INDEPENDENTEMENTE. */
+  lastRunAtPerHorario?: Record<string, string>;
   lastJobId?: string;
   lastStatus?: JobStatus;
   nextRunAtIso?: string;
@@ -38354,31 +38397,70 @@ const _schedState: SchedTickState = { startedAtIso: new Date().toISOString(), ru
 function _isWeekdayPtBr(d: Date): boolean {
   const w = d.getDay(); return w >= 1 && w <= 5;
 }
-function scheduleCalculateNextRunAt(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'diasUteisOnly' | 'diasSemana'>, from?: Date): string {
-  const base = from ? new Date(from) : new Date();
-  base.setMilliseconds(0); base.setSeconds(0); base.setMinutes(s.minuto); base.setHours(s.hora);
-  for (let i = 0; i < 14; i += 1) {
-    const t = new Date(base.getTime() + i * 24 * 60 * 60 * 1000);
-    const dw = t.getDay() as 0 | 1 | 2 | 3 | 4 | 5 | 6;
-    const diaOk = s.diasUteisOnly ? _isWeekdayPtBr(t) : (s.diasSemana && s.diasSemana.length > 0 ? s.diasSemana.includes(dw) : true);
-    if (!diaOk) continue;
-    if (t.getTime() <= (from?.getTime() ?? Date.now())) continue;
-    return t.toISOString();
+
+function _pad2(n: number): string { return n < 10 ? '0' + n : String(n); }
+
+function _scheduleNormalizeHorarios(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'horarios'>): ScheduleHorarioEntry[] {
+  if (s.horarios && Array.isArray(s.horarios) && s.horarios.length > 0) {
+    return s.horarios
+      .filter((h) => h && typeof h.hora === 'number' && typeof h.minuto === 'number')
+      .map((h) => ({ hora: Math.max(0, Math.min(23, Math.floor(h.hora))), minuto: Math.max(0, Math.min(59, Math.floor(h.minuto))) }))
+      .reduce<ScheduleHorarioEntry[]>((acc, cur) => {
+        const k = _pad2(cur.hora) + ':' + _pad2(cur.minuto);
+        if (!acc.find((x) => _pad2(x.hora) + ':' + _pad2(x.minuto) === k)) acc.push(cur);
+        return acc;
+      }, [])
+      .sort((a, b) => a.hora - b.hora || a.minuto - b.minuto);
   }
-  return new Date(base.getTime() + 24 * 60 * 60 * 1000).toISOString();
+  const hora = typeof s.hora === 'number' ? s.hora : 8;
+  const minuto = typeof s.minuto === 'number' ? s.minuto : 0;
+  return [{ hora: Math.max(0, Math.min(23, Math.floor(hora))), minuto: Math.max(0, Math.min(59, Math.floor(minuto))) }];
 }
-function scheduleIsDueNow(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'diasUteisOnly' | 'diasSemana' | 'lastRunAtIso'>, now?: Date): boolean {
+
+function _scheduleHorarioKey(h: ScheduleHorarioEntry): string { return _pad2(h.hora) + ':' + _pad2(h.minuto); }
+
+function scheduleCalculateNextRunAt(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'horarios' | 'diasUteisOnly' | 'diasSemana'>, from?: Date): string {
+  const horarios = _scheduleNormalizeHorarios(s);
+  const baseFrom = from ? new Date(from) : new Date();
+  let best: Date | null = null;
+  for (const entry of horarios) {
+    const base = new Date(baseFrom);
+    base.setMilliseconds(0); base.setSeconds(0); base.setMinutes(entry.minuto); base.setHours(entry.hora);
+    for (let i = 0; i < 14; i += 1) {
+      const t = new Date(base.getTime() + i * 24 * 60 * 60 * 1000);
+      const dw = t.getDay() as 0 | 1 | 2 | 3 | 4 | 5 | 6;
+      const diaOk = s.diasUteisOnly ? _isWeekdayPtBr(t) : (s.diasSemana && s.diasSemana.length > 0 ? s.diasSemana.includes(dw) : true);
+      if (!diaOk) continue;
+      if (t.getTime() <= baseFrom.getTime()) continue;
+      if (!best || t.getTime() < best.getTime()) best = t;
+      break;
+    }
+  }
+  if (best) return best.toISOString();
+  const fallback = new Date(baseFrom.getTime() + 24 * 60 * 60 * 1000);
+  return fallback.toISOString();
+}
+
+interface ScheduleDueNowResult { ok: boolean; horarioKey?: string; }
+function scheduleIsDueNow(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'horarios' | 'diasUteisOnly' | 'diasSemana' | 'lastRunAtIso' | 'lastRunAtPerHorario'>, now?: Date): ScheduleDueNowResult {
   const n = now ?? new Date();
   const dw = n.getDay() as 0 | 1 | 2 | 3 | 4 | 5 | 6;
   const diaOk = s.diasUteisOnly ? _isWeekdayPtBr(n) : (s.diasSemana && s.diasSemana.length > 0 ? s.diasSemana.includes(dw) : true);
-  if (!diaOk) return false;
-  if (n.getHours() !== s.hora || n.getMinutes() !== s.minuto) return false;
-  const last = s.lastRunAtIso ? new Date(s.lastRunAtIso) : null;
-  if (last) {
-    const msDiff = n.getTime() - last.getTime();
-    if (msDiff < 23 * 60 * 60 * 1000) return false;
+  if (!diaOk) return { ok: false };
+  const horarios = _scheduleNormalizeHorarios(s);
+  for (const entry of horarios) {
+    if (n.getHours() !== entry.hora || n.getMinutes() !== entry.minuto) continue;
+    const k = _scheduleHorarioKey(entry);
+    const map = s.lastRunAtPerHorario || {};
+    const lastStr = map[k] || s.lastRunAtIso;
+    const last = lastStr ? new Date(lastStr) : null;
+    if (last) {
+      const msDiff = n.getTime() - last.getTime();
+      if (msDiff < 23 * 60 * 60 * 1000) continue;
+    }
+    return { ok: true, horarioKey: k };
   }
-  return true;
+  return { ok: false };
 }
 
 async function _ensureDefaultSchedules(): Promise<void> {
@@ -38394,6 +38476,7 @@ async function _ensureDefaultSchedules(): Promise<void> {
         folderUrl: null,
         hora: cfg.scheduleDefaultHora,
         minuto: cfg.scheduleDefaultMin,
+        horarios: [{ hora: cfg.scheduleDefaultHora, minuto: cfg.scheduleDefaultMin }],
         diasUteisOnly: true,
         enabled: cfg.schedulerEnabled,
         createdAtIso: new Date().toISOString(),
@@ -38408,11 +38491,15 @@ async function _ensureDefaultSchedules(): Promise<void> {
       try {
         const r = JSON.parse(existing) as AutomationScheduleRecord;
         if (typeof r.hora !== 'number' || typeof r.minuto !== 'number') { r.hora = cfg.scheduleDefaultHora; r.minuto = cfg.scheduleDefaultMin; }
+        if (!r.horarios || !Array.isArray(r.horarios) || r.horarios.length === 0) {
+          r.horarios = [{ hora: r.hora, minuto: r.minuto }];
+        }
+        if (!r.lastRunAtPerHorario || typeof r.lastRunAtPerHorario !== 'object') r.lastRunAtPerHorario = {};
         r.nextRunAtIso = scheduleCalculateNextRunAt(r);
         if (cfg.schedulerEnabled && !r.enabled) r.enabled = true;
         r.updatedAtIso = new Date().toISOString();
         await _cfgSet(PREFIX_SCHED + SCHED_DEFAULT_ID, JSON.stringify(r));
-        console.log('[FASE3][_ensureDefaultSchedules] ATUALIZADO schedule default id=' + SCHED_DEFAULT_ID + ' enabled=' + r.enabled + ' nextRunAt=' + r.nextRunAtIso);
+        console.log('[FASE3][_ensureDefaultSchedules] ATUALIZADO schedule default id=' + SCHED_DEFAULT_ID + ' enabled=' + r.enabled + ' nextRunAt=' + r.nextRunAtIso + ' horarios=' + JSON.stringify(r.horarios));
       } catch (e) { console.error('[FASE3][_ensureDefaultSchedules] erro parse existing schedule', e instanceof Error ? (e.stack || e.message) : String(e)); }
     }
   } catch (e) { console.error('[FASE3][_ensureDefaultSchedules] erro GLOBAL', e instanceof Error ? (e.stack || e.message) : String(e)); }
@@ -38426,6 +38513,8 @@ export async function listAutomationSchedules(): Promise<AutomationScheduleRecor
       const raw = await _cfgGet(k);
       if (!raw) continue;
       const obj = JSON.parse(raw) as AutomationScheduleRecord;
+      if (!obj.horarios || !Array.isArray(obj.horarios) || obj.horarios.length === 0) obj.horarios = [{ hora: obj.hora, minuto: obj.minuto }];
+      if (!obj.lastRunAtPerHorario || typeof obj.lastRunAtPerHorario !== 'object') obj.lastRunAtPerHorario = {};
       obj.nextRunAtIso = scheduleCalculateNextRunAt(obj);
       out.push(obj);
     } catch { /* ignore */ }
@@ -38439,6 +38528,8 @@ export async function getAutomationSchedule(id: string): Promise<AutomationSched
   if (!raw) return null;
   try {
     const r = JSON.parse(raw) as AutomationScheduleRecord;
+    if (!r.horarios || !Array.isArray(r.horarios) || r.horarios.length === 0) r.horarios = [{ hora: r.hora, minuto: r.minuto }];
+    if (!r.lastRunAtPerHorario || typeof r.lastRunAtPerHorario !== 'object') r.lastRunAtPerHorario = {};
     r.nextRunAtIso = scheduleCalculateNextRunAt(r);
     return r;
   } catch { return null; }
@@ -38452,7 +38543,100 @@ export async function toggleAutomationSchedule(id: string, force?: boolean): Pro
   await _cfgSet(PREFIX_SCHED + id, JSON.stringify(cur));
   return { ok: true, record: cur };
 }
-export async function runAutomationScheduleNow(id: string): Promise<{ ok: boolean; reason?: string; jobId?: string; status?: JobStatus; createdAtIso?: string }> {
+
+export async function upsertAutomationSchedule(
+  idRaw: string | null | undefined,
+  payload: Partial<Omit<AutomationScheduleRecord, 'id' | 'createdAtIso' | 'updatedAtIso' | 'nextRunAtIso' | 'lastRunAtIso' | 'lastRunAtPerHorario' | 'lastJobId' | 'lastStatus'>> & { id?: string; createNew?: boolean }
+): Promise<{ ok: boolean; record?: AutomationScheduleRecord; reason?: string }> {
+  try {
+    const idProvided = String((payload.id ?? idRaw ?? '')).trim();
+    const isNew = Boolean(payload.createNew) || !idProvided;
+    const id = isNew
+      ? ('sched_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8))
+      : idProvided;
+    if (!id) return { ok: false, reason: 'id_invalido' };
+
+    const existing = isNew ? null : await getAutomationSchedule(id);
+    const base = existing ?? ({
+      id,
+      title: 'Novo Agendamento',
+      kind: 'runImportConsignado',
+      target: 'both',
+      folderUrl: null,
+      hora: 8,
+      minuto: 0,
+      horarios: [{ hora: 8, minuto: 0 }],
+      diasUteisOnly: true,
+      diasSemana: undefined,
+      enabled: true,
+      createdAtIso: new Date().toISOString(),
+      notificationTeams: false,
+    } as AutomationScheduleRecord);
+
+    if (payload.title !== undefined) base.title = String(payload.title).trim() || base.title;
+    if (payload.kind !== undefined && (payload.kind === 'runImportConsignado' || payload.kind === 'importByLearningProfileFromFolderUrl')) base.kind = payload.kind;
+    if (payload.target !== undefined) base.target = payload.target || null;
+    if (payload.folderUrl !== undefined) base.folderUrl = payload.folderUrl || null;
+    if (payload.diasUteisOnly !== undefined) {
+      base.diasUteisOnly = Boolean(payload.diasUteisOnly);
+      if (base.diasUteisOnly) base.diasSemana = undefined;
+    }
+    if (payload.diasSemana !== undefined) {
+      if (Array.isArray(payload.diasSemana) && payload.diasSemana.length > 0) {
+        base.diasSemana = payload.diasSemana.filter((d): d is 0 | 1 | 2 | 3 | 4 | 5 | 6 => typeof d === 'number' && d >= 0 && d <= 6);
+        if (base.diasSemana.length > 0) base.diasUteisOnly = false;
+        else { base.diasSemana = undefined; base.diasUteisOnly = true; }
+      } else {
+        base.diasSemana = undefined;
+        base.diasUteisOnly = true;
+      }
+    }
+    if (payload.enabled !== undefined) base.enabled = Boolean(payload.enabled);
+    if (payload.notificationTeams !== undefined) base.notificationTeams = Boolean(payload.notificationTeams);
+    if (payload.horarios !== undefined) {
+      const horariosNorm = _scheduleNormalizeHorarios({ hora: base.hora, minuto: base.minuto, horarios: payload.horarios });
+      if (horariosNorm.length === 0) return { ok: false, reason: 'horarios_vazio' };
+      base.horarios = horariosNorm;
+      base.hora = horariosNorm[0].hora;
+      base.minuto = horariosNorm[0].minuto;
+    } else {
+      if (typeof payload.hora === 'number' || typeof payload.minuto === 'number') {
+        base.hora = typeof payload.hora === 'number' ? payload.hora : base.hora;
+        base.minuto = typeof payload.minuto === 'number' ? payload.minuto : base.minuto;
+        base.horarios = [{ hora: base.hora, minuto: base.minuto }];
+      }
+    }
+    if (!base.horarios || !Array.isArray(base.horarios) || base.horarios.length === 0) {
+      base.horarios = [{ hora: base.hora, minuto: base.minuto }];
+    }
+    if (!base.lastRunAtPerHorario || typeof base.lastRunAtPerHorario !== 'object') base.lastRunAtPerHorario = {};
+
+    base.updatedAtIso = new Date().toISOString();
+    base.nextRunAtIso = scheduleCalculateNextRunAt(base);
+
+    await _cfgSet(PREFIX_SCHED + id, JSON.stringify(base));
+    return { ok: true, record: base };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e ?? 'unknown') };
+  }
+}
+
+export async function deleteAutomationSchedule(id: string): Promise<{ ok: boolean; reason?: string }> {
+  try {
+    const idTrim = String(id ?? '').trim();
+    if (!idTrim) return { ok: false, reason: 'id_invalido' };
+    if (idTrim === SCHED_DEFAULT_ID) return { ok: false, reason: 'schedule_default_nao_pode_excluir' };
+    const key = PREFIX_SCHED + idTrim;
+    const existing = await _cfgGet(key);
+    if (!existing) return { ok: false, reason: 'schedule_nao_encontrado' };
+    await _cfgSet(key, null);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e ?? 'unknown') };
+  }
+}
+
+export async function runAutomationScheduleNow(id: string, horarioKey?: string): Promise<{ ok: boolean; reason?: string; jobId?: string; status?: JobStatus; createdAtIso?: string }> {
   const cur = await getAutomationSchedule(id);
   if (!cur) return { ok: false, reason: 'schedule_nao_encontrado' };
   try {
@@ -38462,13 +38646,20 @@ export async function runAutomationScheduleNow(id: string): Promise<{ ok: boolea
       ? { folderUrl: cur.folderUrl || '', forceKind: (cur.target as any) || 'both', forceMode: 'append' as const }
       : {};
     const submitted = submitImportJobAsync(cur.kind, opts);
-    cur.lastRunAtIso = new Date().toISOString();
+    const nowIso = new Date().toISOString();
+    cur.lastRunAtIso = nowIso;
+    if (!cur.lastRunAtPerHorario || typeof cur.lastRunAtPerHorario !== 'object') cur.lastRunAtPerHorario = {};
+    const hKey = horarioKey || (() => {
+      const hs = _scheduleNormalizeHorarios(cur);
+      return hs.length > 0 ? _scheduleHorarioKey(hs[0]) : '00:00';
+    })();
+    cur.lastRunAtPerHorario[hKey] = nowIso;
     cur.lastJobId = submitted.jobId;
     cur.lastStatus = submitted.status;
-    cur.updatedAtIso = new Date().toISOString();
+    cur.updatedAtIso = nowIso;
     cur.nextRunAtIso = scheduleCalculateNextRunAt(cur);
     await _cfgSet(PREFIX_SCHED + id, JSON.stringify(cur));
-    try { void _f3JobPatch(submitted.jobId, { optsSnapshot: { scheduleId: cur.id, scheduleTitle: cur.title } }); } catch { /* ignore */ }
+    try { void _f3JobPatch(submitted.jobId, { optsSnapshot: { scheduleId: cur.id, scheduleTitle: cur.title, scheduleHorarioKey: hKey } }); } catch { /* ignore */ }
     return { ok: true, jobId: submitted.jobId, status: submitted.status, createdAtIso: submitted.createdAtIso };
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message : String(e ?? 'unknown') };
@@ -38487,8 +38678,9 @@ async function _schedulerTickOnce(): Promise<void> {
     const now = new Date();
     for (const s of schedules) {
       if (!s.enabled) continue;
-      if (!scheduleIsDueNow(s, now)) continue;
-      try { void (async () => { try { console.log('[FASE3][Scheduler] Tick disparou execução automática scheduleId=' + s.id + ' title=' + s.title); await runAutomationScheduleNow(s.id); } catch (e) { console.error('[FASE3][Scheduler] erro runScheduleNow id=' + s.id, e instanceof Error ? (e.stack || e.message) : String(e)); } })(); } catch { /* ignore schedule run individual errors */ }
+      const due = scheduleIsDueNow(s, now);
+      if (!due.ok || !due.horarioKey) continue;
+      try { void (async () => { try { console.log('[FASE3][Scheduler] Tick disparou execução automática scheduleId=' + s.id + ' title=' + s.title + ' horario=' + due.horarioKey); await runAutomationScheduleNow(s.id, due.horarioKey); } catch (e) { console.error('[FASE3][Scheduler] erro runScheduleNow id=' + s.id, e instanceof Error ? (e.stack || e.message) : String(e)); } })(); } catch { /* ignore schedule run individual errors */ }
     }
     if (_schedState.tickCount % 120 === 0) {
       void cleanupOldJobsTtl().catch((e) => { console.error('[FASE3][Scheduler] cleanupOldJobsTtl erro periódico:', e instanceof Error ? (e.stack || e.message) : String(e)); });

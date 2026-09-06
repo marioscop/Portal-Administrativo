@@ -22,6 +22,15 @@ import {
   Layers3,
   Server,
   Activity,
+  Plus,
+  X,
+  Trash2,
+  Edit3,
+  Save,
+  ToggleLeft,
+  ToggleRight,
+  Bell,
+  BellOff,
 } from 'lucide-react'
 import { Toaster, toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -115,6 +124,45 @@ function fmtDuracao(aIso?: string, bIso?: string): string {
 interface DriveHealthRes {
   overallOk: boolean
   checked: Record<string, { label: string; url?: string | null; result: { ok: boolean; reason?: string; driveId?: string; rootFolderId?: string; filesSample?: unknown[]; canWrite?: boolean } }>
+}
+
+interface ScheduleHorarioEntry { hora: number; minuto: number }
+interface AutomationScheduleRecord {
+  id: string
+  title: string
+  kind: 'runImportConsignado' | 'importByLearningProfileFromFolderUrl'
+  target?: string | null
+  folderUrl?: string | null
+  /** @deprecated */
+  hora: number
+  /** @deprecated */
+  minuto: number
+  horarios?: ScheduleHorarioEntry[]
+  diasUteisOnly: boolean
+  diasSemana?: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>
+  enabled: boolean
+  createdAtIso: string
+  updatedAtIso?: string
+  lastRunAtIso?: string
+  lastRunAtPerHorario?: Record<string, string>
+  lastJobId?: string
+  lastStatus?: JobStatus
+  nextRunAtIso?: string
+  notificationTeams?: boolean
+}
+
+const SCHED_KIND_LABELS: Record<AutomationScheduleRecord['kind'], string> = {
+  runImportConsignado: 'Lote Geral (padrão)',
+  importByLearningProfileFromFolderUrl: 'Perfil específico (pasta)',
+}
+
+const WEEKDAYS_PT: Record<0 | 1 | 2 | 3 | 4 | 5 | 6, string> = {
+  0: 'Dom', 1: 'Seg', 2: 'Ter', 3: 'Qua', 4: 'Qui', 5: 'Sex', 6: 'Sáb',
+}
+
+function fmtHora(h: ScheduleHorarioEntry): string {
+  const pad = (n: number) => (n < 10 ? '0' + n : String(n))
+  return `${pad(h.hora)}:${pad(h.minuto)}`
 }
 
 export default function AutomacaoPage() {
@@ -349,6 +397,45 @@ export default function AutomacaoPage() {
           </div>
         </header>
 
+        {/* BANNER REDIRECIONAMENTO AGENDAMENTOS */}
+        <div style={{
+          marginBottom: 22, padding: '14px 18px', borderRadius: 16,
+          border: '1px solid #fde68a', background: 'linear-gradient(135deg, #fffbeb, #ffffff)',
+          boxShadow: '0 6px 20px -10px rgba(245,158,11,0.35)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+            <div style={{
+              width: 38, height: 38, borderRadius: 12, flexShrink: 0,
+              background: 'linear-gradient(135deg, #f59e0b, #d97706)', color: '#fff',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <AlertTriangle width={18} height={18} />
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#92400e', marginBottom: 2 }}>
+                Configuração de Agendamentos movida
+              </div>
+              <div style={{ fontSize: 11.5, color: '#a16207', lineHeight: 1.45 }}>
+                A gestão de Agendamentos Automáticos agora está integrada em <b>Crédito Consignado → Configurações • Automações</b>.
+                Esta página mantém apenas Saúde das Pastas, Nova Importação e Histórico de Jobs.
+              </div>
+            </div>
+          </div>
+          <a
+            href="/credito#configuracoes-automacao"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8, flexShrink: 0,
+              padding: '9px 15px', borderRadius: 12, textDecoration: 'none', fontWeight: 800, fontSize: 12.5,
+              background: 'linear-gradient(180deg, #00AE9D, #008C7D)', color: '#fff',
+              boxShadow: '0 8px 18px rgba(0,174,157,0.28)', border: 'none', cursor: 'pointer',
+            }}
+          >
+            <Settings2 width={14} height={14} />
+            Ir para Automações (oficial)
+          </a>
+        </div>
+
         {/* DRIVE HEALTH */}
         <section style={{ marginBottom: 22 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -395,6 +482,8 @@ export default function AutomacaoPage() {
             )}
           </div>
         </section>
+
+
 
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 5fr) minmax(0, 7fr)', gap: 20 }}>
           {/* COLUNA ESQUERDA: FORM + JOB ATIVO */}
@@ -729,6 +818,16 @@ export default function AutomacaoPage() {
 }
 
 // HELPERS STYLE
+function lblStyle(): React.CSSProperties {
+  return {
+    display: 'block',
+    fontSize: 12,
+    fontWeight: 700,
+    color: '#0f172a',
+    marginBottom: 6,
+  }
+}
+
 function inputStyle({ asBtn = false, justifyContent = 'flex-start' }: { asBtn?: boolean; justifyContent?: 'flex-start' | 'space-between' } = {}): React.CSSProperties {
   return {
     width: '100%',

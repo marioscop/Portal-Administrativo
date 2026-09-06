@@ -207,6 +207,16 @@ export class ConsignadoService {
     _mod,
     'runAutomationScheduleNow',
   );
+  readonly upsertAutomationSchedule = resolveModuleFn(
+    ns.upsertAutomationSchedule,
+    _mod,
+    'upsertAutomationSchedule',
+  );
+  readonly deleteAutomationSchedule = resolveModuleFn(
+    ns.deleteAutomationSchedule,
+    _mod,
+    'deleteAutomationSchedule',
+  );
   readonly getAutomationGlobalConfig = resolveModuleFn(
     ns.getAutomationConfig,
     _mod,
