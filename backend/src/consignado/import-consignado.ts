@@ -7405,7 +7405,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       mode: 'append',
       folderCandidates: ['Relatório Orgão/MPGO', 'Relatório Orgão/MP', 'MPGO', 'MP'],
       ignoreImportados: true,
-      checkDuplicateContent: true,
+      checkDuplicateContent: false,
       moveToImportadosSubfolderAfterImport: true,
     },
   });
@@ -30238,7 +30238,26 @@ function addMissingColumnsAndImportRows(
         return String(v);
       });
       if (checkDuplicateContent && hashExists) {
-        const rh = hashRow(kind, importCols, Object.fromEntries(importCols.map((c, i) => [c, vals[i]])));
+        // ====== REGRA OBRIGATÓRIA: só pula se Nome + CPF + Copetencia + Contrato + N° Parcela forem IGUAIS. ======
+        // Garante que colunas acima SEMPRE entram no hash, independente de importCols (perfil whitelist 9 cols NEOCONSIG não inclui Copetencia explicitamente no headers)
+        const rowObjForced: Record<string, unknown> = Object.fromEntries(importCols.map((c, i) => [c, vals[i]]));
+        const forcedColsSeed = [
+          'Copetencia','Nome','CPF','Contrato','N° Parcela',
+          'Competencia','Matrícula','Matricula','Órgão','Orgao','Secretaria','SECRETARIA',
+          '__competencia','Copetência','COMPETENCIA','COMPETÊNCIA',
+        ].filter((c, idx, arr) => arr.indexOf(c) === idx);
+        const forcedPrefix = forcedColsSeed
+          .map(c => {
+            let v: unknown;
+            if (Object.prototype.hasOwnProperty.call(rowObjForced, c)) v = rowObjForced[c];
+            else if (extraStaticColumns && Object.prototype.hasOwnProperty.call(extraStaticColumns, c)) v = extraStaticColumns[c];
+            else v = '';
+            return `${c}=${toStableValue(v)}`;
+          })
+          .join('\u001E');
+        const rhForced = crypto.createHash('sha256').update(forcedPrefix, 'utf8').digest('hex').slice(0, 16);
+        const rhBase = hashRow(kind, importCols, rowObjForced);
+        const rh = crypto.createHash('sha256').update(`${rhForced}|${rhBase}`, 'utf8').digest('hex');
         hashExists.bind([kind, rh] as unknown as any[]);
         const found = hashExists.step();
         try { hashExists.reset(); } catch { /* ignore */ }
@@ -30959,6 +30978,23 @@ export async function importByLearningProfileFromFolderUrl(opts: {
 
       let profile: LearningProfileMatch | null = matchingProfiles[0] ?? null;
 
+      // ================ v7.13 HOTFIX PERFIL EXCLUSIVO recurso_mpgo ================
+      // REGRA NOVA USUÁRIO 04/09/2026 (autorizada VERBATIM):
+      //   "se for competencia diferente não pode pular / só se nome+cpf+competencia for iguais"
+      // Implementação: desativamos completamente a camada 2 (SHA256 por linha imported_row_hashes).
+      // Apenas a CAMADA 1 (SHA256 arquivo INTEIRO) permanece ativa como proteção idempotência.
+      // Forçado aqui (antes de resolvedOptions ser consumido) para valer independente
+      // do options_json que já exista na tabela import_learning_profiles.
+      if (profile && String(profile.id || '').toLowerCase() === 'recurso_mpgo') {
+        profile = {
+          ...profile,
+          resolvedOptions: {
+            ...(profile.resolvedOptions || {}),
+            checkDuplicateContent: false,
+          },
+        };
+      }
+
       // Profile virtual: se Tipo=Extratos e arquivo é planilha mas não tem Learning Profile salvo no BD,
       // aceita mesmo assim (insertExtratosRows tem as regras customizadas TRE independente de profile).
       if (!profile && forceKindExtratos) {
@@ -31220,18 +31256,18 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // (2) renomeia chaves em rowsToImport; (3) preserva o valor original em colunas extras (duplicamos antes de sobrescrever).
       if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_neoconsig_demais') {
         const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
-          { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
-          { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
+          { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente','SERVIDOR NOME','Nome do Servidor Completo','Associado','Associada'] },
+          { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf','CPF CLIENTE','Cpf Cliente','CPF Associado','CPF do Cliente','CPF do Associado'] },
           { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
-          { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
-          { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
-          { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
+          { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico','PRODUTO'] },
+          { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero','CONTRATO'] },
+          { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)','NUMERO PARCELAS','Numero Parcelas','Número Parcelas','N° Parcelas','Nº da Parcela','Numero da Parcela Atual','Número da Parcela Atual'] },
           { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
-          { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
-          { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
-          { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
+          { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento','VENCIMENTO PARCELA','Vencimento da Parcela','Data de Vencimento Parcela','Vencimento 1 Parcela','Venc. Parcela'] },
+          { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento','SITUACAO','Status Parcela','STATUS','STATUS ATUAL PARCELA','Status Atual Parcela','Situação Atual','Situacao Atual'] },
+          { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto','VALOR PARC AVERBADA','Valor Parc Averbada','VALOR PARCELA AVERBADA','Valor Parcela Averbada','VALOR DESC HOLERITE','Valor Desconto Holerite','Valor Parc Enviada','VALOR PARC ENVIADA','Valor da Parcela em Folha','Parcela Valor R$','Parcela (R$)','Valor Parcela Original'] },
         ];
-        const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+        const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
         const aliasLut = new Map<string, string>();
         for (const entry of canonicalAliasMap) {
           for (const a of [entry.canonical, ...entry.aliases]) {
@@ -31377,7 +31413,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           const finalHeaders = strictWhitelist.slice();
           const sourceToTarget = new Map<string, string>();
           for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
-          const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+          const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
           const sourceToTargetNorm = new Map<string, string>();
           for (const [k, v] of sourceToTarget.entries()) {
             const nk = buildNormKey(k);
@@ -31425,7 +31461,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               if (srcRawCpf.length >= 11) outRow['CPF'] = (src as any)['CPF'];
             }
             if (!String(outRow['Nome'] ?? '').trim()) {
-              const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome'];
+              const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente','SERVIDOR NOME','Nome do Servidor Completo','Associado','Associada'];
               for (const cand of nomeAliases) {
                 const v = Object.prototype.hasOwnProperty.call(src, cand) ? (src as any)[cand] : null;
                 if (v !== null && v !== undefined && String(v).trim().length > 2) {
@@ -31437,7 +31473,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 for (const srcKey of Object.keys(src)) {
                   const nk = buildNormKey(srcKey);
                   if (!nk) continue;
-                  if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome')) continue;
+                  if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome' || nk === 'cliente' || nk === 'nome do cliente' || nk === 'servidor nome' || nk === 'nome do servidor completo' || nk === 'associado' || nk === 'associada')) continue;
                   const v = src[srcKey];
                   if (v !== null && v !== undefined && String(v).trim().length > 2) {
                     outRow['Nome'] = v;
@@ -32037,7 +32073,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
 
       const extraStatic: Record<string, string | null> = {};
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') {
         if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
       }
 
@@ -32124,6 +32160,48 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
       // ====== FIM DEBUG RECURSO TRT/TRE ======
 
+      // ====== SPLIT DINÂMICO POR SECRETARIA — PERFIL recurso_neoconsig_demais ======
+      // Regra: coluna SECRETARIA do Excel define a tabela "Recurso <SECRETARIA>" dinâmica.
+      // Fallback: SECRETARIA vazia / NÃO IDENTIFICADA / sem coluna → tabela fixa "Recurso (NEOCONSIG)".
+      const splitBySecretariaEnabled: boolean =
+        kindLower === 'recurso_neoconsig_demais' && Array.isArray(rowsToImport) && rowsToImport.length > 0;
+      let neoconSecretariaGroups: Array<{ secretaria: string; targetTable: string; rows: Array<Record<string, unknown>> }> = [];
+      if (splitBySecretariaEnabled) {
+        const secretariaHeadersCandidates: string[] = [];
+        const firstRowKeys = Object.keys(rowsToImport[0] ?? {});
+        for (const k of firstRowKeys) {
+          if (normalizeHeaderKey(k).replace(/\s+/g, '') === 'SECRETARIA') {
+            secretariaHeadersCandidates.push(k);
+          }
+        }
+        const secretariaKey: string | null = secretariaHeadersCandidates[0] ?? null;
+        if (secretariaKey) {
+          const map = new Map<string, Array<Record<string, unknown>>>();
+          for (const rawRow of rowsToImport as Array<Record<string, unknown>>) {
+            const raw = String((rawRow as any)[secretariaKey] ?? '').trim();
+            let norm = String(raw ?? '')
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toUpperCase()
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (norm === '' || norm === 'NÃO IDENTIFICADA' || norm === 'NAO IDENTIFICADA') {
+              norm = '';
+            }
+            const bucketKey = norm;
+            if (!map.has(bucketKey)) map.set(bucketKey, []);
+            (map.get(bucketKey) as Array<Record<string, unknown>>).push(rawRow as Record<string, unknown>);
+          }
+          neoconSecretariaGroups = Array.from(map.entries()).map(([norm, rows]) => {
+            const targetTable: string = norm === '' ? String(tableName) : 'Recurso ' + norm;
+            return { secretaria: norm === '' ? '(fallback)' : norm, targetTable, rows };
+          }).sort((a, b) => b.rows.length - a.rows.length);
+        } else {
+          neoconSecretariaGroups = [{ secretaria: '(coluna SECRETARIA ausente — fallback)', targetTable: String(tableName), rows: rowsToImport as Array<Record<string, unknown>> }];
+        }
+      }
+      // ====== FIM SPLIT DINÂMICO POR SECRETARIA ======
+
       let res: { insertedRows: number; skippedRows: number };
       if (kindLower === 'extratos') {
         const ir = insertExtratosRows({
@@ -32139,6 +32217,33 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               : null,
         });
         res = { insertedRows: ir.insertedRows, skippedRows: ir.skippedRows };
+      } else if (splitBySecretariaEnabled && neoconSecretariaGroups.length > 0) {
+        // Chama addMissingColumnsAndImportRows UMA VEZ POR GRUPO DE SECRETARIA e acumula resultados
+        const extraArg = Object.keys(extraStatic).length > 0 ? extraStatic : undefined;
+        let insertedTotal = 0;
+        let skippedTotal = 0;
+        const splitterDebugLines: string[] = [];
+        splitterDebugLines.push('\n' + '═'.repeat(110));
+        splitterDebugLines.push(`║ [SPLIT NEOCONSIG SECRETARIA L32070] totalRows=${rowsToImport?.length ?? -1} grupos=${neoconSecretariaGroups.length}  file=${String(file?.name ?? '?')}`);
+        splitterDebugLines.push('═'.repeat(110));
+        for (let gi = 0; gi < neoconSecretariaGroups.length; gi++) {
+          const g = neoconSecretariaGroups[gi];
+          const part = addMissingColumnsAndImportRows(
+            db,
+            g.targetTable,
+            headersToImport,
+            g.rows as Array<Record<string, any>>,
+            checkDup,
+            modeOverride,
+            extraArg,
+          );
+          insertedTotal += part.insertedRows;
+          skippedTotal += part.skippedRows;
+          splitterDebugLines.push(`║   [GRUPO ${String(gi + 1).padStart(2, '0')}/${String(neoconSecretariaGroups.length).padStart(2, '0')}]  secretaria="${g.secretaria}"  →  tabela="${g.targetTable}"  rows=${String(g.rows.length).padStart(4, ' ')}  inserted=${String(part.insertedRows).padStart(4, ' ')}  skipped=${String(part.skippedRows).padStart(4, ' ')}`);
+        }
+        splitterDebugLines.push('═'.repeat(110) + '\n');
+        console.log(splitterDebugLines.join('\n'));
+        res = { insertedRows: insertedTotal, skippedRows: skippedTotal };
       } else {
         res = addMissingColumnsAndImportRows(
           db,
@@ -32262,7 +32367,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                   finalCols: headersToImport.filter((h) => h !== 'Copetencia').length,
                 }
               : null,
-          moveToImportados: (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'extratos' || kindLower === 'relatorio') ? { requested: moveToImportados, result: moveResult } : null,
+          moveToImportados: (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') ? { requested: moveToImportados, result: moveResult } : null,
           headersPreview: parsedFinal.headers.slice(0, 12),
           importedHeadersPreview: headersToImport.slice(0, 12),
         });
@@ -32894,7 +32999,7 @@ export async function debugOneshotTrtLocalImport(opts: {
     out.phase = 'learningProfileResolve';
     const allProfiles = findLearningProfilesFor(db, '', 'recurso_trt');
     let matchedProfile: LearningProfileMatch | null = null;
-    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
     for (const p of allProfiles) {
       try {
         const reTxt = String(p.file_name_regex ?? '').trim();
@@ -33024,7 +33129,7 @@ export async function debugOneshotTrtLocalImport(opts: {
             { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
             { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
           ];
-          const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+          const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
           const aliasLut = new Map<string, string>();
           for (const entry of canonicalAliasMap) {
             for (const a of [entry.canonical, ...entry.aliases]) {
@@ -33134,7 +33239,7 @@ export async function debugOneshotTrtLocalImport(opts: {
             const finalHeaders = strictWhitelist.slice();
             const sourceToTarget = new Map<string, string>();
             for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
-            const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+            const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
             const sourceToTargetNorm = new Map<string, string>();
             for (const [k, v] of sourceToTarget.entries()) {
               const nk = buildNormKey(k);
@@ -33551,7 +33656,7 @@ export async function debugOneshotTreLocalImport(opts: {
     out.phase = 'learningProfileResolve';
     const allProfiles = findLearningProfilesFor(db, '', 'recurso_tre');
     let matchedProfile: LearningProfileMatch | null = null;
-    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
     for (const p of allProfiles) {
       try {
         const reTxt = String(p.file_name_regex ?? '').trim();
@@ -34046,6 +34151,625 @@ export async function debugOneshotTreLocalImport(opts: {
     out.ok = true;
     out.phase = 'done';
     out.hint = 'Debug oneshot LOCAL TRE finalizado. Ver logs acima no processo backend. Depois validar SQL: SELECT rowid,* FROM "Recurso TRE" ORDER BY rowid DESC LIMIT 10;';
+    return out;
+  } catch (e: any) {
+    out.phase = 'uncaught';
+    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
+    return out;
+  }
+}
+// #endregion
+
+// #region debug-oneshot-neoconsig-local
+export async function debugOneshotNeoconsigLocalImport(opts: {
+  localXlsxPath?: string;
+  fileName?: string;
+  folderPath?: string;
+  fileId?: string;
+  parentFolderId?: string;
+  mode?: 'append' | 'replace';
+  resetHashesFirst?: boolean;
+  deleteLixoRowidsGte2?: boolean;
+}): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { ok: false, phase: 'init' };
+  const _crypto = require('crypto') as typeof import('crypto');
+  const _fs = require('fs') as typeof import('fs');
+  const _path = require('path') as typeof import('path');
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
+
+    if (Boolean(opts.resetHashesFirst ?? true)) {
+      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%NEOCONSIG%' OR value LIKE '%recurso_neoconsig_demais%' OR value LIKE '%neoconsig%')`);
+      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'recurso_neoconsig_demais' OR kind LIKE '%neoconsig%'`);
+      db.run(`DELETE FROM import_batch_rows WHERE kind = 'recurso_neoconsig_demais'`);
+      db.run(`DELETE FROM import_batches WHERE kind = 'recurso_neoconsig_demais'`);
+    }
+    if (Boolean(opts.deleteLixoRowidsGte2 ?? false)) {
+      try {
+        const rDel = db.run('DELETE FROM "Recurso (NEOCONSIG)" WHERE rowid >= 2');
+        out.deletedLixoRowidsGte2 = rDel.getRowsModified();
+      } catch (e) {
+        try {
+          const rDel = db.run('DELETE FROM "Recurso (NEOCONSIG)"');
+          out.deletedLixoRowidsGte2 = rDel.getRowsModified();
+        } catch (_) { out.deletedLixoRowidsGte2 = null; }
+      }
+    }
+
+    const localPath = String(opts.localXlsxPath || '').trim();
+    if (!localPath || !_fs.existsSync(localPath)) {
+      out.error = `localXlsxPath não existe: ${localPath}`;
+      return out;
+    }
+    out.localXlsxPath = localPath;
+    const buffer = _fs.readFileSync(localPath);
+    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
+    out.sha256 = sha256Hex;
+    out.bufferBytes = buffer.length;
+    out.phase = 'sheetRead';
+
+    const fileName = String(opts.fileName || _path.basename(localPath) || 'NEOCONSIG-TODOS-AGOSTO-2026.xlsx');
+    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Agosto/Relatório Demais Orgão');
+    const fileId = String(opts.fileId || 'debug-local-neoconsig-' + Date.now());
+    const parentId = String(opts.parentFolderId || 'debug-local-parent-neoconsig');
+    const mode = String(opts.mode || 'append') as 'append' | 'replace';
+
+    out.phase = 'learningProfileResolve';
+    const allProfiles = findLearningProfilesFor(db, '', 'recurso_neoconsig_demais');
+    let matchedProfile: LearningProfileMatch | null = null;
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+    for (const p of allProfiles) {
+      try {
+        const reTxt = String(p.file_name_regex ?? '').trim();
+        if (!reTxt) continue;
+        if (new RegExp(reTxt, 'i').test(fileName)) {
+          matchedProfile = p; break;
+        }
+      } catch (_re) { /* ignore */ }
+    }
+    if (!matchedProfile && allProfiles.length > 0) matchedProfile = allProfiles[0];
+    if (!matchedProfile) {
+      out.error = `Nenhum learning profile kind=recurso_neoconsig_demais encontrou arquivo ${fileName}. Perfil upsert falhou?`;
+      try { persistDatabase(db, dbFilePath); } catch (_) {}
+      try { await db.close(); } catch (_) {}
+      return out;
+    }
+    out.profile = { id: matchedProfile.id, kind: matchedProfile.kind, target_table: matchedProfile.target_table, file_name_regex: matchedProfile.file_name_regex };
+    const profile: any = {
+      id: matchedProfile.id,
+      kind: matchedProfile.kind,
+      target_table: matchedProfile.target_table,
+      resolvedOptions: typeof matchedProfile.options_json === 'string' ? JSON.parse(matchedProfile.options_json) : (matchedProfile.options_json || {}),
+    };
+
+    const kindLower = String(profile?.kind || '').trim().toLowerCase();
+    out.kindLower = kindLower;
+    const tableName = String(profile?.target_table || 'Recurso (NEOCONSIG)');
+    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
+    const moveToImportados = Boolean(profile?.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? false);
+    const modeOverride: any = mode;
+
+    const file: any = { name: fileName, folderPath, id: fileId, parentId, size: buffer.length };
+    const parsedFinal: any = readSheetTable(buffer, 'recurso_neoconsig_demais');
+    out.sheetHeaders = parsedFinal.headers?.slice(0, 40) || [];
+    out.sheetHeadersCount = parsedFinal.headers?.length || 0;
+    out.sheetRowsCount = parsedFinal.rows?.length || 0;
+    out.extractedCompetenciaMmAaaa = parsedFinal.extractedCompetenciaMmAaaa || null;
+    out.phase = 'importPerFile (pipeline 10 cols inline)';
+    const importedFiles: any[] = [];
+    let insertedRows = 0;
+    let skippedRows = 0;
+    let totalRowsSkipped = 0;
+    const driveId = 'debug-local-drive';
+    const parentFolderId = parentId;
+    const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
+
+    try {
+      {
+        const kindLowerInner = kindLower;
+        const parsedFinalScoped: any = parsedFinal;
+        const fileScoped: any = file;
+        const profileScoped: any = profile;
+        const extractCompet = Boolean(profileScoped?.resolvedOptions?.extractCompetenciaFromTopHeader || profileScoped?.resolvedOptions?.extractCompetenciaFromFileName || profileScoped?.resolvedOptions?.competenciaMesArquivoSemIncremento);
+        const strictWhitelist = Array.isArray(profileScoped?.resolvedOptions?.strictColumnWhitelist) ? profileScoped.resolvedOptions.strictColumnWhitelist.slice() : [];
+        const strictMinMatches = Number(profileScoped?.resolvedOptions?.strictColumnMinMatches ?? 0);
+        const tableNameInner = tableName;
+        const checkDupFinal = checkDup;
+        const moveToImportadosFinal = moveToImportados;
+        const driveIdFinal: any = driveId;
+        const parentFolderIdFinal = parentFolderId;
+        const anyFileFinal: any = file;
+        const modeOverrideFinal: any = modeOverride;
+
+        let headersToImport: string[] = parsedFinalScoped.headers;
+        let rowsToImport: Array<Record<string, unknown>> = parsedFinalScoped.rows;
+        let competFromHeader: string | null = null;
+
+        if (kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre' || kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_neoconsig_demais') {
+          const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
+            { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente','SERVIDOR NOME','Nome do Servidor Completo','Associado','Associada'] },
+            { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf','CPF CLIENTE','Cpf Cliente','CPF Associado','CPF do Cliente','CPF do Associado'] },
+            { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
+            { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico','PRODUTO'] },
+            { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero','CONTRATO'] },
+            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)','NUMERO PARCELAS','Numero Parcelas','Número Parcelas','N° Parcelas','Nº da Parcela','Numero da Parcela Atual','Número da Parcela Atual'] },
+            { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
+            { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento','VENCIMENTO PARCELA','Vencimento da Parcela','Data de Vencimento Parcela','Vencimento 1 Parcela','Venc. Parcela'] },
+            { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento','SITUACAO','Status Parcela','STATUS','STATUS ATUAL PARCELA','Status Atual Parcela','Situação Atual','Situacao Atual'] },
+            { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto','VALOR PARC AVERBADA','Valor Parc Averbada','VALOR PARCELA AVERBADA','Valor Parcela Averbada','VALOR DESC HOLERITE','Valor Desconto Holerite','Valor Parc Enviada','VALOR PARC ENVIADA','Valor da Parcela em Folha','Parcela Valor R$','Parcela (R$)','Valor Parcela Original'] },
+          ];
+          const buildNormAlias = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+          const aliasLut = new Map<string, string>();
+          for (const entry of canonicalAliasMap) {
+            for (const a of [entry.canonical, ...entry.aliases]) {
+              aliasLut.set(buildNormAlias(a), entry.canonical);
+            }
+          }
+          const headerRenames = new Map<string, string>();
+          const newHeaders: string[] = [];
+          for (const h of headersToImport) {
+            const canonical = aliasLut.get(buildNormAlias(h));
+            if (canonical && !headerRenames.has(h)) headerRenames.set(h, canonical);
+            newHeaders.push(canonical || h);
+          }
+          if (headerRenames.size > 0) headersToImport = newHeaders;
+        }
+
+        let profileOptionsAny: any = profileScoped?.resolvedOptions ?? {};
+        const strictWhitelistFinal = strictWhitelist;
+        const strictMinMatchesFinal = strictMinMatches;
+        const extractCompetFinal = extractCompet;
+
+        if (kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre' || kindLowerInner === 'recurso_neoconsig_demais') {
+          competFromHeader = extractCompetFinal ? (parsedFinalScoped.extractedCompetenciaMmAaaa ?? null) : null;
+          if (Boolean(profileOptionsAny?.extractCompetenciaFromFileName ?? false) || Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false)) {
+            const mmNome: Record<string, number> = {
+              janeiro:1, fev:2, fevereiro:2, feve:2, mar:3, marco:3, março:3, marÇo:3,
+              abr:4, abril:4, mai:5, maio:5, jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8,
+              set:9, sep:9, setembro:9, out:10, outu:10, outubro:10, nov:11, novembro:11, dez:12, dezembro:12,
+              jan:1, feb:2, apr:4, may:5, jun_e:6, jul_e:7, aug:8, oct:10, dec:12,
+              january:1, february:2, march:3, april:4, june:6, july:7, august:8, september:9, october:10, november:11, december:12,
+            };
+            const buildNorm2 = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+            const fnNorm = buildNorm2(String(fileScoped.name ?? ''));
+            const mAno = fnNorm.match(/\b(20\d{2}|[12]\d{3})\b/);
+            let mmTok = '';
+            const sortedKeys = Object.keys(mmNome).sort((a, b) => b.length - a.length);
+            for (const k of sortedKeys) {
+              if (fnNorm.includes(' ' + k + ' ') || fnNorm.includes('-' + k + '-') || fnNorm.includes('_' + k + '_') || fnNorm.startsWith(k + ' ') || fnNorm.endsWith(' ' + k)) {
+                mmTok = k; break;
+              }
+              const re = new RegExp('(^|[ _-])' + k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '([ _-]|$)','i');
+              if (re.test(fnNorm)) { mmTok = k; break; }
+            }
+            if (!mmTok) {
+              const toks = fnNorm.split(/[ _-]+/).filter(Boolean);
+              for (const t of toks) {
+                if (Object.prototype.hasOwnProperty.call(mmNome, t) && t.length >= 3) { mmTok = t; break; }
+              }
+            }
+            if (mAno && mmTok) {
+              const mm = mmNome[mmTok];
+              if (mm >= 1 && mm <= 12) {
+                const semIncremento = Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false);
+                let mmFinal = mm;
+                let anoFinal = Number(mAno[1]);
+                if (!semIncremento) {
+                  if (mm === 12) { mmFinal = 1; anoFinal = anoFinal + 1; }
+                  else { mmFinal = mm + 1; }
+                }
+                const cop = `${String(mmFinal).padStart(2,'0')}/${String(anoFinal)}`;
+                if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) competFromHeader = cop;
+              }
+            }
+          }
+          if (!competFromHeader && typeof fileScoped.folderPath === 'string' && fileScoped.folderPath.length > 0) {
+            const fp = String(fileScoped.folderPath).replace(/\\/g, '/');
+            const mAno = fp.match(/(^|\/)(20\d{2})(\/|$)/);
+            const m = fp.match(/(^|\/)(Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)(\/|$)/i);
+            if (mAno && m) {
+              const mm = (['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro']
+                .map((x) => x.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase())
+                .indexOf(String(m[2]).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase()) + 1);
+              if (mm >= 1 && mm <= 12) competFromHeader = `${String(mm).padStart(2,'0')}/${String(mAno[2])}`;
+            }
+          }
+          out.competFromHeader = competFromHeader;
+          if (strictWhitelistFinal && strictWhitelistFinal.length > 0) {
+            const norm = (s: string) =>
+              String(s ?? '')
+                .normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+                .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+            const whitelistNorm = strictWhitelistFinal.map((w) => ({ orig: w, norm: norm(w) }));
+            out.whitelistNorm = whitelistNorm;
+            const matchedBySource: Array<{ sourceHeader: string; targetHeader: string }> = [];
+            for (let idx = 0; idx < headersToImport.length; idx++) {
+              const hOrig = parsedFinalScoped.headers[idx] || headersToImport[idx];
+              const hNormKey = headersToImport[idx] || hOrig;
+              const hn = norm(hNormKey);
+              const hit = whitelistNorm.find((w) => w.norm === hn || (hn && w.norm && (w.norm.startsWith(hn) || hn.startsWith(w.norm)) && Math.abs(w.norm.length - hn.length) <= 5));
+              if (hit) matchedBySource.push({ sourceHeader: hOrig, targetHeader: hit.orig });
+            }
+            const seenTargets = new Set<string>();
+            const dedupedMatches: Array<{ sourceHeader: string; targetHeader: string }> = [];
+            for (const m of matchedBySource) {
+              if (seenTargets.has(m.targetHeader)) continue;
+              seenTargets.add(m.targetHeader);
+              dedupedMatches.push(m);
+            }
+            const realMatches = dedupedMatches;
+            out.strictMatches = realMatches;
+            out.strictMatchesCount = realMatches.length;
+            out.strictMinMatches = strictMinMatchesFinal;
+            if (realMatches.length < strictMinMatchesFinal) {
+              importedFiles.push({
+                fileName: fileScoped.name, targetTable: tableNameInner, kind: profileScoped.kind,
+                profileId: profileScoped.id, insertedRows: 0, skippedRows: parsedFinalScoped.rows.length,
+                headers: parsedFinalScoped.headers,
+                skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatchesFinal}`,
+              });
+              totalRowsSkipped += parsedFinalScoped.rows.length;
+              skippedRows = parsedFinalScoped.rows.length;
+              insertedRows = 0;
+              out.insertResult = { insertedRows: 0, skippedRows: parsedFinalScoped.rows.length, skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatchesFinal}` };
+              throw new Error(`strict whitelist ${realMatches.length} < ${strictMinMatchesFinal}`);
+            }
+            const finalHeaders = strictWhitelistFinal.slice();
+            const sourceToTarget = new Map<string, string>();
+            for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
+            const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+            const sourceToTargetNorm = new Map<string, string>();
+            for (const [k, v] of sourceToTarget.entries()) {
+              const nk = buildNormKey(k);
+              if (nk && !sourceToTargetNorm.has(nk)) sourceToTargetNorm.set(nk, v);
+            }
+            const finalRowsRaw: Array<Record<string, unknown>> = [];
+            const srcRows = Array.isArray(rowsToImport) && rowsToImport.length > 0 ? rowsToImport : parsedFinalScoped.rows;
+            for (const src of srcRows) {
+              const outRow: Record<string, unknown> = {};
+              for (const targetCol of finalHeaders) outRow[targetCol] = null;
+              for (const srcKey of Object.keys(src)) {
+                let target = sourceToTarget.get(srcKey);
+                if (!target) {
+                  const nk = buildNormKey(srcKey);
+                  if (nk) target = sourceToTargetNorm.get(nk);
+                }
+                if (!target) continue;
+                const v = src[srcKey];
+                outRow[target] = v === undefined ? null : v;
+              }
+              const outRowCpf = String(outRow['CPF'] ?? '').replace(/[^\d]/g, '').trim();
+              if (outRowCpf.length < 11 && typeof (src as any)['CPF'] !== 'undefined' && (src as any)['CPF'] !== null) {
+                const srcRawCpf = String((src as any)['CPF'] ?? '').replace(/[^\d]/g, '').trim();
+                if (srcRawCpf.length >= 11) outRow['CPF'] = (src as any)['CPF'];
+              }
+              if (!String(outRow['Nome'] ?? '').trim()) {
+                const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente'];
+                for (const cand of nomeAliases) {
+                  const v = Object.prototype.hasOwnProperty.call(src, cand) ? (src as any)[cand] : null;
+                  if (v !== null && v !== undefined && String(v).trim().length > 2) {
+                    outRow['Nome'] = v; break;
+                  }
+                }
+                if (!String(outRow['Nome'] ?? '').trim() && typeof buildNormKey === 'function') {
+                  for (const srcKey of Object.keys(src)) {
+                    const nk = buildNormKey(srcKey);
+                    if (!nk) continue;
+                    if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome' || nk === 'cliente' || nk === 'nome do cliente')) continue;
+                    const v = src[srcKey];
+                    if (v !== null && v !== undefined && String(v).trim().length > 2) {
+                      outRow['Nome'] = v; break;
+                    }
+                  }
+                }
+              }
+              if (extractCompetFinal && competFromHeader) outRow.Copetencia = competFromHeader;
+              const nonEmptyCols = Object.values(outRow).filter((v) => v !== null && v !== undefined && String(v).trim().length > 0).length;
+              if (nonEmptyCols >= 2) finalRowsRaw.push(outRow);
+            }
+            if (srcRows.length === finalRowsRaw.length) {
+              for (let rIdx = 0; rIdx < finalRowsRaw.length; rIdx++) {
+                const src = srcRows[rIdx];
+                const dest = finalRowsRaw[rIdx];
+                if (src && dest && typeof src === 'object' && typeof dest === 'object') {
+                  for (const k of Object.keys(src)) {
+                    if (finalHeaders.includes(k)) continue;
+                    if (Object.prototype.hasOwnProperty.call(dest, k)) continue;
+                    const v = src[k];
+                    dest[k] = v === undefined ? null : v;
+                  }
+                }
+              }
+            }
+            const normContratoBR = (raw: unknown): string => {
+              const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+              if (!s) return '';
+              const hasComma = s.includes(',');
+              const hasDot = s.includes('.');
+              if (hasComma && !hasDot) return s;
+              if (!hasComma && hasDot) {
+                const lastDot = s.lastIndexOf('.');
+                const tail = s.slice(lastDot + 1);
+                if (tail.length === 3 && /^\d+$/.test(tail)) return s.replace(/\./g, ',');
+                return s.replace(/,/g, '').replace('.', ',');
+              }
+              if (hasComma && hasDot) {
+                if (s.lastIndexOf(',') > s.lastIndexOf('.')) return s.replace(/\./g, '');
+                return s.replace(/,/g, '').replace('.', ',');
+              }
+              if (!hasComma && !hasDot && /^\d{4,}$/.test(s)) {
+                return Number(s).toLocaleString('pt-BR').replace(/\./g, ',');
+              }
+              return s;
+            };
+            const afterTotals: Array<Record<string, unknown>> = [];
+            const seenIntra = new Set<string>();
+            const dedupKey = (r: Record<string, unknown>): string => {
+              const cop = Object.prototype.hasOwnProperty.call(r, 'Copetencia') ? String(r['Copetencia'] ?? '').trim() : '';
+              const nome = Object.prototype.hasOwnProperty.call(r, 'Nome') ? String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase() : '';
+              const cpf = (String(Object.prototype.hasOwnProperty.call(r, 'CPF') ? r['CPF'] : '') ?? '').replace(/[^\d]/g, '').trim();
+              const contrato = normContratoBR(Object.prototype.hasOwnProperty.call(r, 'Contrato') ? r['Contrato'] : '');
+              const nParcela = Object.prototype.hasOwnProperty.call(r, 'N Parcela') ? String(r['N Parcela'] ?? '').trim() : '';
+              return `${cop}|${cpf}|${nome}|${contrato}|${nParcela}`;
+            };
+            for (const r of finalRowsRaw) {
+              const vals = Object.values(r);
+              const anyTotal = vals.some((v) => {
+                const s = v === null || v === undefined ? '' : String(v).trim().toUpperCase();
+                return s === 'TOTAL' || s === 'TOTAIS' || s.startsWith('TOTAL ') || s.startsWith('TOTAL:') || s.startsWith('TOTAIS');
+              });
+              if (anyTotal) continue;
+              const anyNotEmpty = vals.some((v) => {
+                const s = v === null || v === undefined ? '' : String(v).trim();
+                return s.length > 0;
+              });
+              if (!anyNotEmpty) continue;
+              if (Object.prototype.hasOwnProperty.call(r, 'Contrato')) r['Contrato'] = normContratoBR(r['Contrato']);
+              const k = dedupKey(r);
+              if (seenIntra.has(k)) continue;
+              seenIntra.add(k);
+              afterTotals.push(r);
+            }
+            const finalRows: Array<Record<string, unknown>> = afterTotals;
+            const maskCpf = (raw: unknown): string => {
+              const digits = String(raw ?? '').replace(/\D/g, '').slice(0, 11);
+              if (digits.length === 0) return '';
+              if (digits.length <= 3) return digits;
+              if (digits.length <= 6) return `${digits.slice(0,3)}.${digits.slice(3)}`;
+              if (digits.length <= 9) return `${digits.slice(0,3)}.${digits.slice(3,6)}.${digits.slice(6)}`;
+              return `${digits.slice(0,3)}.${digits.slice(3,6)}.${digits.slice(6,9)}-${digits.slice(9)}`;
+            };
+            const normValorParcela = (raw: unknown): string => {
+              let s = String(raw ?? '').replace(/\s+/g, ' ').trim();
+              if (!s) return '';
+              let only = s.replace(/R\$\s*/i, '').trim();
+              if (!only) return '';
+              const lastComma = only.lastIndexOf(',');
+              const lastDot = only.lastIndexOf('.');
+              if (lastComma >= 0 && lastDot < 0) only = only.replace(',', '.');
+              else if (lastComma >= 0 && lastDot >= 0) {
+                if (lastComma > lastDot) only = only.replace(/\./g, '').replace(',', '.');
+                else only = only.replace(/,/g, '');
+              }
+              return `R$ ${only}`;
+            };
+            for (const r of finalRows) {
+              if (Object.prototype.hasOwnProperty.call(r, 'Nome')) {
+                r['Nome'] = String(String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase());
+              }
+              if (Object.prototype.hasOwnProperty.call(r, 'CPF')) r['CPF'] = maskCpf(r['CPF']);
+              if (Object.prototype.hasOwnProperty.call(r, 'Desc Finalidade')) r['Desc Finalidade'] = String(r['Desc Finalidade'] ?? '').replace(/\s+/g, ' ').trim();
+              if (Object.prototype.hasOwnProperty.call(r, 'Critério de Débito')) r['Critério de Débito'] = String(r['Critério de Débito'] ?? '').replace(/\s+/g, ' ').trim();
+              if (Object.prototype.hasOwnProperty.call(r, 'Valor Parcela')) r['Valor Parcela'] = normValorParcela(r['Valor Parcela']);
+              if (Boolean(profileOptionsAny?.descFinalidadeDefaultCreditoConsignado ?? false)) {
+                const produtoRaw = Object.prototype.hasOwnProperty.call(r, 'Produto') ? r['Produto'] : null;
+                const produtoUpper = String(produtoRaw ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+                const currDesc = String(r['Desc Finalidade'] ?? '').trim().toUpperCase();
+                if (!currDesc || currDesc === produtoUpper || produtoUpper === 'EMPRESTIMO') {
+                  r['Desc Finalidade'] = 'CREDITO CONSIGNADO';
+                }
+              }
+              if (Boolean(profileOptionsAny?.contratoNormalizadoBrMilhar ?? false)) {
+                const c = String(r['Contrato'] ?? '').replace(/\s+/g,' ').trim();
+                if (c) r['Contrato'] = normContratoBR(c);
+              }
+            }
+            const canonical10ColsOrder: string[] = [
+              'Nome','CPF','Copetencia','Desc Finalidade','Contrato',
+              'N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela',
+            ];
+            const allAvailableHeaders = new Set<string>(['Copetencia', ...finalHeaders]);
+            for (const r of finalRows) for (const k of Object.keys(r)) allAvailableHeaders.add(k);
+            const canonicalBasePresent: string[] = canonical10ColsOrder.filter((h) => allAvailableHeaders.has(h));
+            const extraHeadersFromRows: string[] = [];
+            const seenHeaders = new Set<string>(canonicalBasePresent);
+            for (const r of finalRows) {
+              for (const k of Object.keys(r)) {
+                if (seenHeaders.has(k)) continue;
+                seenHeaders.add(k);
+                extraHeadersFromRows.push(k);
+              }
+            }
+            headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
+            rowsToImport = finalRows;
+          } else if (extractCompetFinal && competFromHeader) {
+            rowsToImport = parsedFinalScoped.rows.map((r: any) => ({ ...r, Copetencia: competFromHeader }));
+            if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
+          }
+        }
+
+        const extraStatic: Record<string, string | null> = {};
+        if (kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre' || kindLowerInner === 'recurso_neoconsig_demais' || kindLowerInner === 'extratos' || kindLowerInner === 'relatorio') {
+          if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
+        }
+
+        console.log(`\n` + '═'.repeat(110));
+        console.log(`║ [DEBUG LOCAL NEOCONSIG L30002-ONESHOT] ANTES DO INSERT — arquivo=${String(fileScoped.name ?? '?')}  kind=${kindLowerInner}`);
+        console.log(`═`.repeat(110));
+        const optsX = profileScoped?.resolvedOptions ?? {};
+        console.log(`║ [1/5] profile.resolvedOptions (${Object.keys(optsX).length} chaves):`);
+        Object.keys(optsX).sort().forEach(fn => {
+          const v = (optsX as any)[fn];
+          const mark = (typeof v === 'boolean' && v === true) ? '✅ TRUE ' : (typeof v === 'boolean' ? '❌ FALSE' : `⚠️ ${typeof v}`);
+          console.log(`║       ${mark}  ${fn}${typeof v !== 'boolean' ? ' = ' + JSON.stringify(v).slice(0, 80) : ''}`);
+        });
+        console.log(`║ [2/5] Strict whitelist matches = ${out.strictMatchesCount}/${out.strictMinMatches}`);
+        if (Array.isArray(out.strictMatches)) {
+          out.strictMatches.forEach(m => console.log(`║       ✅ ${m.sourceHeader.padEnd(32)} → ${m.targetHeader}`));
+        }
+        console.log(`║ [3/5] Competência = ${competFromHeader ?? 'NULL'}  |  moveToImportados = ${moveToImportadosFinal}  |  checkDup = ${checkDupFinal}`);
+        console.log(`║ [4/5] headersToImport (${headersToImport.length} cols — ORDEM):`);
+        headersToImport.slice(0, 40).forEach((h, i) => {
+          const cidMark = (i <= 9) ? ` 🔹CID${String(i).padStart(2,'0')}` : `     `;
+          console.log(`║       [${String(i).padStart(2,'0')}]${cidMark}  ${h}`);
+        });
+        if (rowsToImport && rowsToImport.length > 0) {
+          const r0 = rowsToImport[0];
+          console.log(`║ [5/5] rowsToImport[0] — total=${rowsToImport.length} linhas:`);
+          const main10 = ['Nome','CPF','Copetencia','Desc Finalidade','Contrato','N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela'];
+          for (const mk of main10) {
+            const v = (r0 as any)?.[mk];
+            const ok = (v !== null && v !== undefined && String(v).trim() !== '');
+            console.log(`║       10COLS ${ok ? '✅' : '❌'} ${mk.padEnd(20)} → ${JSON.stringify(v)}`);
+          }
+          Object.keys(r0||{}).filter(k => !main10.includes(k)).slice(0, 20).forEach(k => {
+            const v = (r0 as any)?.[k];
+            if (v === null || v === undefined || String(v).trim() === '') return;
+            console.log(`║       EXTRA  🔹 ${String(k).padEnd(20)} → ${JSON.stringify(String(v ?? '').slice(0, 40))}`);
+          });
+        } else {
+          console.log(`║ [5/5] rowsToImport VAZIO length=0`);
+        }
+        console.log(`═`.repeat(110) + '\n');
+
+        // ====== SPLIT DINÂMICO POR SECRETARIA — ONESHOT NEOCONSIG LOCAL ======
+        let res: { insertedRows: number; skippedRows: number } = { insertedRows: 0, skippedRows: 0 };
+        const splitEnabledOneshot: boolean =
+          kindLowerInner === 'recurso_neoconsig_demais' && Array.isArray(rowsToImport) && rowsToImport.length > 0;
+        const secretariaHeadersCandidates: string[] = [];
+        const firstRowKeys = Object.keys(rowsToImport[0] ?? {});
+        for (const k of firstRowKeys) {
+          if (normalizeHeaderKey(k).replace(/\s+/g, '') === 'SECRETARIA') {
+            secretariaHeadersCandidates.push(k);
+          }
+        }
+        const secretariaKeyOneshot: string | null = secretariaHeadersCandidates[0] ?? null;
+        const groupsOneshot: Array<{ secretaria: string; targetTable: string; rows: Array<Record<string, unknown>> }> = [];
+        if (splitEnabledOneshot && secretariaKeyOneshot) {
+          const map = new Map<string, Array<Record<string, unknown>>>();
+          for (const rawRow of rowsToImport as Array<Record<string, unknown>>) {
+            const raw = String((rawRow as any)[secretariaKeyOneshot] ?? '').trim();
+            let norm = String(raw ?? '')
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .toUpperCase()
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (norm === '' || norm === 'NÃO IDENTIFICADA' || norm === 'NAO IDENTIFICADA') {
+              norm = '';
+            }
+            if (!map.has(norm)) map.set(norm, []);
+            (map.get(norm) as Array<Record<string, unknown>>).push(rawRow as Record<string, unknown>);
+          }
+          for (const [norm, rows] of Array.from(map.entries()).sort((a, b) => b[1].length - a[1].length)) {
+            const tt: string = norm === '' ? String(tableNameInner) : 'Recurso ' + norm;
+            groupsOneshot.push({ secretaria: norm === '' ? '(fallback)' : norm, targetTable: tt, rows });
+          }
+        }
+        if (groupsOneshot.length > 0) {
+          const extraArg = Object.keys(extraStatic).length > 0 ? extraStatic : undefined;
+          let iTot = 0;
+          let sTot = 0;
+          const lines: string[] = [];
+          lines.push('\n' + '═'.repeat(110));
+          lines.push(`║ [SPLIT NEOCONSIG SECRETARIA ONESHOT] totalRows=${rowsToImport.length} grupos=${groupsOneshot.length}`);
+          lines.push('═'.repeat(110));
+          for (let gi = 0; gi < groupsOneshot.length; gi++) {
+            const g = groupsOneshot[gi];
+            const part = addMissingColumnsAndImportRows(
+              db,
+              g.targetTable,
+              headersToImport,
+              g.rows as Array<Record<string, any>>,
+              checkDupFinal,
+              modeOverrideFinal,
+              extraArg,
+            );
+            iTot += part.insertedRows;
+            sTot += part.skippedRows;
+            lines.push(`║   [GRUPO ${String(gi + 1).padStart(2, '0')}/${String(groupsOneshot.length).padStart(2, '0')}]  secretaria="${g.secretaria}"  →  tabela="${g.targetTable}"  rows=${String(g.rows.length).padStart(4, ' ')}  inserted=${String(part.insertedRows).padStart(4, ' ')}  skipped=${String(part.skippedRows).padStart(4, ' ')}`);
+          }
+          lines.push('═'.repeat(110) + '\n');
+          console.log(lines.join('\n'));
+          res = { insertedRows: iTot, skippedRows: sTot };
+          out.neoconSecretariaGroups = groupsOneshot.map(g => ({ secretaria: g.secretaria, targetTable: g.targetTable, rowsInput: g.rows.length, insertedRows: 0, skippedRows: 0 }));
+        } else {
+          res = addMissingColumnsAndImportRows(
+            db,
+            tableNameInner,
+            headersToImport,
+            rowsToImport,
+            checkDupFinal,
+            modeOverrideFinal,
+            Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
+          );
+        }
+        insertedRows = res.insertedRows;
+        skippedRows = res.skippedRows;
+        out.insertResult = res;
+        out.resGlobal = { insertedRows: res.insertedRows, skippedRows: res.skippedRows };
+        out.gateMovePassa = (res.insertedRows > 0 || res.skippedRows > 0);
+        markFileImportedByContentHash(db, sha256Hex, {
+          fileName,
+          fileId,
+          kind: profile?.kind || null,
+          targetTable: groupsOneshot.length > 0 ? ('multi split: ' + groupsOneshot.map(g => g.targetTable).join(',')) : (profile?.target_table || null),
+          profileId: profile?.id || null,
+          insertedRows: res.insertedRows,
+          skippedRows: res.skippedRows,
+          mode: modeOverrideFinal,
+          at: new Date().toISOString(),
+        });
+        importedFiles.push({
+          fileName,
+          targetTable: groupsOneshot.length > 0 ? groupsOneshot.map(g => g.targetTable) : (profile?.target_table),
+          kind: profile?.kind,
+          profileId: profile?.id,
+          insertedRows: res.insertedRows,
+          skippedRows: res.skippedRows,
+          headers: headersToImport.slice(0, 30),
+          skippedReason: null,
+          groups: groupsOneshot.length > 0 ? groupsOneshot.map(g => ({ secretaria: g.secretaria, targetTable: g.targetTable, rows: g.rows.length })) : null,
+        });
+      }
+      out.importedFiles = importedFiles;
+      out.insertedRowsFinal = insertedRows;
+      out.skippedRowsFinal = skippedRows;
+    } catch (pipeE: any) {
+      out.pipelineError = String(pipeE?.stack || pipeE?.message || pipeE).slice(0, 2000);
+      out.importedFiles = importedFiles;
+      out.insertedRowsFinal = insertedRows;
+      out.skippedRowsFinal = skippedRows;
+    }
+
+    try {
+      const cntQ = db.exec(`SELECT COUNT(*) AS c FROM "Recurso (NEOCONSIG)"`);
+      out.countAll = (cntQ && cntQ[0] && cntQ[0].values && cntQ[0].values[0]) ? cntQ[0].values[0][0] : null;
+      const cntCop = db.exec(`SELECT Copetencia, COUNT(*) AS c FROM "Recurso (NEOCONSIG)" GROUP BY Copetencia ORDER BY Copetencia`);
+      out.countByCopetencia = (cntCop && cntCop[0] && cntCop[0].columns && cntCop[0].values)
+        ? cntCop[0].values.map((v: any) => ({ Copetencia: v[0], count: v[1] }))
+        : [];
+    } catch (qE: any) { out.countError = String(qE.message || qE).slice(0, 200); }
+
+    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
+    try { await db.close(); } catch (_) { /* ignore */ }
+
+    out.ok = true;
+    out.phase = 'done';
+    out.hint = 'Debug oneshot LOCAL NEOCONSIG finalizado. Ver logs acima. SQL final: SELECT rowid,* FROM "Recurso (NEOCONSIG)" ORDER BY rowid DESC LIMIT 10;';
     return out;
   } catch (e: any) {
     out.phase = 'uncaught';
