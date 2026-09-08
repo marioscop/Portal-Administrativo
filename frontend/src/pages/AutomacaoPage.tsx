@@ -22,15 +22,6 @@ import {
   Layers3,
   Server,
   Activity,
-  Plus,
-  X,
-  Trash2,
-  Edit3,
-  Save,
-  ToggleLeft,
-  ToggleRight,
-  Bell,
-  BellOff,
 } from 'lucide-react'
 import { Toaster, toast } from 'sonner'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -126,44 +117,8 @@ interface DriveHealthRes {
   checked: Record<string, { label: string; url?: string | null; result: { ok: boolean; reason?: string; driveId?: string; rootFolderId?: string; filesSample?: unknown[]; canWrite?: boolean } }>
 }
 
-interface ScheduleHorarioEntry { hora: number; minuto: number }
-interface AutomationScheduleRecord {
-  id: string
-  title: string
-  kind: 'runImportConsignado' | 'importByLearningProfileFromFolderUrl'
-  target?: string | null
-  folderUrl?: string | null
-  /** @deprecated */
-  hora: number
-  /** @deprecated */
-  minuto: number
-  horarios?: ScheduleHorarioEntry[]
-  diasUteisOnly: boolean
-  diasSemana?: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>
-  enabled: boolean
-  createdAtIso: string
-  updatedAtIso?: string
-  lastRunAtIso?: string
-  lastRunAtPerHorario?: Record<string, string>
-  lastJobId?: string
-  lastStatus?: JobStatus
-  nextRunAtIso?: string
-  notificationTeams?: boolean
-}
 
-const SCHED_KIND_LABELS: Record<AutomationScheduleRecord['kind'], string> = {
-  runImportConsignado: 'Lote Geral (padrão)',
-  importByLearningProfileFromFolderUrl: 'Perfil específico (pasta)',
-}
 
-const WEEKDAYS_PT: Record<0 | 1 | 2 | 3 | 4 | 5 | 6, string> = {
-  0: 'Dom', 1: 'Seg', 2: 'Ter', 3: 'Qua', 4: 'Qui', 5: 'Sex', 6: 'Sáb',
-}
-
-function fmtHora(h: ScheduleHorarioEntry): string {
-  const pad = (n: number) => (n < 10 ? '0' + n : String(n))
-  return `${pad(h.hora)}:${pad(h.minuto)}`
-}
 
 export default function AutomacaoPage() {
   const aborterRef = useRef<{ [k: string]: AbortController }>({})
@@ -815,17 +770,6 @@ export default function AutomacaoPage() {
       </div>
     </div>
   )
-}
-
-// HELPERS STYLE
-function lblStyle(): React.CSSProperties {
-  return {
-    display: 'block',
-    fontSize: 12,
-    fontWeight: 700,
-    color: '#0f172a',
-    marginBottom: 6,
-  }
 }
 
 function inputStyle({ asBtn = false, justifyContent = 'flex-start' }: { asBtn?: boolean; justifyContent?: 'flex-start' | 'space-between' } = {}): React.CSSProperties {

@@ -182,9 +182,6 @@ function schedInputStyle(): React.CSSProperties {
 function schedBtnSecondary(): React.CSSProperties {
   return { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '8px 12px', borderRadius: 10, border: '1px solid #e2e8f0', background: '#fff', color: '#0f172a', fontWeight: 650, fontSize: 12, cursor: 'pointer' }
 }
-function schedThStyle(opts?: { textAlign?: string }): React.CSSProperties {
-  return { textAlign: (opts?.textAlign || 'left') as any, padding: '10px 14px', fontSize: 10.5, fontWeight: 800, letterSpacing: 0.08, textTransform: 'uppercase' as const, color: '#475569', borderBottom: '1px solid #e2e8f0' }
-}
 
 function normalizeAccessMenuPermissions(value: unknown): AccessMenuPermission[] {
   const raw = Array.isArray(value) ? value : []
@@ -681,7 +678,7 @@ export default function CreditoPage() {
   const [sharePointFolderPathSavedMsg, setSharePointFolderPathSavedMsg] =
     useState<string | null>(null)
   const didAutoMigrateSharePointFolderPathRef = useRef(false)
-  const [importDays, setImportDays] = useState<
+  const [importDays] = useState<
     Record<'seg' | 'ter' | 'qua' | 'qui' | 'sex' | 'sab' | 'dom', boolean>
   >(
     storedConfig?.importDays ?? {
@@ -694,7 +691,7 @@ export default function CreditoPage() {
       dom: false,
     },
   )
-  const [importTime, setImportTime] = useState(storedConfig?.importTime ?? '08:00')
+  const [importTime] = useState(storedConfig?.importTime ?? '08:00')
   const [notificationEmail, setNotificationEmail] = useState(
     storedConfig?.notificationEmail ?? '',
   )
@@ -808,7 +805,6 @@ export default function CreditoPage() {
     null,
   )
   const [modalidadeDraft, setModalidadeDraft] = useState('')
-  const timeSelectRef = useRef<HTMLSelectElement | null>(null)
   const [importingNow, setImportingNow] = useState(false)
   const [manualImportTarget, setManualImportTarget] = useState<
     | 'relatorio'
@@ -3887,7 +3883,7 @@ export default function CreditoPage() {
           }}
         >
           <span style={{ fontWeight: 850 }}>{repactuacaoStatusLabel(value)}</span>
-          <ChevronDown size={18} />
+          <ChevronDown width={18} height={18} />
         </button>
         {open ? (
           <div
@@ -4001,7 +3997,7 @@ export default function CreditoPage() {
           }}
         >
           <span style={{ fontWeight: 850 }}>{cloneSisbrActionLabel(value)}</span>
-          <ChevronDown size={18} />
+          <ChevronDown width={18} height={18} />
         </button>
         {open ? (
           <div
@@ -6594,7 +6590,7 @@ export default function CreditoPage() {
                   </div>
 
                   <div className="cmd-search">
-                    <Search size={18} />
+                    <Search width={18} height={18} />
                     <input
                       ref={commandInputRef}
                       className="cmd-input"
@@ -6686,7 +6682,7 @@ export default function CreditoPage() {
                   <div className="import-modal-header">
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <div className="import-modal-icon-wrap">
-                        <Zap size={18} />
+                        <Zap width={18} height={18} />
                       </div>
                       <div>
                         <Dialog.Title asChild>
@@ -6738,7 +6734,7 @@ export default function CreditoPage() {
                       title="Fechar"
                       style={{ minWidth: 0, padding: '8px 10px', borderRadius: 999 }}
                     >
-                      <X size={18} />
+                      <X width={18} height={18} />
                     </button>
                   </div>
 
@@ -8781,7 +8777,7 @@ export default function CreditoPage() {
                 title={collapsed ? 'Home' : undefined}
               >
                 <span className="nav-icon">
-                  <Home size={18} />
+                  <Home width={18} height={18} />
                 </span>
                 <span className="nav-text">Home</span>
                 <span className="nav-chevron" />
@@ -8805,7 +8801,7 @@ export default function CreditoPage() {
                 title={collapsed ? 'Conciliação' : undefined}
               >
                 <span className="nav-icon">
-                  <BadgeDollarSign size={18} />
+                  <BadgeDollarSign width={18} height={18} />
                 </span>
                 <span className="nav-text">Conciliação</span>
                 <span className="nav-chevron" />
@@ -8826,7 +8822,7 @@ export default function CreditoPage() {
                 title={collapsed ? 'Fluxo de pendências' : undefined}
               >
                 <span className="nav-icon">
-                  <GitBranch size={18} />
+                  <GitBranch width={18} height={18} />
                 </span>
                 <span className="nav-text">Fluxo de pendências</span>
                 <span className="nav-chevron" />
@@ -8843,7 +8839,7 @@ export default function CreditoPage() {
                 title={collapsed ? 'Dashboard' : undefined}
               >
                 <span className="nav-icon">
-                  <LayoutDashboard size={18} />
+                  <LayoutDashboard width={18} height={18} />
                 </span>
                 <span className="nav-text">Dashboard</span>
                 <span className="nav-chevron" />
@@ -8872,11 +8868,11 @@ export default function CreditoPage() {
                 title={collapsed ? 'Relatórios' : undefined}
               >
                 <span className="nav-icon">
-                  <FileText size={18} />
+                  <FileText width={18} height={18} />
                 </span>
                 <span className="nav-text">Relatórios</span>
                 <span className="nav-chevron" style={{ transform: reportsOpen ? 'rotate(180deg)' : undefined }}>
-                  <ChevronDown size={16} />
+                  <ChevronDown width={16} height={16} />
                 </span>
               </button>
             ) : null}
@@ -8892,7 +8888,7 @@ export default function CreditoPage() {
                       setHash('relatorios-valores')
                     }}
                   >
-                    <Sparkles size={18} />
+                    <Sparkles width={18} height={18} />
                     <strong>Conciliação</strong>
                     <span>novo</span>
                   </button>
@@ -8907,7 +8903,7 @@ export default function CreditoPage() {
                       setHash('relatorios-conciliacao-data')
                     }}
                   >
-                    <Clock size={18} />
+                    <Clock width={18} height={18} />
                     <strong>Conciliação por data</strong>
                     <span>novo</span>
                   </button>
@@ -8922,7 +8918,7 @@ export default function CreditoPage() {
                       setHash('relatorios-ocorrencias')
                     }}
                   >
-                    <Info size={18} />
+                    <Info width={18} height={18} />
                     <strong>Ocorrências</strong>
                     <span>novo</span>
                   </button>
@@ -8937,7 +8933,7 @@ export default function CreditoPage() {
                       setHash('relatorios-auditoria')
                     }}
                   >
-                    <ShieldCheck size={18} />
+                    <ShieldCheck width={18} height={18} />
                     <strong>Auditoria</strong>
                     <span>beta</span>
                   </button>
@@ -8967,11 +8963,11 @@ export default function CreditoPage() {
                 title={collapsed ? 'Configurações' : undefined}
               >
                 <span className="nav-icon">
-                  <ShieldCheck size={18} />
+                  <ShieldCheck width={18} height={18} />
                 </span>
                 <span className="nav-text">Configurações</span>
                 <span className="nav-chevron" style={{ transform: settingsOpen ? 'rotate(180deg)' : undefined }}>
-                  <ChevronDown size={16} />
+                  <ChevronDown width={16} height={16} />
                 </span>
               </button>
             ) : null}
@@ -8989,7 +8985,7 @@ export default function CreditoPage() {
                       setHash('configuracoes-automacao')
                     }}
                   >
-                    <Zap size={18} />
+                    <Zap width={18} height={18} />
                     <strong>Automação</strong>
                     <span>soon</span>
                   </button>
@@ -9006,7 +9002,7 @@ export default function CreditoPage() {
                       setHash('configuracoes-acessos')
                     }}
                   >
-                    <ShieldCheck size={18} />
+                    <ShieldCheck width={18} height={18} />
                     <strong>Acessos</strong>
                     <span>iam</span>
                   </button>
@@ -9021,7 +9017,7 @@ export default function CreditoPage() {
             <header className="header">
               <div className="header-left">
                 <div className="page-icon">
-                  <BadgeDollarSign size={20} />
+                  <BadgeDollarSign width={20} height={20} />
                 </div>
                 <div className="title-wrap">
                   <h1>{title}</h1>
@@ -9086,7 +9082,7 @@ export default function CreditoPage() {
                         lineHeight: 0,
                       }}
                     >
-                      <Home size={18} />
+                      <Home width={18} height={18} />
                     </button>
                     <button
                       type="button"
@@ -9124,7 +9120,7 @@ export default function CreditoPage() {
                         lineHeight: 0,
                       }}
                     >
-                      <LogOut size={18} />
+                      <LogOut width={18} height={18} />
                     </button>
                   </div>
                 </div>
@@ -9165,7 +9161,7 @@ export default function CreditoPage() {
                           >
                             {homeConciliacaoStatusesLoading ? (
                               <span className="chip">
-                                <Clock size={16} />
+                                <Clock width={16} height={16} />
                                 Carregando status...
                               </span>
                             ) : (
@@ -9179,7 +9175,7 @@ export default function CreditoPage() {
                                     color: 'rgba(219,234,254,0.98)',
                                   }}
                                 >
-                                  <FileText size={16} />
+                                  <FileText width={16} height={16} />
                                   Total: {homeConciliacaoStatuses.length}
                                 </span>
                                 <span
@@ -9193,7 +9189,7 @@ export default function CreditoPage() {
                                       '0 0 0 1px rgba(234,179,8,0.25), 0 8px 24px -8px rgba(234,179,8,0.55)',
                                   }}
                                 >
-                                  <Unlock size={16} />
+                                  <Unlock width={16} height={16} />
                                   Abertas:{' '}
                                   {homeConciliacaoStatuses.filter((item) => item.status === 'aberta').length}
                                 </span>
@@ -9206,7 +9202,7 @@ export default function CreditoPage() {
                                     color: 'rgba(187,247,208,0.98)',
                                   }}
                                 >
-                                  <Lock size={16} />
+                                  <Lock width={16} height={16} />
                                   Fechado Financeiro:{' '}
                                   {homeConciliacaoStatuses.filter((item) => item.status === 'fechada').length}
                                 </span>
@@ -9219,7 +9215,7 @@ export default function CreditoPage() {
                                     color: 'rgba(187,247,208,0.98)',
                                   }}
                                 >
-                                  <ShieldCheck size={16} />
+                                  <ShieldCheck width={16} height={16} />
                                   Validado contabilidade:{' '}
                                   {
                                     homeConciliacaoStatuses.filter(
@@ -9243,7 +9239,7 @@ export default function CreditoPage() {
                     </div>
                   ) : (
                     <div className="search">
-                      <Search size={18} />
+                      <Search width={18} height={18} />
                       <input
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
@@ -9259,7 +9255,7 @@ export default function CreditoPage() {
                       <div className="panel-head">
                         <h2>Conciliações da Competência</h2>
                         <span className="chip">
-                          <FileText size={16} />
+                          <FileText width={16} height={16} />
                           Órgão • Colunas por Vencimento
                         </span>
                       </div>
@@ -9445,10 +9441,10 @@ export default function CreditoPage() {
                                                       }}
                                                       title="Validado pela contabilidade"
                                                     >
-                                                      <ShieldCheck size={12} />
+                                                      <ShieldCheck width={12} height={12} />
                                                     </span>
                                                   ) : null}
-                                                  {isClosed ? <Lock size={16} /> : <Unlock size={16} />}
+                                                  {isClosed ? <Lock width={16} height={16} /> : <Unlock width={16} height={16} />}
                                                   {isClosed ? 'Fechada' : 'Aberta'}
                                                 </span>
                                               ) : (
@@ -10041,11 +10037,11 @@ export default function CreditoPage() {
                         }}
                         disabled={settingsLocked || importingNow}
                       >
-                        <Zap size={18} />
+                        <Zap width={18} height={18} />
                         {importingNow ? 'Importando...' : 'Importar manual'}
                       </button>
                       <span className="chip">
-                        <FileText size={16} />
+                        <FileText width={16} height={16} />
                         Importação
                       </span>
                     </div>
@@ -10317,7 +10313,7 @@ export default function CreditoPage() {
                         }}
                         disabled={settingsLocked || sharePointFolderPathSaving || sharePointFolderPathLoading}
                       >
-                        <Zap size={18} />
+                        <Zap width={18} height={18} />
                         {sharePointFolderPathSaving ? 'Salvando...' : 'Salvar pasta'}
                       </button>
                       {sharePointFolderPathLoading ? (
@@ -10362,7 +10358,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Modalidade aceita</h2>
                     <span className="chip">
-                      <ShieldCheck size={16} />
+                      <ShieldCheck width={16} height={16} />
                       Consignado
                     </span>
                   </div>
@@ -10401,7 +10397,7 @@ export default function CreditoPage() {
                             }}
                             disabled={settingsLocked || modalidadesSaving}
                           >
-                            <Zap size={18} />
+                            <Zap width={18} height={18} />
                             {modalidadesSaving ? 'Salvando...' : 'Adicionar'}
                           </button>
                         </div>
@@ -10429,7 +10425,7 @@ export default function CreditoPage() {
                             borderColor: 'rgba(0,174,157,0.22)',
                           }}
                         >
-                          <ShieldCheck size={16} />
+                          <ShieldCheck width={16} height={16} />
                           {m}
                         </button>
                       ))}
@@ -10455,7 +10451,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>De/Para de Orgão</h2>
                     <span className="chip">
-                      <FileText size={16} />
+                      <FileText width={16} height={16} />
                       Associação
                     </span>
                   </div>
@@ -10590,7 +10586,7 @@ export default function CreditoPage() {
                         }}
                         disabled={settingsLocked || orgaoDeParaLoading}
                       >
-                        <Zap size={18} />
+                        <Zap width={18} height={18} />
                         {orgaoDeParaLoading ? 'Salvando...' : 'Salvar de/para'}
                       </button>
                       <button
@@ -10740,7 +10736,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Consolidação • Recurso do Órgão (Extratos)</h2>
                     <span className="chip">
-                      <FileText size={16} />
+                      <FileText width={16} height={16} />
                       Regras
                     </span>
                   </div>
@@ -10853,7 +10849,7 @@ export default function CreditoPage() {
                         }}
                         disabled={settingsLocked || extratosConsolidacaoRecursoLoading}
                       >
-                        <Zap size={18} />
+                        <Zap width={18} height={18} />
                         {extratosConsolidacaoRecursoLoading ? 'Salvando...' : 'Salvar regra'}
                       </button>
                       <button
@@ -10974,7 +10970,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Consolidação • Relatório do Órgão</h2>
                     <span className="chip">
-                      <FileText size={16} />
+                      <FileText width={16} height={16} />
                       Regras
                     </span>
                   </div>
@@ -11116,7 +11112,7 @@ export default function CreditoPage() {
                         }}
                         disabled={settingsLocked || relatorioConsolidacaoRecursoLoading}
                       >
-                        <Zap size={18} />
+                        <Zap width={18} height={18} />
                         {relatorioConsolidacaoRecursoLoading ? 'Salvando...' : 'Salvar regra'}
                       </button>
                       <button
@@ -11247,15 +11243,15 @@ export default function CreditoPage() {
                     <h2>Agendamentos Automáticos</h2>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <button type="button" className="btn" onClick={() => void loadSchedules()} title="Atualizar agendamentos">
-                        <RefreshCcwDot size={14} />
+                        <RefreshCcwDot width={14} height={14} />
                         Atualizar
                       </button>
                       <button type="button" className="btn btn-primary" onClick={openSchedCreate}>
-                        <Plus size={14} />
+                        <Plus width={14} height={14} />
                         Novo Agendamento
                       </button>
                       <span className="chip">
-                        <Zap size={14} />
+                        <Zap width={14} height={14} />
                         Scheduler 30s
                       </span>
                     </div>
@@ -11263,12 +11259,12 @@ export default function CreditoPage() {
                   <div className="panel-body">
                     {schedulesLoading ? (
                       <div className="help" style={{ textAlign: 'center', padding: 16 }}>
-                        <RefreshCcwDot size={18} className="animate-spin" style={{ display: 'inline-block', marginRight: 8, verticalAlign: '-4px' }} />
+                        <RefreshCcwDot width={18} height={18} className="animate-spin" style={{ display: 'inline-block', marginRight: 8, verticalAlign: '-4px' }} />
                         Carregando agendamentos...
                       </div>
                     ) : schedules.length === 0 ? (
                       <div className="help" style={{ textAlign: 'center', padding: 16 }}>
-                        <Settings2 size={20} style={{ display: 'block', margin: '0 auto 8px', opacity: 0.55 }} />
+                        <Settings2 width={20} height={20} style={{ display: 'block', margin: '0 auto 8px', opacity: 0.55 }} />
                         Nenhum agendamento configurado. Clique em &quot;Novo Agendamento&quot; para criar.
                       </div>
                     ) : (
@@ -11344,7 +11340,7 @@ export default function CreditoPage() {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                       {s.title}
                                       {s.notificationTeams ? (
-                                        <Bell size={12} color="rgba(56, 189, 248, 0.95)" title="Notificação Teams ativada" />
+                                        <Bell width={12} height={12} color="rgba(56, 189, 248, 0.95)" />
                                       ) : null}
                                     </div>
                                     <div style={{ fontSize: '0.62rem', color: 'rgba(148, 163, 184, 0.8)', fontWeight: 500, marginTop: 2 }}>
@@ -11400,7 +11396,7 @@ export default function CreditoPage() {
                                             border: '1px solid rgba(0, 174, 157, 0.3)',
                                           }}
                                         >
-                                          <Clock size={10} style={{ marginRight: 3 }} />
+                                          <Clock width={12} height={12} style={{ marginRight: 3 }} />
                                           {schedFmtHora(h)}
                                         </span>
                                       ))}
@@ -11450,7 +11446,7 @@ export default function CreditoPage() {
                                           opacity: settingsLocked ? 0.5 : 1,
                                         }}
                                       >
-                                        {s.enabled ? <ToggleRight size={15} /> : <ToggleLeft size={15} />}
+                                        {s.enabled ? <ToggleRight width={16} height={16} /> : <ToggleLeft width={16} height={16} />}
                                       </button>
                                       <button
                                         type="button"
@@ -11472,7 +11468,7 @@ export default function CreditoPage() {
                                           opacity: settingsLocked ? 0.5 : 1,
                                         }}
                                       >
-                                        <PlayCircle size={14} />
+                                        <PlayCircle width={14} height={14} />
                                       </button>
                                       <button
                                         type="button"
@@ -11494,7 +11490,7 @@ export default function CreditoPage() {
                                           opacity: settingsLocked ? 0.5 : 1,
                                         }}
                                       >
-                                        <Edit3 size={13} />
+                                        <Edit3 width={14} height={14} />
                                       </button>
                                       {s.id !== 'lot_diario_08h_uteis' ? (
                                         <button
@@ -11517,7 +11513,7 @@ export default function CreditoPage() {
                                             opacity: settingsLocked ? 0.5 : 1,
                                           }}
                                         >
-                                          <Trash2 size={13} />
+                                          <Trash2 width={14} height={14} />
                                         </button>
                                       ) : (
                                         <button
@@ -11538,7 +11534,7 @@ export default function CreditoPage() {
                                             cursor: 'not-allowed',
                                           }}
                                         >
-                                          <Trash2 size={13} />
+                                          <Trash2 width={14} height={14} />
                                         </button>
                                       )}
                                     </div>
@@ -11558,7 +11554,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Notificações</h2>
                     <span className="chip">
-                      <ShieldCheck size={16} />
+                      <ShieldCheck width={16} height={16} />
                       Sucesso/Erro
                     </span>
                   </div>
@@ -12328,7 +12324,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Acessos</h2>
                     <span className="chip">
-                      <ShieldCheck size={16} />
+                      <ShieldCheck width={16} height={16} />
                       IAM
                     </span>
                   </div>
@@ -12561,7 +12557,7 @@ export default function CreditoPage() {
                                 </span>
                                 {fixed ? (
                                   <span className="chip">
-                                    <ShieldCheck size={16} />
+                                    <ShieldCheck width={16} height={16} />
                                     fixo
                                   </span>
                                 ) : null}
@@ -12584,7 +12580,7 @@ export default function CreditoPage() {
                                     transition: 'transform 0.18s ease',
                                   }}
                                 >
-                                  <ChevronDown size={18} />
+                                  <ChevronDown width={18} height={18} />
                                 </span>
                               </div>
                             </button>
@@ -12669,7 +12665,7 @@ export default function CreditoPage() {
                                       aria-label={`Remover ${email}`}
                                       style={{ padding: 11, width: 44, justifyContent: 'center' }}
                                     >
-                                      <Trash2 size={18} />
+                                      <Trash2 width={18} height={18} />
                                     </button>
                                   ) : null}
                                 </div>
@@ -12846,7 +12842,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Conciliação</h2>
                     <span className="chip">
-                      <FileText size={16} />
+                      <FileText width={16} height={16} />
                       Relatório
                     </span>
                   </div>
@@ -12973,7 +12969,7 @@ export default function CreditoPage() {
                           }
                           style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                         >
-                          <FileText size={18} />
+                          <FileText width={18} height={18} />
                           {conciliacaoExportingPdf ? 'Exportando...' : 'Exportar PDF'}
                         </button>
 
@@ -12989,7 +12985,7 @@ export default function CreditoPage() {
                           onClick={() => openConciliacaoExportModal('xlsx')}
                           style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                         >
-                          <FileSpreadsheet size={18} />
+                          <FileSpreadsheet width={18} height={18} />
                           {conciliacaoExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
                         </button>
                       </div>
@@ -13144,11 +13140,11 @@ export default function CreditoPage() {
                         }
                         style={{ padding: 10, width: 44, justifyContent: 'center', flex: '0 0 auto' }}
                       >
-                        <FileSpreadsheet size={18} color="#21A366" />
+                        <FileSpreadsheet width={18} height={18} color="#21A366" />
                       </button>
                     </div>
                     <span className="chip">
-                      <Sparkles size={16} />
+                      <Sparkles width={16} height={16} />
                       Recurso x Relatório Sisbr
                     </span>
                   </div>
@@ -13237,7 +13233,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Conciliação por data</h2>
                     <span className="chip">
-                      <Clock size={16} />
+                      <Clock width={16} height={16} />
                       Relatório
                     </span>
                   </div>
@@ -13365,11 +13361,11 @@ export default function CreditoPage() {
                                       }}
                                     >
                                       {process?.status === 'approved' ? (
-                                        <ShieldCheck size={16} />
+                                        <ShieldCheck width={16} height={16} />
                                       ) : process?.status === 'rejected' ? (
-                                        <Info size={16} />
+                                        <Info width={16} height={16} />
                                       ) : (
-                                        <Clock size={16} />
+                                        <Clock width={16} height={16} />
                                       )}
                                     </button>
                                   ) : (
@@ -13412,7 +13408,7 @@ export default function CreditoPage() {
                                         requestConciliacaoPorDataValidationNow(aggregate)
                                       }}
                                     >
-                                      {isSubmitting ? <Clock size={16} /> : <Play size={16} />}
+                                      {isSubmitting ? <Clock width={16} height={16} /> : <Play width={16} height={16} />}
                                     </button>
                                   )}
                                 </>
@@ -13440,7 +13436,7 @@ export default function CreditoPage() {
                             }
                             style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                           >
-                            <FileText size={18} />
+                            <FileText width={18} height={18} />
                             {conciliacaoPorDataExportingPdf ? 'Exportando...' : 'Exportar PDF'}
                           </button>
                           <button
@@ -13453,7 +13449,7 @@ export default function CreditoPage() {
                             }
                             style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                           >
-                            <FileSpreadsheet size={18} />
+                            <FileSpreadsheet width={18} height={18} />
                             {conciliacaoPorDataExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
                           </button>
                         </div>
@@ -13553,7 +13549,7 @@ export default function CreditoPage() {
                                       }}
                                     >
                                       {finalSaldoText}
-                                      <ShieldCheck size={16} />
+                                      <ShieldCheck width={16} height={16} />
                                     </span>
                                   ) : (
                                     <span style={{ color: red }}>{finalSaldoText}</span>
@@ -14019,15 +14015,15 @@ export default function CreditoPage() {
                                                       }}
                                                     >
                                                       {isSubmitting ? (
-                                                      <Clock size={13} />
+                                                      <Clock width={14} height={14} />
                                                       ) : row.validation?.status === 'approved' ? (
-                                                      <ShieldCheck size={13} />
+                                                      <ShieldCheck width={14} height={14} />
                                                       ) : row.validation?.status === 'rejected' ? (
-                                                      <Info size={13} />
+                                                      <Info width={14} height={14} />
                                                       ) : row.validation?.status === 'pending' ? (
-                                                      <Clock size={13} />
+                                                      <Clock width={14} height={14} />
                                                       ) : (
-                                                      <Play size={13} />
+                                                      <Play width={14} height={14} />
                                                       )}
                                                     </div>
                                                   </div>
@@ -15121,7 +15117,7 @@ export default function CreditoPage() {
                   <div className="panel-head">
                     <h2>Auditoria Sistêmica</h2>
                     <span className="chip">
-                      <ShieldCheck size={16} />
+                      <ShieldCheck width={16} height={16} />
                       Logs
                     </span>
                   </div>
@@ -15331,7 +15327,7 @@ export default function CreditoPage() {
                     <h2>Ocorrências</h2>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span className="chip">
-                        <GitBranch size={16} />
+                        <GitBranch width={16} height={16} />
                         Relatório
                       </span>
                       <button
@@ -15348,7 +15344,7 @@ export default function CreditoPage() {
                         onClick={exportRelatoriosOcorrenciasXlsx}
                         style={{ padding: 10, width: 44, justifyContent: 'center' }}
                       >
-                        <FileSpreadsheet size={18} />
+                        <FileSpreadsheet width={18} height={18} />
                       </button>
                     </div>
                   </div>
@@ -15614,12 +15610,12 @@ export default function CreditoPage() {
                     <h2>Fluxo de Pendências</h2>
                     {fluxoPendenciasLoading ? (
                       <span className="chip">
-                        <Clock size={16} />
+                        <Clock width={16} height={16} />
                         Carregando
                       </span>
                     ) : (
                       <span className="chip">
-                        <GitBranch size={16} />
+                        <GitBranch width={16} height={16} />
                         Fluxo
                       </span>
                     )}
@@ -15823,7 +15819,7 @@ export default function CreditoPage() {
                                       title="Prazo de resolução: 2 dias (contagem regressiva)."
                                     >
                                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                                        PRAZO {toHms(slaRemainingMs)} <Clock size={14} />
+                                        PRAZO {toHms(slaRemainingMs)} <Clock width={14} height={14} />
                                       </span>
                                     </span>
                                   ) : null}
@@ -16547,7 +16543,7 @@ export default function CreditoPage() {
                         setTarifaModalOpen(true)
                       }}
                     >
-                      <Plus size={18} />
+                      <Plus width={18} height={18} />
                     </button>
                     <div
                       ref={conciliacaoLockBalloonAnchorRef}
@@ -16606,11 +16602,11 @@ export default function CreditoPage() {
                         }}
                       >
                         {conciliacaoClosing || conciliacaoReopening ? (
-                          <Clock size={18} />
+                          <Clock width={18} height={18} />
                         ) : conciliacaoIsClosed ? (
-                          <Lock size={18} />
+                          <Lock width={18} height={18} />
                         ) : (
-                          <Unlock size={18} />
+                          <Unlock width={18} height={18} />
                         )}
                       </button>
                     </div>
@@ -16636,7 +16632,7 @@ export default function CreditoPage() {
                           setConciliacaoReopenModalOpen(true)
                         }}
                       >
-                        <Unlock size={18} />
+                        <Unlock width={18} height={18} />
                       </button>
                     ) : null}
                     {conciliacaoHasAnyFechamento &&
@@ -16721,16 +16717,16 @@ export default function CreditoPage() {
                           }
                         }}
                       >
-                        {conciliacaoResending ? <Clock size={18} /> : <Printer size={18} />}
+                        {conciliacaoResending ? <Clock width={18} height={18} /> : <Printer width={18} height={18} />}
                       </button>
                     ) : null}
                     <span className="chip">
-                      <FileText size={16} />
+                      <FileText width={16} height={16} />
                       Conciliação
                     </span>
                     {conciliacaoTotalIsClosed ? (
                       <span className="chip">
-                        <Lock size={16} />
+                        <Lock width={16} height={16} />
                         Fechada
                       </span>
                     ) : closedVencimentos.length > 0 ? (
@@ -16743,7 +16739,7 @@ export default function CreditoPage() {
                           color: 'rgba(255,255,255,0.94)',
                         }}
                       >
-                        <Lock size={16} color="rgba(255,140,0,0.98)" />
+                        <Lock width={16} height={16} color="rgba(255,140,0,0.98)" />
                         Parcial ({closedVencimentos.length})
                       </span>
                     ) : null}
@@ -16767,7 +16763,7 @@ export default function CreditoPage() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                        <Lock size={16} color={conciliacaoTotalIsClosed ? undefined : 'rgba(255,140,0,0.98)'} />
+                        <Lock width={16} height={16} color={conciliacaoTotalIsClosed ? undefined : 'rgba(255,140,0,0.98)'} />
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 850, letterSpacing: '0.02em' }}>
                             Conciliação fechada{vencimentoSelecionado ? ` • Vencimento ${vencimentoSelecionado}` : ''}
@@ -16798,7 +16794,7 @@ export default function CreditoPage() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                        <Lock size={16} color="rgba(255,140,0,0.98)" />
+                        <Lock width={16} height={16} color="rgba(255,140,0,0.98)" />
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 850, letterSpacing: '0.02em' }}>
                             Fechamentos parciais ({closedVencimentos.length})
@@ -17462,7 +17458,7 @@ export default function CreditoPage() {
                                             opacity: 0.85,
                                           }}
                                         >
-                                          <ChevronDown size={16} />
+                                          <ChevronDown width={16} height={16} />
                                         </span>
                                         <span style={{ fontWeight: 850 }}>{conciliacaoMonthLabel}</span>
                                       </button>
@@ -17535,7 +17531,7 @@ export default function CreditoPage() {
                                         }}
                                         style={{ padding: 10, width: 44, justifyContent: 'center' }}
                                       >
-                                        <FileSpreadsheet size={18} />
+                                        <FileSpreadsheet width={18} height={18} />
                                       </button>
                                     </td>
                                   </tr>
@@ -17665,7 +17661,7 @@ export default function CreditoPage() {
                                                       : `Incluir servidor em ${conciliacaoData.recursoTable}`
                                                   }
                                                 >
-                                                  <Plus size={16} />
+                                                  <Plus width={16} height={16} />
                                                   <span
                                                     style={{
                                                       maxWidth: 300,
@@ -18103,7 +18099,7 @@ export default function CreditoPage() {
                                                       : 'Incluir servidor no Relatório SISBR'
                                                   }
                                                 >
-                                                  <Plus size={16} />
+                                                  <Plus width={16} height={16} />
                                                   <span
                                                     style={{
                                                       maxWidth: 300,
@@ -18406,7 +18402,7 @@ export default function CreditoPage() {
                                                                   })
                                                                 }}
                                                               >
-                                                                <Info size={14} />
+                                                                <Info width={14} height={14} />
                                                               </button>
                                                             ) : null}
                                                           </span>
@@ -18539,7 +18535,7 @@ export default function CreditoPage() {
                                                               </span>
                                                               {hasOcorrencia ? (
                                                                 <span style={{ display: 'inline-flex', opacity: 0.6 }}>
-                                                                  <Info size={13} />
+                                                                  <Info width={14} height={14} />
                                                                 </span>
                                                               ) : null}
                                                             </span>
@@ -22314,7 +22310,7 @@ export default function CreditoPage() {
                 <div className="panel-head">
                   <h2>Relatório</h2>
                   <span className="chip">
-                    <Sparkles size={16} />
+                    <Sparkles width={16} height={16} />
                     SQLite
                   </span>
                 </div>
@@ -22333,22 +22329,22 @@ export default function CreditoPage() {
                     <h2>Contexto</h2>
                     {conciliacaoLoading ? (
                       <span className="chip">
-                        <Clock size={16} />
+                        <Clock width={16} height={16} />
                         Carregando
                       </span>
                     ) : conciliacaoData?.closed?.isClosed ? (
                       <span className="chip">
-                        <Lock size={16} />
+                        <Lock width={16} height={16} />
                         Fechada
                       </span>
                     ) : conciliacaoOrgao.trim() ? (
                       <span className="chip">
-                        <Unlock size={16} />
+                        <Unlock width={16} height={16} />
                         Aberta
                       </span>
                     ) : (
                       <span className="chip">
-                        <Info size={16} />
+                        <Info width={16} height={16} />
                         Todos os órgãos
                       </span>
                     )}
@@ -22424,7 +22420,7 @@ export default function CreditoPage() {
                         onClick={() => setHash('conciliacao-extratos')}
                         style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                       >
-                        <BadgeDollarSign size={18} />
+                        <BadgeDollarSign width={18} height={18} />
                         Abrir conciliação
                       </button>
                       <button
@@ -22439,7 +22435,7 @@ export default function CreditoPage() {
                         onClick={() => openConciliacaoExportModal('xlsx')}
                         style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}
                       >
-                        <FileSpreadsheet size={18} />
+                        <FileSpreadsheet width={18} height={18} />
                         {conciliacaoExportingXlsx ? 'Exportando...' : 'Exportar XLSX'}
                       </button>
                       {conciliacaoData ? (
@@ -22450,7 +22446,7 @@ export default function CreditoPage() {
                             conciliacaoLoadedAtIso ? `Última atualização: ${formatIsoToPtBrDateTime(conciliacaoLoadedAtIso)}` : ''
                           }
                         >
-                          <Clock size={16} />
+                          <Clock width={16} height={16} />
                           Última atualização:{' '}
                           {conciliacaoLoadedAtIso ? formatIsoToPtBrDateTime(conciliacaoLoadedAtIso).slice(0, 10) : '—'}
                         </span>
@@ -22464,7 +22460,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Ocorrências pendentes por categoria</h2>
                       <span className="chip">
-                        <GitBranch size={16} />
+                        <GitBranch width={16} height={16} />
                         Dashboard
                       </span>
                     </div>
@@ -22531,7 +22527,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Status da Conciliação</h2>
                       <span className="chip">
-                        <Sparkles size={16} />
+                        <Sparkles width={16} height={16} />
                         Visão rápida
                       </span>
                     </div>
@@ -22668,15 +22664,15 @@ export default function CreditoPage() {
                               />
                               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between' }}>
                                 <span className="chip">
-                                  <Sparkles size={16} />
+                                  <Sparkles width={16} height={16} />
                                   Recurso: {recOk} OK • {recPend} pend.
                                 </span>
                                 <span className="chip">
-                                  <Sparkles size={16} />
+                                  <Sparkles width={16} height={16} />
                                   Relatório Sisbr: {relOk} OK • {relPend} pend.
                                 </span>
                                 <span className="chip">
-                                  {(conciliacaoData as any)?.closed?.isClosed ? <Lock size={16} /> : <Unlock size={16} />}
+                                  {(conciliacaoData as any)?.closed?.isClosed ? <Lock width={16} height={16} /> : <Unlock width={16} height={16} />}
                                   {(conciliacaoData as any)?.closed?.isClosed ? 'Fechada' : 'Aberta'}
                                 </span>
                               </div>
@@ -22695,7 +22691,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Valores (R$)</h2>
                       <span className="chip">
-                        <BadgeDollarSign size={16} />
+                        <BadgeDollarSign width={16} height={16} />
                         Totais
                       </span>
                     </div>
@@ -22795,7 +22791,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Pendências (Top)</h2>
                       <span className="chip">
-                        <Zap size={16} />
+                        <Zap width={16} height={16} />
                         Prioridade
                       </span>
                     </div>
@@ -22896,7 +22892,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Pareto de pendências</h2>
                       <span className="chip">
-                        <Zap size={16} />
+                        <Zap width={16} height={16} />
                         80/20
                       </span>
                     </div>
@@ -23021,7 +23017,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Conciliação pronta</h2>
                       <span className="chip">
-                        <Sparkles size={16} />
+                        <Sparkles width={16} height={16} />
                         Gauge
                       </span>
                     </div>
@@ -23083,11 +23079,11 @@ export default function CreditoPage() {
                               <ReactECharts option={option} style={{ height: 260, width: '100%' }} opts={{ renderer: 'canvas' }} />
                               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between' }}>
                                 <span className="chip">
-                                  <Sparkles size={16} />
+                                  <Sparkles width={16} height={16} />
                                   {ok} conciliados
                                 </span>
                                 <span className="chip">
-                                  <Zap size={16} />
+                                  <Zap width={16} height={16} />
                                   {total - ok} pendências
                                 </span>
                               </div>
@@ -23104,7 +23100,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Matriz de totais</h2>
                       <span className="chip">
-                        <BadgeDollarSign size={16} />
+                        <BadgeDollarSign width={16} height={16} />
                         Radar
                       </span>
                     </div>
@@ -23177,7 +23173,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Distribuição por faixa</h2>
                       <span className="chip">
-                        <Sparkles size={16} />
+                        <Sparkles width={16} height={16} />
                         Histograma
                       </span>
                     </div>
@@ -23272,7 +23268,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Ocorrências no tempo</h2>
                       <span className="chip">
-                        <ShieldCheck size={16} />
+                        <ShieldCheck width={16} height={16} />
                         Trilha
                       </span>
                     </div>
@@ -23391,7 +23387,7 @@ export default function CreditoPage() {
                     <div className="panel-head">
                       <h2>Empresa × Modalidade</h2>
                       <span className="chip">
-                        <Sparkles size={16} />
+                        <Sparkles width={16} height={16} />
                         Heatmap
                       </span>
                     </div>
