@@ -27,15 +27,10 @@ if (process.env.NODE_ENV !== 'production') {
 type PdfParseResult = { text?: string };
 type PdfParseFn = (dataBuffer: Buffer) => Promise<PdfParseResult>;
 
-const DB_CACHE_MAX_ENTRIES = 32;
-const DB_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dias corridos. Previne "Database closed" após ociosidade > 30 min do processo PM2 (2026-09-01)
+const DB_CACHE_MAX_ENTRIES = 8;
+const DB_CACHE_TTL_MS = 30 * 60 * 1000;
 const DB_MTIME_SAFETY_DELTA_MS = 50;
-const DB_HANDLE_VALIDATION_ENABLED = true;
-const DB_CLOSED_RETRY_MAX = 2;
-const DB_CLOSED_RETRY_SLEEP_MS = 35;
 type DbCacheEntry = { db: Database; mtimeMs: number; lastUsedMs: number };
-const IMPORT_NOTIFICATION_IDEMPOTENCY_TTL_MS = 20 * 60 * 1000; // 20 minutos de dedup global para job
-const __importNotificationSent = new Map<string, number>(); // key -> timestamp sent
 let cachedPdfParse: PdfParseFn | null = null;
 let cachedPdfModule: unknown | null = null;
 let cachedSqlJs: Promise<SqlJsStatic> | null = null;
@@ -83,15 +78,6 @@ function safeLogError(context: string, err: unknown): void {
   }
 }
 
-function safeCloseDb(db: Database | null | undefined): void {
-  if (!db) return;
-  try {
-    if (typeof (db as any).close === 'function') (db as any).close();
-  } catch {
-    /* melhor esforço: handle pode já estar fechado */
-  }
-}
-
 function evictOldDbCacheEntriesIfNeeded(): void {
   if (cachedDbByPath.size <= DB_CACHE_MAX_ENTRIES) return;
   const sorted = Array.from(cachedDbByPath.entries()).sort(
@@ -99,7 +85,11 @@ function evictOldDbCacheEntriesIfNeeded(): void {
   );
   const toRemove = sorted.slice(0, cachedDbByPath.size - DB_CACHE_MAX_ENTRIES);
   for (const [resolvedPath, entry] of toRemove) {
-    safeCloseDb(entry.db);
+    try {
+      (entry.db as { close?: () => void }).close?.();
+    } catch {
+      void 0;
+    }
     cachedDbByPath.delete(resolvedPath);
   }
 }
@@ -107,65 +97,14 @@ function evictOldDbCacheEntriesIfNeeded(): void {
 function evictExpiredDbCacheEntriesIfNeeded(nowMs: number): void {
   for (const [resolvedPath, entry] of Array.from(cachedDbByPath.entries())) {
     if (nowMs - entry.lastUsedMs > DB_CACHE_TTL_MS) {
-      safeCloseDb(entry.db);
+      try {
+        (entry.db as { close?: () => void }).close?.();
+      } catch {
+        void 0;
+      }
       cachedDbByPath.delete(resolvedPath);
     }
   }
-}
-
-function isDatabaseClosedError(err: unknown): boolean {
-  if (!err) return false;
-  const m = err instanceof Error ? err.message : String(err);
-  return (
-    typeof m === 'string' &&
-    /database\s*(is\s*|has\s*been\s*)?\s*closed/i.test(m)
-  );
-}
-
-function dbHandleLooksAlive(db: Database): boolean {
-  if (!DB_HANDLE_VALIDATION_ENABLED) return true;
-  try {
-    const stmt = (db as any).prepare('SELECT 1 AS v');
-    try {
-      const r = stmt.getAsObject ? stmt.getAsObject() : stmt.get();
-      return r && (r.v === 1 || (r as any)?.v === 1);
-    } finally {
-      try { if (stmt && typeof stmt.free === 'function') stmt.free(); } catch {}
-    }
-  } catch (e) {
-    safeLogError('dbHandleLooksAlive ping', e);
-    return false;
-  }
-}
-
-function sleepMs(ms: number): Promise<void> {
-  return new Promise((res) => setTimeout(res, ms));
-}
-
-function withRetryOnDbClosed<T>(
-  label: string,
-  fn: (attempt: number) => T | Promise<T>,
-  maxAttempts = DB_CLOSED_RETRY_MAX + 1,
-  sleepMsBetween = DB_CLOSED_RETRY_SLEEP_MS,
-): Promise<T> {
-  return (async () => {
-    let lastErr: unknown = null;
-    for (let i = 0; i < maxAttempts; i++) {
-      try {
-        return await fn(i);
-      } catch (e) {
-        lastErr = e;
-        if (!isDatabaseClosedError(e)) throw e;
-        safeLogError(`${label} retry attempt ${i + 1}/${maxAttempts} (Database closed)`, e);
-        if (i + 1 >= maxAttempts) break;
-        // Invalidar TODOS os caminhos do cache para forçar reabertura fresh
-        // (nunca chamar .close(): WebAssembly/GC limpa; close explícito causa crash em reabertura.)
-        try { cachedDbByPath.clear(); } catch {}
-        await sleepMs(sleepMsBetween * (i + 1));
-      }
-    }
-    throw lastErr;
-  })();
 }
 
 type PdfParseModuleShape = {
@@ -1244,18 +1183,12 @@ async function expandRecursoAdfegoFileCandidates(opts: {
     maxYear: Number.isFinite(opts.maxYear as number) ? (opts.maxYear as number) : undefined,
   });
   const isDoc = (n: string) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(n ?? '').trim());
-  const isRelevantFile = (n: string): boolean => {
-    if (isDoc(n)) return true;
-    const lower = String(n ?? '').trim().toLowerCase();
-    return /\.(pdf)$/i.test(lower) &&
-      /(relat[oó]rio|extrato|recurso|tribunal|justi[cç]a|contas|eleitoral|trabalho|ministerio|mpgo|eletra|alego|neoconsig|tjgo|tce|tcm|tre|trt|adfego|sisbr|convenio|mp\s|precatorio)/i.test(lower);
-  };
   const pushFile = (
     f: { id: string; name: string; lastModifiedDateTime?: string },
     folderPath: string,
     parentId?: string,
   ) => {
-    if (!isRelevantFile(f.name)) return;
+    if (!isDoc(f.name)) return;
     if (out.find((x) => x.id === f.id)) return;
     out.push({ id: f.id, name: f.name, lastModifiedDateTime: f.lastModifiedDateTime, folderPath, parentId });
   };
@@ -1310,7 +1243,7 @@ async function expandRecursoAdfegoFileCandidates(opts: {
           }
         }
         for (const c of kids) {
-          if (c.file && isRelevantFile(String(c.name ?? ''))) {
+          if (c.file && isDoc(String(c.name ?? ''))) {
             pushFile(
               c as { id: string; name: string; lastModifiedDateTime?: string },
               cur.path,
@@ -1555,7 +1488,6 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
   baseFolderId: string;
   basePath: string;
   subfolderCandidates?: string[];
-  rootFolderNameHint?: string;
   __trace?: (step: string, data: Record<string, unknown>) => void;
   permitirPdfSisbr?: boolean;
 }): Promise<Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>> {
@@ -1688,59 +1620,48 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
   let yearId: string | null = null;
   let yearName = '';
   const lvlStart = await safeListChildren(startId);
-  // NOVO (2026-09-01): Se a pasta RAIZ que recebemos JÁ É O ANO (ex: SHAREPOINT_FOLDER_URL termina com "/2026"
-  // e o startId é a própria pasta do ano), PULAMOS descida de ano (startId = yearId direto).
-  // Sem isso, yearCandidates sempre vazio (filhos de 2026/ são Janeiro..Dezembro, não 2026/2025) → 0 candidates.
-  const startNameIsAno4Digitos = /^\d{4}$/.test(String(opts.rootFolderNameHint ?? '').trim()) ||
-    /^\d{4}$/.test(String(startPath.split('/').filter(Boolean).pop() ?? '').trim());
-  if (startNameIsAno4Digitos) {
-    yearId = startId;
-    yearName = String(opts.rootFolderNameHint ?? '').trim() || String(startPath.split('/').filter(Boolean).pop() ?? '').trim();
-    tr('anoOk', { mode: 'startIsYear', yearName, yearIdPrefix: (yearId || '').slice(0, 8) });
-  } else {
-    // 1) Tem pastas de ano DIRETAMENTE?
-    let yearCandidates = lvlStart.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
-    let desceuRecuperacao = false;
-    if (yearCandidates.length === 0) {
-      // Não tem anos direto. Ainda estamos acima (ex.: Diretoria / Tec. Inf. / 99-automações_ti). Desce primeiro até Recuperação de Crédito.
-      const rc = lvlStart.find((c) => c.folder && isRecuperacaoCreditoInPath(c.name ?? ''))
-        ?? lvlStart.find((c) => c.folder && normalizeNameForMatch(String(c.name ?? '')).includes('99.automacoes'));
-      if (rc) {
-        const kids = await safeListChildren(String(rc.id));
-        yearCandidates = kids.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
-        startPath = startPath ? `${startPath}/${rc.name}` : String(rc.name ?? '');
-        startId = String(rc.id);
-        desceuRecuperacao = true;
-        tr('desceuRC', { rcName: rc.name, startPath, newYearCandidates: yearCandidates.length });
-      }
+  // 1) Tem pastas de ano DIRETAMENTE?
+  let yearCandidates = lvlStart.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+  let desceuRecuperacao = false;
+  if (yearCandidates.length === 0) {
+    // Não tem anos direto. Ainda estamos acima (ex.: Diretoria / Tec. Inf. / 99-automações_ti). Desce primeiro até Recuperação de Crédito.
+    const rc = lvlStart.find((c) => c.folder && isRecuperacaoCreditoInPath(c.name ?? ''))
+      ?? lvlStart.find((c) => c.folder && normalizeNameForMatch(String(c.name ?? '')).includes('99.automacoes'));
+    if (rc) {
+      const kids = await safeListChildren(String(rc.id));
+      yearCandidates = kids.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+      startPath = startPath ? `${startPath}/${rc.name}` : String(rc.name ?? '');
+      startId = String(rc.id);
+      desceuRecuperacao = true;
+      tr('desceuRC', { rcName: rc.name, startPath, newYearCandidates: yearCandidates.length });
     }
-    if (yearCandidates.length === 0) {
-      // Ainda sem anos? BFS 1 nível dentro de TODAS as pastas do start atrás de pasta 4 dígitos.
-      tr('yearFallbackBFS', {});
-      for (const f of lvlStart.filter((x) => x.folder)) {
-        if (yearCandidates.length > 0) break;
-        const sub = await safeListChildren(String(f.id));
-        const ys = sub.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
-        if (ys.length > 0) {
-          yearCandidates = ys;
-          startPath = startPath ? `${startPath}/${f.name}` : String(f.name ?? '');
-          startId = String(f.id);
-          desceuRecuperacao = true;
-          break;
-        }
-      }
-    }
-    yearCandidates.sort((a, b) => String(b.name ?? '').localeCompare(String(a.name ?? '')));
-    for (const y of yearCandidates) {
-      if (String(y.name ?? '').trim() === alvoAno) { yearId = String(y.id); yearName = String(y.name ?? ''); break; }
-    }
-    if (!yearId && yearCandidates.length > 0) {
-      yearId = String(yearCandidates[0].id); yearName = String(yearCandidates[0].name ?? '');
-      tr('anoFallbackLatest', { yearName, expected: alvoAno });
-    }
-    if (!yearId) { tr('noYear', {}); return out; }
-    tr('anoOk', { yearName, yearIdPrefix: (yearId || '').slice(0, 8) });
   }
+  if (yearCandidates.length === 0) {
+    // Ainda sem anos? BFS 1 nível dentro de TODAS as pastas do start atrás de pasta 4 dígitos.
+    tr('yearFallbackBFS', {});
+    for (const f of lvlStart.filter((x) => x.folder)) {
+      if (yearCandidates.length > 0) break;
+      const sub = await safeListChildren(String(f.id));
+      const ys = sub.filter((c) => c.folder && /^\d{4}$/.test(String(c.name ?? '').trim())) as Array<typeof lvlStart[number]>;
+      if (ys.length > 0) {
+        yearCandidates = ys;
+        startPath = startPath ? `${startPath}/${f.name}` : String(f.name ?? '');
+        startId = String(f.id);
+        desceuRecuperacao = true;
+        break;
+      }
+    }
+  }
+  yearCandidates.sort((a, b) => String(b.name ?? '').localeCompare(String(a.name ?? '')));
+  for (const y of yearCandidates) {
+    if (String(y.name ?? '').trim() === alvoAno) { yearId = String(y.id); yearName = String(y.name ?? ''); break; }
+  }
+  if (!yearId && yearCandidates.length > 0) {
+    yearId = String(yearCandidates[0].id); yearName = String(yearCandidates[0].name ?? '');
+    tr('anoFallbackLatest', { yearName, expected: alvoAno });
+  }
+  if (!yearId) { tr('noYear', {}); return out; }
+  tr('anoOk', { yearName, yearIdPrefix: yearId.slice(0, 8) });
 
   // ====== PASSO 3: Descender MÊS (alvo) ======
   const yearPath = startPath ? `${startPath}/${yearName}` : yearName;
@@ -4696,58 +4617,11 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
   //                  Atividade é OPCIONAL (ex: TRE-GO cliente 2/3 não tem)
   //   LINHA OPERAÇÃO (11 campos, COM Vencimento): <Op> <Parcela> <Mod> <VenctoOp> <TxJ> <Venc> <VOp> <VParc> <VJur> <Val> <Rend>
   //   LINHA OPERAÇÃO (10 campos, SEM Vencimento = vencimentoDefault): <Op> <Parcela> <Mod> <VenctoOp> <TxJ> <VOp> <VParc> <VJur> <Val> <Rend>
-  //   LINHA OPERAÇÃO (9 campos, NENHUMA data): <Op> <Parcela> <Mod> <TxJ> <VOp> <VParc> <VJur> <Val> <Rend>
   //   PULAR: Total Cliente/Empresa/Cooperativa/Central/Geral, headers repetidos, TOTAIS, EMP-158, -- X of Y --
   // ============================================================================
   try {
-    const sisbrHeaderLiteralRe = /(?:SISBR\s+2\.0|Relatório\s+de\s+Parcelas\s+a\s+Vencer|RELATORIO\s+DE\s+PARCELAS\s+A\s+VENCER|Relat[óo]rio\s+(?:de\s+)?(?:Parcelas|Consignado|Consignada|Consignados|Consignadas)|SISBR)/i;
-    const cliReProbe = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*(?:[A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?\s*\t\s*)?(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/gim;
-    const opReProbe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
-    const opReProbe10 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
-    const opReProbe11b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
-    const opReProbe10b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
-    const opReProbe9 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
-    const opReProbe9b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
-    const clienteMatches = text.match(cliReProbe) ?? [];
-    const operacaoMatches11 = text.match(opReProbe11) ?? [];
-    const operacaoMatches10 = text.match(opReProbe10) ?? [];
-    const operacaoMatches11b = text.match(opReProbe11b) ?? [];
-    const operacaoMatches10b = text.match(opReProbe10b) ?? [];
-    const operacaoMatches9 = text.match(opReProbe9) ?? [];
-    const operacaoMatches9b = text.match(opReProbe9b) ?? [];
-    const clienteCount = clienteMatches.length;
-    const operacaoCount = operacaoMatches11.length + operacaoMatches10.length + operacaoMatches11b.length + operacaoMatches10b.length + operacaoMatches9.length + operacaoMatches9b.length;
-    const isSisbrByStructure = clienteCount >= 3 || operacaoCount >= 5;
-    const sisbrHeaderLiteralMatch = sisbrHeaderLiteralRe.test(text);
-    const __sisbrDebugInfo: Record<string, unknown> = {
-      fileName,
-      sisbrHeaderLiteralMatch,
-      sisbrHeaderLiteralMatches: Array.from(new Set([
-        ... (text.match(/SISBR\s+2\.0/gi) ?? []),
-        ... (text.match(/Relatório\s+de\s+Parcelas\s+a\s+Vencer/gi) ?? []),
-        ... (text.match(/Relat[óo]rio\s+(?:de\s+)?(?:Parcelas|Consignado|Consignada|Consignados|Consignadas)/gi) ?? []),
-      ])).slice(0, 10),
-      clienteCount,
-      operacaoCount,
-      operacaoCount11: operacaoMatches11.length,
-      operacaoCount10: operacaoMatches10.length,
-      operacaoCount11b: operacaoMatches11b.length,
-      operacaoCount10b: operacaoMatches10b.length,
-      operacaoCount9: operacaoMatches9.length,
-      operacaoCount9b: operacaoMatches9b.length,
-      isSisbrByStructure,
-      enteredSisbrPositional: false,
-      empresaHeaderExtraido: '',
-      copetenciaExtraida: '',
-      vencimentoDefaultExtraido: '',
-    };
-    try {
-      const globalStore = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
-      if (!globalStore.__sisbrDebugLastByFile) globalStore.__sisbrDebugLastByFile = new Map();
-      globalStore.__sisbrDebugLastByFile.set(fileName, __sisbrDebugInfo);
-    } catch { /* ignore */ }
-    if (sisbrHeaderLiteralMatch || isSisbrByStructure) {
-      __sisbrDebugInfo.enteredSisbrPositional = true;
+    const sisbrHeaderRe = /(?:SISBR\s+2\.0|Relatório\s+de\s+Parcelas\s+a\s+Vencer)/;
+    if (sisbrHeaderRe.test(text)) {
       // ---------------- EMPRESA ----------------
       let empresaHeader = '';
       const orgaoRe = /(?:^|\n)\s*([^\n]{0,200}?\d{3,6}\s*-\s*[^\n]{0,200}?)\s*ÓRGÃO\s*:/s;
@@ -4762,178 +4636,31 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
       if (!empresaHeader) {
         empresaHeader = fileName.replace(/\.pdf$/i, '').trim();
       }
-      __sisbrDebugInfo.empresaHeaderExtraido = empresaHeader;
       // ---------------- COPETENCIA (MM/YYYY) ----------------
       let copetencia = '';
-      let copetenciaFonte = '';
-      const copetFromParts = (mmRaw: string, aaaaRaw: string): string => {
-        const mm = String(mmRaw ?? '').padStart(2, '0').slice(-2);
-        const aaRaw = String(aaaaRaw ?? '').trim();
-        const curYearN = new Date().getFullYear();
-        const curYear = String(curYearN);
-        const razoavel = (anoN: number) => Math.abs(anoN - curYearN) <= 10;
-
-        let candAno = '';
-        if (/^\d{4}$/.test(aaRaw)) {
-          candAno = aaRaw;
-        } else {
-          let tentativas: string[] = [];
-          if (/^\d{1}$/.test(aaRaw)) {
-            tentativas.push(aaRaw + curYear.slice(-3));
-            tentativas.push(curYear.slice(0, 3) + aaRaw);
-          } else if (/^\d{2}$/.test(aaRaw)) {
-            tentativas.push(aaRaw + curYear.slice(-2));
-            tentativas.push(curYear.slice(0, 2) + aaRaw);
-          } else if (/^\d{3}$/.test(aaRaw)) {
-            tentativas.push(aaRaw + curYear.slice(-1));
-            tentativas.push(curYear.slice(0, 1) + aaRaw);
-          }
-          const razoaveis = tentativas.filter(a => /^\d{4}$/.test(a) && razoavel(parseInt(a, 10)));
-          if (razoaveis.length) {
-            candAno = razoaveis.sort((a, b) => Math.abs(parseInt(a, 10) - curYearN) - Math.abs(parseInt(b, 10) - curYearN))[0];
-          } else if (tentativas.filter(a => /^\d{4}$/.test(a)).length) {
-            candAno = tentativas.find(a => /^\d{4}$/.test(a)) || '';
-          }
-        }
-        if (!/^\d{4}$/.test(candAno)) return '';
-        if (!/^\d{2}$/.test(mm)) return '';
-        const mmN = parseInt(mm, 10);
-        if (mmN < 1 || mmN > 12) return '';
-        return `${mm}/${candAno}`;
-      };
-      const dataPtRe = (anchor: string): RegExp => {
-        const src = `(?:^|\\s|\\b)${anchor}(\\d{1,2})[\\/\\.\\-](\\d{1,2})[\\/\\.\\-](\\d{1,4})(?:\\b|$)`;
-        return new RegExp(src, 'i');
-      };
-      const perReList: Array<{ re: RegExp; peso: number; rotulo: string }> = [
-        { peso: 5, rotulo: 'perRe_comA_espaco', re: /PER[ÍI]ODO\s*[=:：]\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})\s*(?:a|ate|até|à|at\xe9|–|—|-{1,3})\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
-        { peso: 4, rotulo: 'perRe_duasDatas_espaco',  re: /PER[ÍI]ODO\s*[=:：]\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})\s+(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
-        { peso: 3, rotulo: 'perRe_umaData_fim',      re: /PER[ÍI]ODO\s*[=:：]\s*(?:de\s*)?(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
-        { peso: 2, rotulo: 'perRe_mesAno_nomeExtenso', re: /PER[ÍI]ODO\s*[=:：]\s*(?:de\s*)?(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)[\s\-\/de]+(\d{2,4})/i },
-      ];
-      let best: { comp: string; peso: number; rotulo: string } | null = null;
-      for (const item of perReList) {
-        const m = text.match(item.re);
-        if (!m) continue;
-        let cand = '';
-        try {
-          if (item.rotulo === 'perRe_mesAno_nomeExtenso') {
-            const mes = String(m[1] ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-            const mapa: Record<string, string> = {janeiro:'01',fevereiro:'02',marco:'03',abril:'04',maio:'05',junho:'06',julho:'07',agosto:'08',setembro:'09',outubro:'10',novembro:'11',dezembro:'12'};
-            const mm = mapa[mes] ?? '';
-            if (!mm) continue;
-            cand = copetFromParts(mm, m[2] ?? '');
-          } else {
-            const dtFim = m[2] ?? m[1] ?? '';
-            const dRe = dataPtRe('');
-            const dm = dtFim.match(dRe) ?? dtFim.match(/(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/);
-            if (!dm) { const dReGuloso = /(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/; const m2 = dtFim.match(dReGuloso); if (!m2) continue; cand = copetFromParts(m2[2], m2[3]); } else cand = copetFromParts(dm[2], dm[3]);
-          }
-        } catch { continue; }
-        if (!cand) continue;
-        if (!best || item.peso > best.peso) best = { comp: cand, peso: item.peso, rotulo: item.rotulo };
+      const perRe = /PERÍODO\s*:\s*(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/;
+      const mPer = text.match(perRe);
+      if (mPer && mPer[2]) {
+        const parts = mPer[2].split('/'); if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
+      } else if (mPer && mPer[1]) {
+        const parts = mPer[1].split('/'); if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
       }
-      if (best) { copetencia = best.comp; copetenciaFonte = best.rotulo; }
-      // Fallback 2: colher Competência/Mês/Ano Referência da primeira linha do PDF (ex: Competência: 08/2026)
-      if (!copetencia) {
-        const reFallback = /(?:Compet[eêê]ncia|Competencia|Compete?ncia|M[eê]s\/Ano Refer[eêê]ncia|Período Ref\.|Período de Apuração)\s*[=:：]\s*(\d{1,2})[\/\.\-](\d{2,4})/i;
-        const fb = text.match(reFallback);
-        if (fb) {
-          const cand = copetFromParts(fb[1] ?? '', fb[2] ?? '');
-          if (cand) { copetencia = cand; copetenciaFonte = 'header_competencia_fallback'; }
-        }
-      }
-      // Fallback 3: vencimentoDefault extraído do título (Relatório de Parcelas a Vencer DD/MM/AAAA) -> usar como copetencia
-      if (!copetencia) {
-        const venRe = /Relat[óo]rio\s+(?:de\s+)?Parcelas\s+a\s+Vencer\s+(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/i;
-        const mv = text.match(venRe);
-        if (mv) {
-          const cand = copetFromParts(mv[2] ?? '', mv[3] ?? '');
-          if (cand) { copetencia = cand; copetenciaFonte = 'titulo_vencimento_default'; }
-        }
-      }
-      // Fallback 4: primeira data encontrada no texto (VENCTO / vencimento header)
-      if (!copetencia) {
-        const primeiraData = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-        if (primeiraData) {
-          const cand = copetFromParts(primeiraData[2], primeiraData[3]);
-          if (cand) { copetencia = cand; copetenciaFonte = 'primeira_data_texto_pdf'; }
-        }
-      }
-      __sisbrDebugInfo.copetenciaExtraida = copetencia;
-      __sisbrDebugInfo.copetenciaExtraidaFonte = copetenciaFonte;
       // ---------------- VENCIMENTO DEFAULT (para opRe10 = 10 campos sem Vencimento) ----------------
+      // Extrai de "Relatório de Parcelas a Vencer 25/08/2026"
       let vencimentoDefault = '';
-      let vencimentoDefaultFonte = '';
-      const extraiDataCompletaPt = (raw: string): string => {
-        const m = raw.match(/(\d{1,2})[\/\.\-](\d{1,2})[\/\.\-](\d{1,4})/);
-        if (!m) return '';
-        const dd = String(m[1]).padStart(2,'0');
-        const mm = String(m[2]).padStart(2,'0');
-        const aaRaw = String(m[3]);
-        const curYearN = new Date().getFullYear();
-        const curYear = String(curYearN);
-        const razoavel = (anoN: number) => Math.abs(anoN - curYearN) <= 10;
-
-        let candAno = '';
-        if (/^\d{4}$/.test(aaRaw)) {
-          candAno = aaRaw;
-        } else {
-          let tentativas: string[] = [];
-          if (/^\d{1}$/.test(aaRaw)) {
-            tentativas.push(aaRaw + curYear.slice(-3));
-            tentativas.push(curYear.slice(0, 3) + aaRaw);
-          } else if (/^\d{2}$/.test(aaRaw)) {
-            tentativas.push(aaRaw + curYear.slice(-2));
-            tentativas.push(curYear.slice(0, 2) + aaRaw);
-          } else if (/^\d{3}$/.test(aaRaw)) {
-            tentativas.push(aaRaw + curYear.slice(-1));
-            tentativas.push(curYear.slice(0, 1) + aaRaw);
-          }
-          const razoaveis = tentativas.filter(a => /^\d{4}$/.test(a) && razoavel(parseInt(a, 10)));
-          if (razoaveis.length) {
-            candAno = razoaveis.sort((a, b) => Math.abs(parseInt(a, 10) - curYearN) - Math.abs(parseInt(b, 10) - curYearN))[0];
-          } else if (tentativas.filter(a => /^\d{4}$/.test(a)).length) {
-            candAno = tentativas.find(a => /^\d{4}$/.test(a)) || '';
-          }
-        }
-        if (!/^\d{4}$/.test(candAno)) return '';
-        return `${dd}/${mm}/${candAno}`;
-      };
-      const venDefReList: Array<{ re: RegExp; rotulo: string }> = [
-        { rotulo: 'tituloRelatorioVencer', re: /Relat[óo]rio\s+(?:de\s+)?Parcelas\s+a\s+Vencer\s+(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
-        { rotulo: 'periFim_perRe',  re: /PER[ÍI]ODO\s*[=:：]\s*(?:\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})\s*(?:a|ate|até|à|–|—|-{1,3})\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})/i },
-        { rotulo: 'periIni_perRe',  re: /PER[ÍI]ODO\s*[=:：]\s*(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{1,4})(?:\s|$)/i },
-      ];
-      for (const item of venDefReList) {
-        const m = text.match(item.re);
-        if (!m) continue;
-        const cand = extraiDataCompletaPt(m[1] ?? '');
-        if (!cand) continue;
-        vencimentoDefault = cand;
-        vencimentoDefaultFonte = item.rotulo;
-        break;
+      const venDefRe = /Relatório\s+de\s+Parcelas\s+a\s+Vencer\s+(\d{2}\/\d{2}\/\d{4})/;
+      const mVenDef = text.match(venDefRe);
+      if (mVenDef && mVenDef[1]) vencimentoDefault = mVenDef[1].trim();
+      // Fallback: data final do PERÍODO se não achar no título
+      if (!vencimentoDefault && mPer && mPer[2]) {
+        const parts = mPer[2].split('/');
+        if (parts.length === 3) vencimentoDefault = `25/${parts[1]}/${parts[2]}`;
       }
-      if (!vencimentoDefault && copetencia) {
-        const [mm, aaaa] = copetencia.split('/');
-        vencimentoDefault = `25/${mm}/${aaaa}`;
-        vencimentoDefaultFonte = 'copetencia_fallback_dia25';
-      }
-      __sisbrDebugInfo.vencimentoDefaultExtraido = vencimentoDefault;
-      __sisbrDebugInfo.vencimentoDefaultExtraidoFonte = vencimentoDefaultFonte;
       // ---------------- REGEX LINHAS ----------------
       // Op 11 campos (COM Vencimento explícito na 6ª posição):
       const opRe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
-      // Op 11b campos (COM Vencimento explícito + 6 campos monetários no final → 12 grupos):
-      const opRe11b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
-      // Op 10 campos (SEM Vencimento de parcela → usa vencimentoDefault; AINDA tem data de Vencto. Operação):
+      // Op 10 campos (SEM Vencimento → usa vencimentoDefault): Vencimento é omitido da 6ª posição
       const opRe10 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
-      // Op 10b campos (SEM Vencimento de parcela + 6 campos monetários + Vencto. Operação data → 11 grupos):
-      const opRe10b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
-      // Op 9 campos (NENHUMA data — nem Vencto. Operação nem Vencimento → ambos usam defaults): 9 grupos = OP Parc Mod TxJ VOp VParc VJur VVal VRend
-      const opRe9 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
-      // Op 9b campos (NENHUMA data + 6 campos monetários extra → 10 grupos = OP Parc Mod TxJ VOp VParc VJur VVal VRend Extra6):
-      const opRe9b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
       // Cliente COM Atividade (PESSOA FISICA / PESSOA JURIDICA / OUTROS) entre TABS:
       const cliReComAtiv = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
       // Cliente SEM Atividade (só TAB para CPF, sem campo intermediário):
@@ -4946,7 +4673,6 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
         'EMPRESA', 'Cliente', 'Matrícula', 'CPF', 'Nome', 'Atividade', 'Telefone',
         'Operação', 'Modalidade', 'Vencto. Operação', 'Tx. Juros', 'Parcela', 'Vencimento',
         'Valor Operação', 'Valor Parcela', 'Valor Juros', 'Valorização', 'Rendas Apropriar', 'Copetencia',
-        'Valor 6 Campo Extra',
       ];
       for (const l of lines) {
         const ll = l.trim();
@@ -5000,34 +4726,6 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
             Valorização: oM11[10],
             'Rendas Apropriar': oM11[11],
             Copetencia: copetencia,
-            'Valor 6 Campo Extra': '',
-          });
-          continue;
-        }
-        // ----- Tenta linha operação 11b campos (Vencimento explícito + 6 campos monetários) -----
-        const oM11b = ll.match(opRe11b);
-        if (oM11b) {
-          resultRows.push({
-            EMPRESA: empresaHeader,
-            Cliente: currentClient?.Cliente ?? '',
-            Matrícula: currentClient?.Matrícula ?? '',
-            CPF: currentClient?.CPF ?? '',
-            Nome: currentClient?.Nome ?? '',
-            Atividade: currentClient?.Atividade ?? '',
-            Telefone: currentClient?.Telefone ?? '',
-            Operação: oM11b[1],
-            Modalidade: oM11b[3],
-            'Vencto. Operação': oM11b[4],
-            'Tx. Juros': oM11b[5],
-            Parcela: oM11b[2],
-            Vencimento: oM11b[6],
-            'Valor Operação': oM11b[7],
-            'Valor Parcela': oM11b[8],
-            'Valor Juros': oM11b[9],
-            Valorização: oM11b[10],
-            'Rendas Apropriar': oM11b[11],
-            Copetencia: copetencia,
-            'Valor 6 Campo Extra': oM11b[12],
           });
           continue;
         }
@@ -5054,95 +4752,10 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
             Valorização: oM10[9],
             'Rendas Apropriar': oM10[10],
             Copetencia: copetencia,
-            'Valor 6 Campo Extra': '',
-          });
-          continue;
-        }
-        // ----- Tenta linha operação 10b campos (SEM Vencimento + 6 campos monetários) -----
-        const oM10b = ll.match(opRe10b);
-        if (oM10b) {
-          resultRows.push({
-            EMPRESA: empresaHeader,
-            Cliente: currentClient?.Cliente ?? '',
-            Matrícula: currentClient?.Matrícula ?? '',
-            CPF: currentClient?.CPF ?? '',
-            Nome: currentClient?.Nome ?? '',
-            Atividade: currentClient?.Atividade ?? '',
-            Telefone: currentClient?.Telefone ?? '',
-            Operação: oM10b[1],
-            Modalidade: oM10b[3],
-            'Vencto. Operação': oM10b[4],
-            'Tx. Juros': oM10b[5],
-            Parcela: oM10b[2],
-            Vencimento: vencimentoDefault,
-            'Valor Operação': oM10b[6],
-            'Valor Parcela': oM10b[7],
-            'Valor Juros': oM10b[8],
-            Valorização: oM10b[9],
-            'Rendas Apropriar': oM10b[10],
-            Copetencia: copetencia,
-            'Valor 6 Campo Extra': oM10b[11],
-          });
-          continue;
-        }
-        // ----- Tenta linha operação 9 campos (NENHUMA data — Vencto. Operação e Vencimento = defaults) -----
-        const oM9 = ll.match(opRe9);
-        if (oM9) {
-          resultRows.push({
-            EMPRESA: empresaHeader,
-            Cliente: currentClient?.Cliente ?? '',
-            Matrícula: currentClient?.Matrícula ?? '',
-            CPF: currentClient?.CPF ?? '',
-            Nome: currentClient?.Nome ?? '',
-            Atividade: currentClient?.Atividade ?? '',
-            Telefone: currentClient?.Telefone ?? '',
-            Operação: oM9[1],
-            Modalidade: oM9[3],
-            'Vencto. Operação': vencimentoDefault,
-            'Tx. Juros': oM9[4],
-            Parcela: oM9[2],
-            Vencimento: vencimentoDefault,
-            'Valor Operação': oM9[5],
-            'Valor Parcela': oM9[6],
-            'Valor Juros': oM9[7],
-            Valorização: oM9[8],
-            'Rendas Apropriar': oM9[9],
-            Copetencia: copetencia,
-            'Valor 6 Campo Extra': '',
-          });
-          continue;
-        }
-        // ----- Tenta linha operação 9b campos (NENHUMA data + 6º campo monetário extra) -----
-        const oM9b = ll.match(opRe9b);
-        if (oM9b) {
-          resultRows.push({
-            EMPRESA: empresaHeader,
-            Cliente: currentClient?.Cliente ?? '',
-            Matrícula: currentClient?.Matrícula ?? '',
-            CPF: currentClient?.CPF ?? '',
-            Nome: currentClient?.Nome ?? '',
-            Atividade: currentClient?.Atividade ?? '',
-            Telefone: currentClient?.Telefone ?? '',
-            Operação: oM9b[1],
-            Modalidade: oM9b[3],
-            'Vencto. Operação': vencimentoDefault,
-            'Tx. Juros': oM9b[4],
-            Parcela: oM9b[2],
-            Vencimento: vencimentoDefault,
-            'Valor Operação': oM9b[5],
-            'Valor Parcela': oM9b[6],
-            'Valor Juros': oM9b[7],
-            Valorização: oM9b[8],
-            'Rendas Apropriar': oM9b[9],
-            Copetencia: copetencia,
-            'Valor 6 Campo Extra': oM9b[10],
           });
           continue;
         }
       }
-      try {
-        __sisbrDebugInfo.resultRowsPositional = resultRows.length;
-      } catch { /* ignore */ }
       if (resultRows.length > 0) return { headers: resultHeaders, rows: resultRows };
     }
   } catch (_eSisbrPos) {
@@ -5276,259 +4889,6 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
   return { headers, rows };
 }
 
-// ============================================================================
-// Parser MPGO PDF (Recurso MPGO — Ministério Público GO)
-// Layout oficial: "Relatório de Movimento Financeiro - Período: MM/AAAA"
-// Cada linha de registro = servidor com campos posicionais:
-//   Sit. Contrato  Sit. Parcela  DataIni(MM/AAAA)  NoParc  PGT  PRZ  VlrParc  VlrAde  DataInc(DD/MM/AAAA)  Servico  Corresp  NoADE  - Nome -  CPF  DataFim(MM/AAAA)
-// Exemplo linha: "Em Andamento      12/2023 33  33  120  551,30  551,30  20/11/2023  2751  42499  114520 - ZELMA XAVIER BEZERRA - 759.207.941-00  11/2033"
-// ============================================================================
-export async function readMpgoPdfTable(
-  fileName: string,
-  file: Buffer,
-): Promise<{
-  headers: string[];
-  rows: Array<Record<string, unknown>>;
-}> {
-  const looksLikePdf = (() => {
-    const idx = file.indexOf(Buffer.from('%PDF'));
-    return idx !== -1 && idx < 1024;
-  })();
-  if (!isPdfFile(fileName) && !looksLikePdf) return readSheetTable(file);
-
-  const pdfParseFn = await getPdfParse();
-  const parsed = await pdfParseFn(file);
-  const rawText = typeof (parsed as any)?.text === 'string' ? (parsed as any).text : String(parsed ?? '');
-  const allLines = rawText
-    .split(/\r?\n/g)
-    .map((l) => l.trim().replace(/[ ]{2,}/g, ' '))
-    .filter(Boolean);
-
-  const MPGO_RESULT_HEADERS: string[] = [
-    'Cat. Servidor',
-    'Sit. Contrato',
-    'Sit. Parcela',
-    'Data Ini',
-    'No Parc',
-    'PGT',
-    'PRZ',
-    'Valor Parcela',
-    'Vlr. ADE',
-    'Data Inc',
-    'Servico',
-    'Corresp',
-    'No ADE',
-    'Nome',
-    'CPF',
-    'Data Fim',
-    'Copetencia',
-    'Orgao',
-    'Arquivo',
-  ];
-
-  const cpfReOnly = /^\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/;
-  const mmAaaaFinalRe = /^\s*(\d{2}\/\d{4})\s*$/;
-  const moneyRe = /\b\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d+\.\d{2}\b/;
-  const moneyG = new RegExp('\\b(\\d{1,3}(?:\\.\\d{3})*,\\d{2}|\\d+,\\d{2}|\\d+\\.\\d{2})\\b', 'g');
-  const dataIniRe = /\b\d{2}\/\d{4}\b.*\b\d{2}\/\d{2}\/\d{4}\b/;
-  const dateMmAaaaOnly = /\b(\d{2}\/\d{4})\b/;
-  const dateDdMmYyyyOnly = /\b(\d{2}\/\d{2}\/\d{4})\b/;
-  const skipRe = /relat|periodo|consignat|sub-orga|unidade|estabelec|sicoob|cat\. do|servidor|sit\. da|sit\. do|contrato|nº|vlr\.|subtotal|total de|^\d+\s+de\s+\d+$/i;
-  const cpfAny = /\b(\d{3}\.\d{3}\.\d{3}-\d{2})\b/;
-  const cpfLineName = /^\s*(?:(.+?)\s*-\s*)?(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/;
-  const normalizeStr = (s: unknown) => String(s ?? '').replace(/\s+/g, ' ').trim();
-  const formatCpf = (digits: string) => {
-    const d = String(digits ?? '').replace(/\D/g, '');
-    if (d.length !== 11) return d;
-    return `${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
-  };
-  const sitParcelaKw = /^(folha|liquidada|baixada|ativa|em andamento|pago|quitado|cancelado|suspenso|concluído|concluido)$/i;
-
-  let copetencia = '';
-  const periodoHeaderRe = /PER[ÍI]ODO\s*[=:：]\s*(\d{2})\s*[\/\.\-]\s*(\d{2,4})/i;
-  const pm = periodoHeaderRe.exec(rawText);
-  if (pm) {
-    const mm = pm[1];
-    const anoRaw = pm[2];
-    const ano = /^\d{2}$/.test(anoRaw) ? '20' + anoRaw : anoRaw;
-    if (/^\d{4}$/.test(ano) && /^0[1-9]|1[0-2]$/.test(mm)) copetencia = `${mm}/${ano}`;
-  }
-  if (!copetencia) {
-    const fnNorm = String(fileName ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-    const mmNome: Record<string, number> = {
-      janeiro:1, fev:2, fevereiro:2, mar:3, marco:3, março:3, abril:4, mai:5, maio:5,
-      jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8, set:9, sep:9, setembro:9,
-      out:10, outu:10, outubro:10, nov:11, novembro:11, dez:12, dezembro:12,
-    };
-    const anoM = fnNorm.match(/\b(20\d{2})\b/);
-    let mmTok = '';
-    const sortedKeys = Object.keys(mmNome).sort((a, b) => b.length - a.length);
-    for (const k of sortedKeys) {
-      const re = new RegExp('(^|[ _-])' + k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '([ _-]|$)','i');
-      if (re.test(fnNorm)) { mmTok = k; break; }
-    }
-    if (anoM && mmTok) {
-      const mm = mmNome[mmTok];
-      if (mm >= 1 && mm <= 12) copetencia = `${String(mm).padStart(2,'0')}/${anoM[1]}`;
-    }
-  }
-  if (!copetencia) copetencia = '';
-
-  let orgaoHeader = '';
-  const orgaoHeaderRe = /(?:ÓRGÃO|ORGÃO|ORGAO)\s*:\s*([^\n\r]{0,200}?)(?:\n|$|GOIAS|Goiás|\(GO\))/i;
-  const om = orgaoHeaderRe.exec(rawText);
-  if (om && om[1]) orgaoHeader = normalizeStr(om[1]);
-  if (!orgaoHeader) orgaoHeader = 'MPGO - Ministério Público do Estado de Goiás';
-
-  const outRows: Array<Record<string, unknown>> = [];
-
-  for (let i = 1; i < allLines.length - 1; i++) {
-    const l = allLines[i];
-    if (skipRe.test(l)) continue;
-    if (!(moneyRe.test(l) && dataIniRe.test(l))) continue;
-    if (l.length < 40) continue;
-
-    const mainLine = normalizeStr(l);
-    const dataIniMatch = mainLine.match(dateMmAaaaOnly);
-    const dataIncMatch = mainLine.match(dateDdMmYyyyOnly);
-    const dataIni = dataIniMatch ? dataIniMatch[1] : '';
-    const dataInc = dataIncMatch ? dataIncMatch[1] : '';
-    if (!dataIni || !dataInc) continue;
-
-    const moneys = Array.from(mainLine.matchAll(moneyG)).map((m) => m[1]);
-    if (moneys.length < 2) continue;
-    const valorParcela = moneys[moneys.length - 2] ?? '';
-    const vlrAde = moneys[moneys.length - 1] ?? '';
-    if (!valorParcela || !vlrAde) continue;
-
-    const lastDashIdx = mainLine.lastIndexOf(' - ');
-    let parte1Nome = '';
-    let beforeNameSegment = mainLine;
-    if (lastDashIdx >= 0) {
-      parte1Nome = normalizeStr(mainLine.slice(lastDashIdx + 3));
-      beforeNameSegment = mainLine.slice(0, lastDashIdx);
-    }
-    if (parte1Nome.endsWith('-')) parte1Nome = normalizeStr(parte1Nome.slice(0, -1));
-
-    const dataIniIdx = beforeNameSegment.indexOf(dataIni);
-    const dataIncIdx = beforeNameSegment.indexOf(dataInc);
-    let sitContrato = '';
-    if (dataIniIdx > 0) {
-      sitContrato = normalizeStr(beforeNameSegment.slice(0, dataIniIdx));
-      sitContrato = sitContrato.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ\s\-]/g, '').replace(/\s{2,}/g, ' ').trim();
-    }
-
-    let noParc = '';
-    let pgt = '';
-    let prz = '';
-    if (dataIniIdx >= 0 && dataIncIdx > dataIniIdx) {
-      const seg1 = beforeNameSegment.slice(dataIniIdx + dataIni.length, dataIncIdx);
-      const ints1 = seg1.split(/\s+/).filter((t) => /^\d+$/.test(t));
-      if (ints1.length >= 3) {
-        noParc = ints1[0];
-        pgt = ints1[1];
-        prz = ints1[2];
-      } else if (ints1.length === 2) {
-        noParc = ints1[0];
-        pgt = ints1[1];
-      }
-    }
-
-    let servico = '';
-    let corresp = '';
-    let noAde = '';
-    if (dataIncIdx >= 0) {
-      const seg2 = beforeNameSegment.slice(dataIncIdx + dataInc.length);
-      const ints2 = seg2.split(/\s+/).filter((t) => /^\d+$/.test(t));
-      if (ints2.length >= 3) {
-        servico = ints2[ints2.length - 3];
-        corresp = ints2[ints2.length - 2];
-        noAde = ints2[ints2.length - 1];
-      } else if (ints2.length === 2) {
-        servico = ints2[0];
-        noAde = ints2[1];
-      } else if (ints2.length === 1) {
-        noAde = ints2[0];
-      }
-    }
-
-    const prev = normalizeStr(allLines[i - 1] ?? '');
-    let sitParcela = '';
-    if (prev && prev.length < 50 && sitParcelaKw.test(prev)) sitParcela = prev;
-
-    let cpf = '';
-    let dataFim = '';
-    const extraNome: string[] = [];
-    let j = i + 1;
-    const jLimit = Math.min(i + 8, allLines.length);
-    let used = 0;
-    while (j < jLimit) {
-      const nl = normalizeStr(allLines[j]);
-      if (!nl) { j++; continue; }
-      if (skipRe.test(nl) || /^\d+\s*de\s*\d+$/i.test(nl)) break;
-      if (sitParcelaKw.test(nl) && used > 0) break;
-
-      const m1 = nl.match(cpfLineName);
-      if (m1) {
-        if (m1[1]) extraNome.push(normalizeStr(m1[1]));
-        cpf = formatCpf(m1[2]); used++; j++; break;
-      }
-      const m2 = nl.match(cpfReOnly);
-      if (m2) { cpf = formatCpf(m2[1]); used++; j++; break; }
-      const m3 = nl.match(cpfAny);
-      if (m3) {
-        cpf = formatCpf(m3[1]); const cpfIdx = nl.indexOf(m3[0]);
-        if (cpfIdx > 0) extraNome.push(normalizeStr(nl.slice(0, cpfIdx).replace(/-\s*$/, '')));
-        used++; j++; break;
-      }
-      if (mmAaaaFinalRe.test(nl)) break;
-      const mdf = nl.match(dateMmAaaaOnly);
-      if (mdf && used >= 1) break;
-      extraNome.push(normalizeStr(nl).replace(/\s*-\s*$/, '').replace(/^\s*-\s*/, ''));
-      used++; j++;
-    }
-    while (j < jLimit) {
-      const nl = normalizeStr(allLines[j]);
-      if (!nl) { j++; continue; }
-      const m = nl.match(mmAaaaFinalRe);
-      if (m) { dataFim = m[1]; break; }
-      const m2 = nl.match(dateMmAaaaOnly);
-      if (m2) { dataFim = m2[1]; break; }
-      if (skipRe.test(nl) || /^\d+\s*de\s*\d+$/i.test(nl)) break;
-      j++;
-    }
-
-    const parte2 = normalizeStr(extraNome.filter(Boolean).join(' ')).replace(/\s{2,}/g, ' ').trim().replace(/^-+|-+$/g, '');
-    let nomeFull = normalizeStr(`${parte1Nome} ${parte2}`).trim();
-    if (!nomeFull) nomeFull = parte1Nome || parte2;
-    nomeFull = nomeFull.replace(/\s{2,}/g, ' ').trim();
-
-    outRows.push({
-      'Cat. Servidor': '',
-      'Sit. Contrato': sitContrato,
-      'Sit. Parcela': sitParcela,
-      'Data Ini': dataIni,
-      'No Parc': noParc,
-      PGT: pgt,
-      PRZ: prz,
-      'Valor Parcela': valorParcela,
-      'Vlr. ADE': vlrAde,
-      'Data Inc': dataInc,
-      Servico: servico,
-      Corresp: corresp,
-      'No ADE': noAde,
-      Nome: nomeFull,
-      CPF: cpf,
-      'Data Fim': dataFim,
-      Copetencia: copetencia || dataIni,
-      Orgao: orgaoHeader,
-      Arquivo: String(fileName ?? ''),
-    });
-  }
-
-  return { headers: MPGO_RESULT_HEADERS, rows: outRows };
-}
-
 export async function debugLocalSisbrPdfFile(
   filePathAbs: string,
 ): Promise<{
@@ -5548,7 +4908,6 @@ export async function debugLocalSisbrPdfFile(
   rowsFirst20: Array<Record<string, unknown>>;
   allMoneysCount: number;
   allMoneysFirst30: string[];
-  debugSisbr?: Record<string, unknown>;
   error?: string;
 }> {
   type R = Awaited<ReturnType<typeof debugLocalSisbrPdfFile>>;
@@ -5604,12 +4963,6 @@ export async function debugLocalSisbrPdfFile(
       sampleRow0: extracted.rows[0]?.[h] ?? null,
       sampleRow1: extracted.rows[1]?.[h] ?? null,
     }));
-    try {
-      const globalStore = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
-      if (globalStore.__sisbrDebugLastByFile && globalStore.__sisbrDebugLastByFile.has(result.fileName)) {
-        result.debugSisbr = globalStore.__sisbrDebugLastByFile.get(result.fileName) ?? undefined;
-      }
-    } catch { /* ignore */ }
     return result;
   } catch (e) {
     result.ok = false;
@@ -5637,29 +4990,17 @@ async function openDatabase(dbPath: string): Promise<Database> {
   }
 
   const cached = cachedDbByPath.get(resolvedPath);
-  const syncRunning = Boolean((globalThis as any).__importSyncRunning === true);
-  if (
-    cached &&
-    Math.abs(cached.mtimeMs - currentMtimeMs) <= DB_MTIME_SAFETY_DELTA_MS
-  ) {
-    if (!DB_HANDLE_VALIDATION_ENABLED || syncRunning || dbHandleLooksAlive(cached.db)) {
-      cached.lastUsedMs = nowMs;
+  if (cached) {
+    cached.lastUsedMs = nowMs;
+    try {
+      try { cached.db.exec('SELECT 1;'); } catch { cached.db.run('SELECT 1;'); }
+      if (currentMtimeMs > 0) cached.mtimeMs = currentMtimeMs;
       return cached.db;
+    } catch (e) {
+      try { (cached.db as { close?: () => void }).close?.(); } catch { void 0; }
+      cachedDbByPath.delete(resolvedPath);
+      safeLogError('openDatabase cached handle invalid', e);
     }
-    safeLogError(
-      `openDatabase cached handle DEAD for ${resolvedPath} (will reopen fresh, close+purge)${syncRunning ? ' [BYPASS SKIPPED — __importSyncRunning=true]' : ''}`,
-      new Error('cached handle SELECT 1 failed'),
-    );
-    safeCloseDb(cached.db);
-    try { cachedDbByPath.delete(resolvedPath); } catch {}
-  } else if (cached) {
-    if (syncRunning) {
-      cached.lastUsedMs = nowMs;
-      try { cached.mtimeMs = currentMtimeMs || cached.mtimeMs; } catch {}
-      return cached.db;
-    }
-    safeCloseDb(cached.db);
-    cachedDbByPath.delete(resolvedPath);
   }
 
   let db: Database;
@@ -5890,7 +5231,6 @@ function markFileImportedByContentHash(db: Database, sha256Hex: string, meta?: R
 
 function getSqlitePath(): string {
   const raw = (() => {
-    if (process.env.CONSIGNADO_DB_PATH) return process.env.CONSIGNADO_DB_PATH;
     if (process.env.SQLITE_PATH) return process.env.SQLITE_PATH;
     const cwd = process.cwd();
     const projectRootData = path.resolve(cwd, '..', 'data', 'consignado.sqlite');
@@ -5957,6 +5297,22 @@ function tableExists(db: Database, name: string): boolean {
     }
   } catch {
     return false;
+  }
+}
+
+function resolveExistingTableName(db: Database, name: string): string | null {
+  const escaped = String(name ?? '').replaceAll("'", "''");
+  if (!escaped) return null;
+  try {
+    const res = db.exec(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='${escaped}' COLLATE NOCASE LIMIT 1;`,
+    );
+    const idx = res[0]?.columns?.indexOf('name') ?? -1;
+    const v = idx >= 0 ? (res[0]?.values?.[0]?.[idx] ?? null) : null;
+    const out = typeof v === 'string' ? v.trim() : String(v ?? '').trim();
+    return out ? out : null;
+  } catch {
+    return null;
   }
 }
 
@@ -6043,7 +5399,8 @@ function getExtratoLikeColumnsUnion(db: Database): string[] {
 }
 
 function getTableColumns(db: Database, tableName: string): string[] {
-  const escaped = tableName.replaceAll("'", "''");
+  const actual = resolveExistingTableName(db, tableName) ?? tableName;
+  const escaped = actual.replaceAll("'", "''");
   const res = db.exec(`PRAGMA table_info('${escaped}');`);
   const colsIndex = res[0]?.columns?.indexOf('name') ?? -1;
   if (!res[0] || colsIndex === -1) return [];
@@ -7217,7 +6574,6 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['ALEGO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
-      moveToImportadosSubfolderAfterImport: true,
     },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-17 — RECURSO ADFEGO =========
@@ -7462,19 +6818,6 @@ function ensureDefaultLearningProfiles(db: Database) {
       moveToImportadosSubfolderAfterImport: true,
     },
   });
-  // ========= REGRA OFICIAL APLICADA 2026-09-04 — RECURSO NEOCONSIG (Demais Orgãos) — perfil recurso_neoconsig_demais =========
-  // Usuário confirmou: Extrair competência também de NOME DO ARQUIVO com MÊS + 1 (padrão ADFEGO/ELETRO/TRT/TRE).
-  // Exemplo: NEOCONSIG-AGOSTO-2026.xlsx → AGOSTO=08 → +1 → 09/2026.
-  // Pipeline IDÊNTICO ao RECURSO ADFEGO / ELETRO (garante compatibilidade com os arquivos NEOCONSIG usados hoje):
-  //   [R1] Strict whitelist 9 colunas: Nome/CPF/Desc Finalidade/Contrato/N° Parcela/Qtd Parcelas/Vencimento/Critério de Débito/Valor Parcela (minMatches=5).
-  //   [R2] Competência = Vencimento convertido (Aug-26 → 08/2026 · ago/26 → 08/2026 · Julho/2026 → 07/2026). Fallback extrai do cabeçalho Excel.
-  //        + EXTRA (regra nova usuário): extrai competência de NOME DO ARQUIVO com MÊS + 1 (AGOSTO→09/2026).
-  //   [R3] Fill-down 8 colunas: Nome/CPF/Desc Finalidade/Contrato/Qtd Parcelas/Vencimento/Critério de Débito/Valor Parcela.
-  //   [R4] Blacklist Nome órgão/relatório.
-  //   [R5] Remove linhas TOTAL / vazias / cabeçalho fantasma.
-  //   [R6] Vencimento data nascimento ano ≤ 2019 → zera.
-  //   [R7] Dedup intra-arquivo.
-  //   [R8] Nome UPPER / CPF máscara / Valor R$ / padrão ADFEGO.
   upsertLearningProfile(db, {
     id: 'recurso_neoconsig_demais',
     kind: 'recurso_neoconsig_demais',
@@ -7486,28 +6829,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Demais Orgão'],
       ignoreImportados: false,
       checkDuplicateContent: true,
-      competenciaMesArquivoSemIncremento: false,
-      extractCompetenciaFromTopHeader: true,
       extractCompetenciaFromFileName: true,
-      fillDown8Cols: true,
-      keep16ExcelExtrasColumnas: true,
-      nomeUpperTrimSpSimples: true,
-      cpfMascara11dig: true,
-      valorParcelaPrefixoRSimbolo: true,
-      descFinalidadeDefaultCreditoConsignado: true,
-      contratoNormalizadoBrMilhar: true,
-      strictColumnWhitelist: [
-        'Nome',
-        'CPF',
-        'Desc Finalidade',
-        'Contrato',
-        'N° Parcela',
-        'Qtd Parcelas',
-        'Vencimento',
-        'Critério de Débito',
-        'Valor Parcela',
-      ],
-      strictColumnMinMatches: 5,
       moveToImportadosSubfolderAfterImport: true,
     },
   });
@@ -7524,7 +6846,6 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Orgão/TJGO', 'TJGO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
-      moveToImportadosSubfolderAfterImport: true,
     },
   });
   upsertLearningProfile(db, {
@@ -7535,10 +6856,8 @@ function ensureDefaultLearningProfiles(db: Database) {
     targetTable: 'Recurso MPGO',
     options: {
       mode: 'append',
-      folderCandidates: ['Relatório Orgão/MPGO', 'Relatório Orgão/MP', 'MPGO', 'MP'],
       ignoreImportados: true,
-      checkDuplicateContent: false,
-      moveToImportadosSubfolderAfterImport: true,
+      checkDuplicateContent: true,
     },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — EXTRATO RECURSO TRE-GO + TRT-GO (Justiça Eleitoral + Trabalho, PERFIL ESPECÍFICO PRIORIDADE ALTA) =========
@@ -7588,174 +6907,6 @@ function ensureDefaultLearningProfiles(db: Database) {
       strictColumnWhitelist: null,
       strictColumnMinMatches: 0,
       extractCompetenciaFromTopHeader: true,
-      moveToImportadosSubfolderAfterImport: true,
-    },
-  });
-  // ========= REGRA OFICIAL GRAVADA em 2026-08-26 — EXTRATO RECURSO ADFEGO (Associação dos Deficientes do Estado de Goiás — CONTA CORRENTE) =========
-  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
-  // Formato idêntico ao TRE/TRT — planilha conta corrente 4 cols: DATA / DOCUMENTO / HISTÓRICO / VALOR.
-  //   [AE1] Match: Nome do arquivo comece com "ADFEGO" (case insensitive) + extensão .xlsx/.xlsm/.xls.
-  //   [AE2] Pipeline idêntico TRE/TRT:
-  //        DATA → DATA (Excel col 1) · DOCUMENTO → DOCUMENTO (col 2) · HISTÓRICO Excel → HISTÓRICO (col 3)
-  //        VALOR → VALOR (col 4). HISTÓRICO_1 BD vazio.
-  //        Copetencia = Mês arquivo + 1 (ex: ADFEGO-JULHO-2026 → 08/2026).
-  //        CompetenciaArquivo = prefixo-mês-ano (ex: ADFEGO-JULHO-2026).
-  //   [AE3] BFS SharePoint prioriza subpastas ADFEGO. checkDuplicateContent=true. Pós-insert move para Importados.
-  upsertLearningProfile(db, {
-    id: 'extratos_adfego_go',
-    kind: 'extratos',
-    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
-    fileNameRegex: '^ADFEGO.*\\.(xlsx|xlsm|xls)$',
-    targetTable: 'extratos',
-    options: {
-      isAdfegoExtratoProfile: true,
-      isOrgaoContaCorrenteExtrato: true,
-      mode: 'append',
-      folderCandidates: [
-        'Extratos de Recurso/ADFEGO',
-        'Extrato de Recurso/ADFEGO',
-        'Extratos do Recurso/ADFEGO',
-        'Extrato do Recurso/ADFEGO',
-        'Extratos Recurso/ADFEGO',
-        'Extrato Recurso/ADFEGO',
-        'Extratos/ADFEGO',
-        'Extrato/ADFEGO',
-        'ADFEGO',
-        'Extratos de Recurso',
-        'Extrato de Recurso',
-        'Extratos do Recurso',
-        'Extrato do Recurso',
-        'Extratos Recurso',
-        'Extrato Recurso',
-        'Extratos',
-        'Extrato',
-        'Extrato(s)',
-        'Extratos de Recursos',
-        'Extrato de Recursos',
-      ],
-      ignoreImportados: true,
-      checkDuplicateContent: true,
-      strictColumnWhitelist: null,
-      strictColumnMinMatches: 0,
-      extractCompetenciaFromTopHeader: true,
-      extractCompetenciaFromFileName: true,
-      moveToImportadosSubfolderAfterImport: true,
-    },
-  });
-  // ========= REGRA OFICIAL GRAVADA em 2026-08-26 — EXTRATO RECURSO ELETRO (Eletra / EQTPREV — CONTA CORRENTE) =========
-  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
-  // Formato idêntico ao TRE/TRT — planilha conta corrente 4 cols: DATA / DOCUMENTO / HISTÓRICO / VALOR.
-  //   [EL1] Match: Nome do arquivo contenha "ELETRO" OU "ELETRA" OU "EQTPREV" (case insensitive) + .xlsx/.xlsm/.xls.
-  //   [EL2] Pipeline idêntico TRE/TRT/ADFEGO:
-  //        DATA → DATA · DOCUMENTO → DOCUMENTO · HISTÓRICO Excel → HISTÓRICO BD · VALOR → VALOR.
-  //        Copetencia = Mês arquivo + 1 (ex: ELETRA-JULHO-2026 → 08/2026).
-  //        CompetenciaArquivo = prefixo-mês-ano (ex: ELETRA-JULHO-2026 / ELETRO-JULHO-2026 / EQTPREV-JULHO-2026).
-  //   [EL3] BFS SharePoint prioriza subpastas ELETRO/ELETRA. checkDup=true. Move para Importados pós-insert.
-  upsertLearningProfile(db, {
-    id: 'extratos_eletra_go',
-    kind: 'extratos',
-    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
-    fileNameRegex: '.*(?:ELETRO|ELETRA|EQTPREV).*\\.(xlsx|xlsm|xls)$',
-    targetTable: 'extratos',
-    options: {
-      isEletraExtratoProfile: true,
-      isOrgaoContaCorrenteExtrato: true,
-      mode: 'append',
-      folderCandidates: [
-        'Extratos de Recurso/ELETRA',
-        'Extrato de Recurso/ELETRA',
-        'Extratos do Recurso/ELETRA',
-        'Extrato do Recurso/ELETRA',
-        'Extratos Recurso/ELETRA',
-        'Extrato Recurso/ELETRA',
-        'Extratos/ELETRA',
-        'Extrato/ELETRA',
-        'Extratos de Recurso/ELETRO',
-        'Extrato de Recurso/ELETRO',
-        'Extratos/ELETRO',
-        'Extrato/ELETRO',
-        'ELETRO',
-        'ELETRA',
-        'Eletra',
-        'Eletro',
-        'Extratos de Recurso',
-        'Extrato de Recurso',
-        'Extratos do Recurso',
-        'Extrato do Recurso',
-        'Extratos Recurso',
-        'Extrato Recurso',
-        'Extratos',
-        'Extrato',
-        'Extrato(s)',
-        'Extratos de Recursos',
-        'Extrato de Recursos',
-      ],
-      ignoreImportados: true,
-      checkDuplicateContent: true,
-      strictColumnWhitelist: null,
-      strictColumnMinMatches: 0,
-      extractCompetenciaFromTopHeader: true,
-      extractCompetenciaFromFileName: true,
-      moveToImportadosSubfolderAfterImport: true,
-    },
-  });
-  // ========= REGRA OFICIAL GRAVADA em 2026-09-01 — EXTRATO RECURSO TODOS (TODOS-MÊS-ANO.xlsx) =========
-  // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. Esta regra TEM PRIORIDADE SOBRE extratos_recurso GENÉRICO.
-  // Formato idêntico ao TRE/TRT/ADFEGO/ELETRO — planilha conta corrente 5 cols: DATA / DOCUMENTO / HISTÓRICO / INFORMAÇÕES COMPLEMENTARES / VALOR.
-  //   [TO1] Match: Nome do arquivo COMECE com "TODOS" (case insensitive) + extensão .xlsx/.xlsm/.xls.
-  //        Ex: TODOS-AGOSTO-2026.xlsx, TODOS SETEMBRO 2026.xlsm, TODOS_09-2026.xls.
-  //   [TO2] Pipeline idêntico Conta Corrente TRE/TRT:
-  //        DATA (col 1) → DATA · DOCUMENTO (col 2) → DOCUMENTO · HISTÓRICO Excel (col 3) → apenas marcador de filtro abaixo.
-  //        INFORMAÇÕES COMPLEMENTARES (col 4) → HISTÓRICO BD (SOMENTE a 1ª linha útil da célula = linha nome órgão).
-  //        VALOR (col 5) → VALOR. HISTÓRICO_1 BD vazio.
-  //        Copetencia = Mês arquivo + 1 (ex: TODOS-AGOSTO-2026 → 09/2026).
-  //        CompetenciaArquivo = prefixo-mês-ano (TODOS-AGOSTO-2026).
-  //   [TO3] Filtro de linhas: SÓ importa se HISTÓRICO Excel === "CRÉD.TED-STR" (case + acento insensitive).
-  //        (Arquivos modelos TODOS costumam ter 100% das linhas com esse marcador; filtro protege contra totalizadores / headers fantasmas / outras movimentações de débito).
-  //   [TO4] BFS SharePoint prioriza subpastas TODOS. checkDuplicateContent=true. Pós-insert move para Importados.
-  try {
-    db.run(`DELETE FROM import_learning_profiles WHERE id='extratos_todos_go';`);
-  } catch { /* ignore */ }
-  upsertLearningProfile(db, {
-    id: 'extratos_todos_go',
-    kind: 'extratos',
-    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
-    fileNameRegex: '^TODOS.*\\.(xlsx|xlsm|xls)$',
-    targetTable: 'extratos',
-    options: {
-      isTodosExtratoProfile: true,
-      isOrgaoContaCorrenteExtrato: true,
-      historicoStrictFilterCtedStr: true,
-      mode: 'append',
-      folderCandidates: [
-        'Extratos de Recurso/TODOS',
-        'Extrato de Recurso/TODOS',
-        'Extratos do Recurso/TODOS',
-        'Extrato do Recurso/TODOS',
-        'Extratos Recurso/TODOS',
-        'Extrato Recurso/TODOS',
-        'Extratos/TODOS',
-        'Extrato/TODOS',
-        'TODOS',
-        'Todos',
-        'Extratos de Recurso',
-        'Extrato de Recurso',
-        'Extratos do Recurso',
-        'Extrato do Recurso',
-        'Extratos Recurso',
-        'Extrato Recurso',
-        'Extratos',
-        'Extrato',
-        'Extrato(s)',
-        'Extratos de Recursos',
-        'Extrato de Recursos',
-      ],
-      ignoreImportados: true,
-      checkDuplicateContent: true,
-      strictColumnWhitelist: null,
-      strictColumnMinMatches: 0,
-      extractCompetenciaFromTopHeader: true,
-      extractCompetenciaFromFileName: true,
       moveToImportadosSubfolderAfterImport: true,
     },
   });
@@ -7854,21 +7005,19 @@ function ensureDefaultLearningProfiles(db: Database) {
       sisbrSkipTotalsStrict: true,
       mode: 'append',
       folderCandidates: [
+        'Relatórios SISBR',
+        'Relatorios SISBR',
+        'Relatório SISBR',
+        'Relatorio SISBR',
         'Relatório Sisbr',
+        'Relatorios Sisbr',
+        'Sisbr',
+        'SISBR',
       ],
       ignoreImportados: true,
       checkDuplicateContent: true,
-      strictColumnWhitelist: [
-        'EMPRESA',
-        'Cliente',
-        'Matrícula', 'Matricula',
-        'Operação', 'Operacao',
-        'Modalidade',
-        'Copetencia', 'Competência', 'Competencia',
-        'Vencimento',
-        'Valor Parcela',
-      ],
-      strictColumnMinMatches: 6,
+      strictColumnWhitelist: null,
+      strictColumnMinMatches: 0,
       extractCompetenciaFromTopHeader: true,
       moveToImportadosSubfolderAfterImport: true,
     },
@@ -8416,7 +7565,7 @@ function extractCredTedStrLineFromHistorico(raw: unknown): string {
 function historicoCellHasCredTedMarker(raw: unknown): boolean {
   const s = typeof raw === 'string' ? raw : String(raw ?? '').trim();
   if (!s) return false;
-  return /(?:CR[ÉE]D\.?\s*TED-STR|CRED\.?\s*TED-STR|\bTED-STR\b|LIQUIDA[ÇC][AÃ]O\s*COBRAN[ÇC]A|CR[ÉE]D\.?\s*LIQUIDA[ÇC][AÃ]O|PIX\s*RECEBIDO|TRANSF\.?\s*RECEBIDA|CR[ÉE]DITO\s*RECEBIDO)/i.test(s);
+  return /(?:CR[ÉE]D\.?\s*TED-STR|CRED\.?\s*TED-STR|\bTED-STR\b)/i.test(s);
 }
 
 // ===== TRE-GO: layout Extrato Conta Corrente sempre começa com "CRÉD.TED-STR"
@@ -8724,7 +7873,6 @@ function insertRowsWithBatchTracking(opts: {
   const lastRowIdStmt = batchRowStmt ? opts.db.prepare(`SELECT last_insert_rowid() as id;`) : null;
   let insertedRows = 0;
   let skippedRows = 0;
-  let skippedByHistoricoStrictFilter = 0;
   try {
     for (const row of opts.rows) {
       const values = opts.mapRowToValues(row);
@@ -8900,52 +8048,22 @@ function detectCustomFileRules(opts: {
 
   // Nome do arquivo dá um hint forte do órgão
   const orgaoHintByFileName = parsedByFileName?.orgaoPrefixoRaw ?? '';
-  const orgaoHintByFileNameUpper = orgaoHintByFileName.toUpperCase();
   const orgaoTemPrefixoTREouTRT =
-    orgaoHintByFileNameUpper === 'TRE' ||
-    orgaoHintByFileNameUpper.startsWith('TRE ') ||
-    orgaoHintByFileNameUpper === 'TRT' ||
-    orgaoHintByFileNameUpper.startsWith('TRT ') ||
+    orgaoHintByFileName.toUpperCase() === 'TRE' ||
+    orgaoHintByFileName.toUpperCase().startsWith('TRE ') ||
+    orgaoHintByFileName.toUpperCase() === 'TRT' ||
+    orgaoHintByFileName.toUpperCase().startsWith('TRT ') ||
     infoCompTemTRE_GO ||
     infoCompTemTRT_GO ||
     orgaoUI_E_TRE ||
     orgaoUI_E_TRT;
-  const orgaoTemPrefixoADFEGO =
-    orgaoHintByFileNameUpper === 'ADFEGO' ||
-    orgaoHintByFileNameUpper.startsWith('ADFEGO');
-  const orgaoTemPrefixoELETRO =
-    orgaoHintByFileNameUpper === 'ELETRO' ||
-    orgaoHintByFileNameUpper.startsWith('ELETRO') ||
-    orgaoHintByFileNameUpper === 'ELETRA' ||
-    orgaoHintByFileNameUpper.startsWith('ELETRA') ||
-    orgaoHintByFileNameUpper === 'EQTPREV' ||
-    orgaoHintByFileNameUpper.startsWith('EQTPREV');
-  const orgaoUI_E_ADFEGO = Boolean(orgaoUIKey) && (
-    orgaoUIKey === 'ADFEGO' ||
-    orgaoUIKey.startsWith('ADFEGO') ||
-    orgaoUIKey.includes('ASSOCIACAO DEFICIENTES')
-  );
-  const orgaoUI_E_ELETRO = Boolean(orgaoUIKey) && (
-    orgaoUIKey === 'ELETRO' ||
-    orgaoUIKey.startsWith('ELETRO') ||
-    orgaoUIKey === 'ELETRA' ||
-    orgaoUIKey.startsWith('ELETRA') ||
-    orgaoUIKey === 'EQTPREV' ||
-    orgaoUIKey.startsWith('EQTPREV')
-  );
-  const orgaoTemPrefixoContaCorrente =
-    orgaoTemPrefixoTREouTRT ||
-    orgaoTemPrefixoADFEGO ||
-    orgaoTemPrefixoELETRO ||
-    orgaoUI_E_ADFEGO ||
-    orgaoUI_E_ELETRO;
 
-  if (!parsedByFileName && !orgaoTemPrefixoContaCorrente) return null;
+  if (!parsedByFileName && !orgaoTemPrefixoTREouTRT) return null;
 
   const extraColumns: Record<string, unknown> = {};
   let historico1KeepFirstLineOnly = false;
 
-  if (orgaoTemPrefixoContaCorrente) {
+  if (orgaoTemPrefixoTREouTRT) {
     historico1KeepFirstLineOnly = true;
   }
 
@@ -8955,7 +8073,7 @@ function detectCustomFileRules(opts: {
   let tokenCompetencia = parsedByFileName?.tokenCompetencia ?? null;
   let competenciaFixa = parsedByFileName?.competenciaFixa ?? null;
 
-  if (!competenciaFixa && orgaoTemPrefixoContaCorrente) {
+  if (!competenciaFixa && orgaoTemPrefixoTREouTRT) {
     const dataColRaw = colunas.find((c) => normalizeHeaderKey(c).replace(/\s/g, '') === 'DATA') ?? null;
     const firstDataRaw = dataColRaw && sampleRows.length > 0 ? sampleRows[0]?.[dataColRaw] : null;
     const d = firstDataRaw ? parseDateValue(firstDataRaw) : null;
@@ -8970,24 +8088,12 @@ function detectCustomFileRules(opts: {
 
   const qualOrgaoPrefixo =
     (parsedByFileName && parsedByFileName.orgaoPrefixoRaw && String(parsedByFileName.orgaoPrefixoRaw).trim().toUpperCase()) ||
-    (orgaoTemPrefixoADFEGO || orgaoUI_E_ADFEGO ? 'ADFEGO' :
-     orgaoTemPrefixoELETRO || orgaoUI_E_ELETRO ? (orgaoHintByFileNameUpper || 'ELETRO').replace(/EQTPREV.*/,'EQTPREV').replace(/^ELETRA.*/,'ELETRA').replace(/^ELETRO.*/,'ELETRO') :
-     infoCompTemTRE_GO ? 'TRE' : infoCompTemTRT_GO ? 'TRT' : orgaoUI_E_TRE ? 'TRE' : orgaoUI_E_TRT ? 'TRT' : 'TRE');
-  const prefixoNorm = (() => {
-    const up = String(qualOrgaoPrefixo || '').toUpperCase();
-    if (up.startsWith('ADFEGO')) return 'ADFEGO';
-    if (up.startsWith('EQTPREV')) return 'EQTPREV';
-    if (up.startsWith('ELETRA')) return 'ELETRA';
-    if (up.startsWith('ELETRO')) return 'ELETRO';
-    if (up.startsWith('TRT')) return 'TRT';
-    if (up.startsWith('TRE')) return 'TRE';
-    return up || 'TRE';
-  })();
-  const isTrt = prefixoNorm === 'TRT';
+    (infoCompTemTRE_GO ? 'TRE' : infoCompTemTRT_GO ? 'TRT' : orgaoUI_E_TRE ? 'TRE' : orgaoUI_E_TRT ? 'TRT' : 'TRE');
+  const isTrt = qualOrgaoPrefixo === 'TRT';
 
   if (parsedByFileName && parsedByFileName.tokenCompetencia) {
     extraColumns['CompetenciaArquivo'] = parsedByFileName.tokenCompetencia;
-  } else if (!tokenCompetencia && orgaoTemPrefixoContaCorrente && competenciaFixa) {
+  } else if (!tokenCompetencia && orgaoTemPrefixoTREouTRT && competenciaFixa) {
     const p = competenciaFixa.match(/^(\d{2})\/(\d{4})$/);
     if (p) {
       const mm = Number(p[1]);
@@ -8997,7 +8103,8 @@ function detectCustomFileRules(opts: {
         7:'JULHO',8:'AGOSTO',9:'SETEMBRO',10:'OUTUBRO',11:'NOVEMBRO',12:'DEZEMBRO',
       };
       if (meses[mm]) {
-        tokenCompetencia = `${prefixoNorm}-${meses[mm]}-${yyyy}`;
+        const prefixo = isTrt ? 'TRT' : 'TRE';
+        tokenCompetencia = `${prefixo}-${meses[mm]}-${yyyy}`;
         extraColumns['CompetenciaArquivo'] = tokenCompetencia;
       }
     }
@@ -9012,7 +8119,7 @@ function detectCustomFileRules(opts: {
     tokenCompetencia,
     competenciaFixa,
     historico1KeepFirstLine: historico1KeepFirstLineOnly,
-    isTreExtrato: orgaoTemPrefixoContaCorrente,
+    isTreExtrato: orgaoTemPrefixoTREouTRT,
     extraColumns,
   };
 }
@@ -9071,56 +8178,13 @@ function insertExtratosRows(opts: {
       ((opts.learningProfileOptions as Record<string, unknown>).isTreExtratoProfile === true ||
        (opts.learningProfileOptions as Record<string, unknown>).isJusticaEleitoralTrabalhoProfile === true),
   );
-  const profileOptionsIsAdfego = Boolean(
-    opts.learningProfileOptions &&
-      typeof opts.learningProfileOptions === 'object' &&
-      opts.learningProfileOptions !== null &&
-      (opts.learningProfileOptions as Record<string, unknown>).isAdfegoExtratoProfile === true,
-  );
-  const profileOptionsIsEletra = Boolean(
-    opts.learningProfileOptions &&
-      typeof opts.learningProfileOptions === 'object' &&
-      opts.learningProfileOptions !== null &&
-      (opts.learningProfileOptions as Record<string, unknown>).isEletraExtratoProfile === true,
-  );
-  const profileOptionsIsContaCorrente = Boolean(
-    opts.learningProfileOptions &&
-      typeof opts.learningProfileOptions === 'object' &&
-      opts.learningProfileOptions !== null &&
-      (opts.learningProfileOptions as Record<string, unknown>).isOrgaoContaCorrenteExtrato === true,
-  );
   const isTreTrtById =
     profileIdNorm.startsWith('extratos_tre_trt') ||
     profileIdNorm.startsWith('extratos_tre') ||
     profileIdNorm.startsWith('extratos_trt');
-  const isAdfegoById = profileIdNorm.startsWith('extratos_adfego');
-  const isEletraById = profileIdNorm.startsWith('extratos_eletra');
-  const isTodosById = profileIdNorm.startsWith('extratos_todos');
   const isTreTrtProfile = isTreTrtById || profileOptionsIsTre;
-  const isAdfegoProfile = isAdfegoById || profileOptionsIsAdfego;
-  const isEletraProfile = isEletraById || profileOptionsIsEletra;
-  const isTodosProfile =
-    isTodosById ||
-    Boolean(
-      opts.learningProfileOptions &&
-        typeof opts.learningProfileOptions === 'object' &&
-        opts.learningProfileOptions !== null &&
-        (opts.learningProfileOptions as Record<string, unknown>).isTodosExtratoProfile === true,
-    );
-  const historicoStrictFilterCtedStr = Boolean(
-    opts.learningProfileOptions &&
-      typeof opts.learningProfileOptions === 'object' &&
-      opts.learningProfileOptions !== null &&
-      (opts.learningProfileOptions as Record<string, unknown>).historicoStrictFilterCtedStr === true,
-  );
-  const isContaCorrenteProfile =
-    isTreTrtProfile ||
-    isAdfegoProfile ||
-    isEletraProfile ||
-    isTodosProfile ||
-    profileOptionsIsContaCorrente;
   const forceOrgaoFromUIForProfile =
-    isContaCorrenteProfile ? null :
+    isTreTrtProfile ? null :
     (typeof opts.forceOrgaoFromUI === 'string' ? opts.forceOrgaoFromUI : null);
   const CUSTOM_RULES: CustomFileRules = detectCustomFileRules({
     sourceFile: opts.sourceFile,
@@ -9128,7 +8192,7 @@ function insertExtratosRows(opts: {
     firstRowsSample: SAMPLE_ROWS,
     forceOrgaoFromUI: forceOrgaoFromUIForProfile,
   });
-  if (isContaCorrenteProfile && CUSTOM_RULES) {
+  if (isTreTrtProfile && CUSTOM_RULES) {
     CUSTOM_RULES.isTreExtrato = true;
     if (!CUSTOM_RULES.historico1KeepFirstLine) CUSTOM_RULES.historico1KeepFirstLine = true;
   }
@@ -9389,73 +8453,13 @@ function insertExtratosRows(opts: {
   const lastRowIdStmt = batchRowStmt ? opts.db.prepare(`SELECT last_insert_rowid() as id;`) : null;
   let insertedRows = 0;
   let skippedRows = 0;
-  let skippedByHistoricoStrictFilter = 0;
   try {
     for (const row of opts.rows) {
-      if (historicoStrictFilterCtedStr) {
-        // Perfil extratos_todos_go: a coluna HISTÓRICO do Excel (coluna 3) é que deve ser estritamente igual a CRÉD.TED-STR
-        // (NÃO a coluna INFORMAÇÕES COMPLEMENTARES, que é o target HISTÓRICO do BD).
-        // headerMap.credTedFilterColumn é setado em buildExtratoHeaderMapping quando temos infoCompColumnOriginal:
-        // guarda a coluna HISTÓRICO original do Excel (a que tem o marcador).
-        const historicoExcelRaw = (() => {
-          if (headerMap && typeof (headerMap as any).credTedFilterColumn === 'string' && (headerMap as any).credTedFilterColumn) {
-            const srcCol = (headerMap as any).credTedFilterColumn;
-            if (Object.prototype.hasOwnProperty.call(row ?? {}, srcCol)) return row[srcCol];
-          }
-          // Fallback segura: coluna original HISTÓRICO / HISTORICO do Excel
-          const srcCol =
-            opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'HISTORICO') ??
-            opts.fileColumns.find((c) => String(c ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase() === 'HISTORICO') ??
-            null;
-          if (srcCol && Object.prototype.hasOwnProperty.call(row ?? {}, srcCol)) return row[srcCol];
-          // último fallback (perfil sem Info Compl): o próprio target HISTÓRICO já é a coluna original
-          if (headerMap?.historicoTarget && headerMap.sourceColumnByTarget) {
-            const src = headerMap.sourceColumnByTarget.get(headerMap.historicoTarget);
-            if (src && Object.prototype.hasOwnProperty.call(row ?? {}, src)) return row[src];
-          }
-          return null;
-        })();
-        const match = /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(String(historicoExcelRaw ?? '').trim());
-        if (!match) {
-          skippedRows++;
-          skippedByHistoricoStrictFilter++;
-          continue;
-        }
-      }
       if (credTedFilterColumn) {
         const raw = row[credTedFilterColumn];
-        const marcadorOk = historicoCellHasCredTedMarker(raw);
-        // Fallback para órgãos ADFEGO/ELETRA (conta corrente não-TRE/TRT):
-        // se linha tem DATA e VALOR numérico positivo válidos, deixa passar mesmo sem marcador
-        // (evita bloquear linhas válidas com históricos variados fora do padrão TED-STR)
-        if (!marcadorOk) {
-          const ehPerfilContaCorrenteNaoTre =
-            isContaCorrenteProfile && !isTreTrtProfile;
-          const temDataValida = (() => {
-            if (!dataCol) return false;
-            const d = parseDateValue(row[dataCol]);
-            return d instanceof Date && Number.isFinite(d.getTime());
-          })();
-          const temValorPositivo = (() => {
-            const valorCol =
-              headerMap.sourceColumnByTarget.get('VALOR') ??
-              opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'VALOR') ??
-              null;
-            if (!valorCol) return false;
-            const raw = row[valorCol];
-            let n: number;
-            if (typeof raw === 'number') n = raw;
-            else {
-              const s = String(raw ?? '').trim().replace(/\./g, '').replace(',', '.');
-              if (!s) return false;
-              n = Number.parseFloat(s);
-            }
-            return Number.isFinite(n) && n > 0;
-          })();
-          if (!(ehPerfilContaCorrenteNaoTre && temDataValida && temValorPositivo)) {
-            skippedRows += 1;
-            continue;
-          }
+        if (!historicoCellHasCredTedMarker(raw)) {
+          skippedRows += 1;
+          continue;
         }
       }
       const buildRowForHash: Record<string, unknown> = {};
@@ -10345,6 +9349,50 @@ function pickRecursoValorColumn(existing: string[]): string | null {
   );
 }
 
+function listRecursoValorColumns(existing: string[]): string[] {
+  const candidates = [
+    'Valor Parcela',
+    'VALOR PARCELA',
+    'VALOR PARC AVERBADA',
+    'VALOR DESC HOLERITE',
+    'VALOR PARC ENVIADA',
+    'VALOR',
+    'URV',
+    'VALOR URV',
+    'URV (ANTECIPAÇÃO)',
+  ];
+  const out: string[] = [];
+  const add = (c: string | null) => {
+    const v = String(c ?? '').trim();
+    if (!v) return;
+    if (out.includes(v)) return;
+    out.push(v);
+  };
+  const set = new Set(existing);
+  for (const c of candidates) if (set.has(c)) add(c);
+  const normalize = (value: string) =>
+    value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '');
+  const byKey = new Map<string, string>();
+  for (const raw of existing) {
+    const key = normalize(raw);
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, raw);
+  }
+  for (const c of candidates) {
+    const found = byKey.get(normalize(c)) ?? null;
+    add(found);
+  }
+  for (const c of existing) {
+    const lower = String(c ?? '').toLowerCase();
+    if (lower.includes('urv') && /(valor|parcela)/i.test(String(c ?? ''))) add(c);
+  }
+  return out;
+}
+
 function pickFirstColumnContaining(
   existing: string[],
   fragments: string[],
@@ -10366,8 +9414,9 @@ function normalizeKey(value: unknown): string {
 }
 
 function readTableRows(db: Database, tableName: string, columns: string[]) {
+  const actual = resolveExistingTableName(db, tableName) ?? tableName;
   const colsSql = columns.map(escapeSqlIdentifier).join(', ');
-  const sql = `SELECT ${colsSql} FROM ${escapeSqlIdentifier(tableName)};`;
+  const sql = `SELECT ${colsSql} FROM ${escapeSqlIdentifier(actual)};`;
   const stmt = db.prepare(sql);
   try {
     const out: Array<Record<string, unknown>> = [];
@@ -10383,8 +9432,9 @@ function readTableRows(db: Database, tableName: string, columns: string[]) {
 
 function countTableRows(db: Database, tableName: string): number {
   if (!tableExists(db, tableName)) return 0;
+  const actual = resolveExistingTableName(db, tableName) ?? tableName;
   const stmt = db.prepare(
-    `SELECT COUNT(*) AS c FROM ${escapeSqlIdentifier(tableName)};`,
+    `SELECT COUNT(*) AS c FROM ${escapeSqlIdentifier(actual)};`,
   );
   try {
     if (!stmt.step()) return 0;
@@ -12287,19 +11337,6 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
   const getRecursoAllowedMonthKeys = (_tableName: string) => new Set<string>([wantedMonthKey]);
   const getRecursoAllowedCompetencias = (_tableName: string) =>
     new Set<string>([wantedCopetencia]);
-  const FORCE_RECURSO_COLUMN = 'VALOR DESC HOLERITE';
-  const FORCE_RECURSO_COLUMN_TABLES = new Set<string>([
-    'Recurso CORPO DE BOMBEIROS MILITAR',
-    'Recurso DEFENSORIA PUBLICA DO ESTADO DE GOIAS',
-    'Recurso DELEGACIA-GERAL DA POLICIA CIVIL',
-    'Recurso DIRETORIA-GERAL DA ADMINISTRACAO PENITENCIARIA',
-    'Recurso GOIAS PREVIDENCIA - GOIASPREV',
-    'Recurso JUNTA COMERCIAL DO ESTADO DE GOIAS - JUCEG',
-    'Recurso POLICIA MILITAR',
-    'Recurso SECRETARIA DE ESTADO DA ADMINISTRACAO',
-    'Recurso SECRETARIA DE ESTADO DA ECONOMIA',
-    'Recurso SECRETARIA DE ESTADO DA SEGURANCA PUBLICA',
-  ]);
   const appendRecursoItemsFromTable = (tableName: string) => {
     if (!tableExists(db, tableName)) return;
     const cols = getTableColumns(db, tableName);
@@ -12316,19 +11353,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       }) ??
       pickFirstColumnContaining(cols, ['nome', 'cliente']) ??
       null;
-    const forceValorDescHolerite = FORCE_RECURSO_COLUMN_TABLES.has(tableName);
-    let valorCol: string | null = null;
-    if (forceValorDescHolerite) {
-      valorCol = pickFirstExistingColumn(cols, [FORCE_RECURSO_COLUMN]);
-      if (!valorCol) {
-        throw new Error(
-          `Tabela ${tableName} não possui a coluna obrigatória "${FORCE_RECURSO_COLUMN}". ` +
-          `A conciliação deste órgão exige SOMENTE esta coluna para o card Total recurso Orgão.`,
-        );
-      }
-    } else {
-      valorCol = pickRecursoValorColumn(cols);
-    }
+    const valorCols = listRecursoValorColumns(cols);
     const compCol =
       cols.find((c) =>
         ['COMPETENCIA', 'COPETENCIA'].includes(normalizeHeaderKey(c).replace(/\s/g, '')),
@@ -12350,25 +11375,24 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
           ? pickFirstExistingColumn(cols, ['Sit. Contrato', 'SIT. CONTRATO'])
           : null;
     const arquivoCol = cols.find((c) => normalizeHeaderKey(c) === 'ARQUIVO') ?? null;
-    if (!cpfCol || !valorCol) return;
+    if (!cpfCol || valorCols.length === 0) return;
 
-    const selectCols = [
+    const selectColsRaw = [
       cpfCol,
       ...(nomeCol ? [nomeCol] : []),
       ...(servidorCol ? [servidorCol] : []),
-      valorCol,
+      ...valorCols,
       ...(compCol ? [compCol] : []),
       ...(!compCol && anoCol ? [anoCol] : []),
       ...(!compCol && mesCol ? [mesCol] : []),
       ...(sitContratoCol ? [sitContratoCol] : []),
       ...(arquivoCol ? [arquivoCol] : []),
     ];
+    const selectCols = selectColsRaw.filter((c, i, arr) => arr.indexOf(c) === i);
     const rows = readTableRows(db, tableName, selectCols);
     const allowedMonthKeys = getRecursoAllowedMonthKeys(tableName);
     const allowedCompetencias = getRecursoAllowedCompetencias(tableName);
 
-    let forceLinesChecked = 0;
-    let forceCentsSum = 0;
     for (const r of rows) {
       if (compCol) {
         const compRaw = String(r[compCol] ?? '').trim();
@@ -12384,10 +11408,12 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
 
       const cpfDigits = normalizeCpfDigits(r[cpfCol]);
       if (cpfDigits.length !== 11) continue;
-      if (forceValorDescHolerite) forceLinesChecked += 1;
-      const cents = parseMoneyToCents(r[valorCol]);
+      let cents: number | null = null;
+      for (const c of valorCols) {
+        const parsed = parseMoneyToCents(r[c]);
+        if (parsed !== null) { cents = parsed; break; }
+      }
       if (cents === null) continue;
-      if (forceValorDescHolerite) forceCentsSum += cents;
       const nomeFromCol =
         nomeCol && typeof r[nomeCol] === 'string' ? String(r[nomeCol]).trim() : '';
       const nome =
@@ -12420,13 +11446,6 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
             : null,
         hideInFront,
       });
-    }
-    if (forceValorDescHolerite && forceLinesChecked > 0 && forceCentsSum <= 0) {
-      throw new Error(
-        `Tabela ${tableName} (competência ${wantedCopetencia}) possui ${forceLinesChecked} linhas ` +
-        `de servidores válidas, mas a coluna "${FORCE_RECURSO_COLUMN}" está vazia ou contém apenas valores inválidos/zerados. ` +
-        `Verifique os dados importados antes de continuar.`,
-      );
     }
   };
   appendRecursoItemsFromTable(recursoTable);
@@ -14149,7 +13168,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     if (isQuitado && !alreadyCountedByRelatorio) {
       const date = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const cents = parseMoneyToCents(o?.value) ?? 0;
+      const cents = parseMoneyToCents(o?.value);
+      if (cents === null) continue;
       quitadoByDate.set(date, (quitadoByDate.get(date) ?? 0) + cents);
       const key = buildDevolucaoBusinessKey(o?.cpf, o?.nome, o?.value, date);
       if (key) {
@@ -14160,7 +13180,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     if (isAntecipadoDevolvido && !alreadyCountedByRelatorio) {
       const date = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const cents = parseMoneyToCents(o?.value) ?? 0;
+      const cents = parseMoneyToCents(o?.value);
+      if (cents === null) continue;
       antecipadoDevolvidoByDate.set(date, (antecipadoDevolvidoByDate.get(date) ?? 0) + cents);
       const key = buildDevolucaoBusinessKey(o?.cpf, o?.nome, o?.value, date);
       if (key) {
@@ -14173,8 +13194,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       action.startsWith('devolucao_parcial_averbacao');
     if (isDevolucaoParcialAverbacao) {
       const devolucaoDate = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
-      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue) ?? 0;
-      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate)) {
+      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue);
+      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate) && devolucaoCents !== null) {
         devolucaoParcialAverbacaoValorByDate.set(
           devolucaoDate,
           (devolucaoParcialAverbacaoValorByDate.get(devolucaoDate) ?? 0) + devolucaoCents,
@@ -14189,8 +13210,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       const devolucaoDate =
         (typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '') ||
         (typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '');
-      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue) ?? 0;
-      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate)) {
+      const devolucaoCents = parseMoneyToCents(o?.devolucaoValue);
+      if (devolucaoDate && /^\d{2}\/\d{2}\/\d{4}$/.test(devolucaoDate) && devolucaoCents !== null) {
         recursoRecebidoMaiorEstornoByDate.set(
           devolucaoDate,
           (recursoRecebidoMaiorEstornoByDate.get(devolucaoDate) ?? 0) + devolucaoCents,
@@ -14222,8 +13243,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       const date =
         estornoDate || normalDate;
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const cents = parseMoneyToCents(o?.estornoValue ?? o?.nextValue ?? o?.value) ?? 0;
-      if (cents === null) continue;
+      const cents = parseMoneyToCents(o?.estornoValue ?? o?.nextValue ?? o?.value);
+      if (cents === null || cents === 0) continue;
       estornoByDate.set(date, (estornoByDate.get(date) ?? 0) + cents);
     }
 
@@ -14232,8 +13253,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     if (isRecursoRecebidoMenor && Boolean(o?.noDebitInAccount)) {
       const liqDate = typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
       if (!liqDate || !/^\d{2}\/\d{2}\/\d{4}$/.test(liqDate)) continue;
-      const diffCents = parseMoneyToCents(o?.differenceValue) ?? 0;
-      if (diffCents === null || diffCents < 0) continue;
+      const diffCents = parseMoneyToCents(o?.differenceValue);
+      if (diffCents === null || diffCents <= 0) continue;
       recursoRecebidoMenorNoDebitByDate.set(
         liqDate,
         (recursoRecebidoMenorNoDebitByDate.get(liqDate) ?? 0) + diffCents,
@@ -14244,8 +13265,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
         ? debitAccountDate
         : (typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '');
       if (!date || !/^\d{2}\/\d{2}\/\d{4}$/.test(date)) continue;
-      const debitCents = parseMoneyToCents(o?.debitAccountValue ?? o?.differenceValue ?? o?.value) ?? 0;
-      if (debitCents === null || debitCents < 0) continue;
+      const debitCents = parseMoneyToCents(o?.debitAccountValue ?? o?.differenceValue ?? o?.value);
+      if (debitCents === null || debitCents <= 0) continue;
       recursoRecebidoMenorDebitByDate.set(
         date,
         (recursoRecebidoMenorDebitByDate.get(date) ?? 0) + debitCents,
@@ -14255,7 +13276,8 @@ function computeConsolidadoPorDataForContabilidade(opts: {
   for (const r of relatorio) {
     const baseVenc = typeof r?.vencimento === 'string' ? r.vencimento.trim() : '';
     const liquidationDate = pickLiquidationDate(r);
-    const cents = parseMoneyToCents(r?.value) ?? 0;
+    const cents = parseMoneyToCents(r?.value);
+    if (cents === null) continue;
     const devolucaoDate = pickDevolucaoDateQuitado(r);
     if (devolucaoDate) {
       quitadoByDate.set(devolucaoDate, (quitadoByDate.get(devolucaoDate) ?? 0) + cents);
@@ -14408,7 +13430,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (repactuacaoEmAndamentoByDate.has(date)) {
+    if (repactuacaoCents !== 0) {
       runningSaldo += -repactuacaoCents;
       out.push({
         vencimento: date,
@@ -14421,7 +13443,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoJudicialEditedByDate.has(date)) {
+    if (recursoJudicialEditedCents !== 0) {
       runningSaldo += -recursoJudicialEditedCents;
       out.push({
         vencimento: date,
@@ -14434,7 +13456,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoJudicialDiffByDate.has(date)) {
+    if (recursoJudicialDiffCents !== 0) {
       runningSaldo += -recursoJudicialDiffCents;
       out.push({
         vencimento: date,
@@ -14447,7 +13469,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (naoPossuiRecursoByDate.has(date)) {
+    if (naoPossuiRecursoCents !== 0) {
       runningSaldo += -naoPossuiRecursoCents;
       out.push({
         vencimento: date,
@@ -14460,7 +13482,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (quitadoByDate.has(date)) {
+    if (quitadoCents !== 0) {
       runningSaldo += -quitadoCents;
       out.push({
         vencimento: date,
@@ -14473,7 +13495,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (devolucaoParcialAverbacaoValorByDate.has(date)) {
+    if (devolucaoParcialAverbacaoValorCents !== 0) {
       runningSaldo += devolucaoParcialAverbacaoValorCents;
       out.push({
         vencimento: date,
@@ -14486,7 +13508,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoRecebidoMaiorEstornoByDate.has(date)) {
+    if (recursoRecebidoMaiorEstornoCents !== 0) {
       runningSaldo += recursoRecebidoMaiorEstornoCents;
       out.push({
         vencimento: date,
@@ -14499,7 +13521,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (liquidacaoNormalEstornadaByDate.has(date)) {
+    if (liquidacaoNormalEstornadaCents !== 0) {
       runningSaldo += -liquidacaoNormalEstornadaCents;
       out.push({
         vencimento: date,
@@ -14512,7 +13534,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (estornoByDate.has(date)) {
+    if (estornoCents !== 0) {
       runningSaldo += estornoCents;
       out.push({
         vencimento: date,
@@ -14526,7 +13548,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     }
 
     const antecipadoDevolvidoCents = antecipadoDevolvidoByDate.get(date) ?? 0;
-    if (antecipadoDevolvidoByDate.has(date)) {
+    if (antecipadoDevolvidoCents !== 0) {
       runningSaldo += -antecipadoDevolvidoCents;
       out.push({
         vencimento: date,
@@ -14539,7 +13561,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoRecebidoMenorNoDebitByDate.has(date)) {
+    if (recursoRecebidoMenorNoDebitCents !== 0) {
       out.push({
         vencimento: date,
         recursoCents: 0,
@@ -14551,7 +13573,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (recursoRecebidoMenorDebitByDate.has(date)) {
+    if (recursoRecebidoMenorDebitCents !== 0) {
       runningSaldo += -recursoRecebidoMenorDebitCents;
       out.push({
         vencimento: date,
@@ -16226,139 +15248,56 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
       }) ??
       pickFirstColumnContaining(recursoCols, ['nome', 'cliente']) ??
       null;
-    const recursoValorCol = pickRecursoValorColumn(recursoCols);
+    const recursoValorCols = listRecursoValorColumns(recursoCols);
     const recursoCompCol =
       recursoCols.find((c) =>
         ['COMPETENCIA', 'COPETENCIA'].includes(normalizeHeaderKey(c).replace(/\s/g, '')),
       ) ?? null;
-    if (!recursoCpfCol || !recursoValorCol) continue;
+    if (!recursoCpfCol || recursoValorCols.length === 0) continue;
 
-    const recursoSelectCols = [
+    const recursoSelectColsRaw = [
       recursoCpfCol,
       ...(recursoNomeCol ? [recursoNomeCol] : []),
-      recursoValorCol,
+      ...recursoValorCols,
       ...(recursoCompCol ? [recursoCompCol] : []),
     ];
+    const recursoSelectCols = recursoSelectColsRaw.filter((c, i, arr) => arr.indexOf(c) === i);
     const recursoRows = readTableRows(db, candidateTable, recursoSelectCols);
-    const desiredNomeKey = normalizeNameForMatch(nome);
-    const matchRowCompetenciaOk = (r: Record<string, unknown>): boolean => {
-      if (!recursoCompCol) return true;
-      const compRaw = String(r[recursoCompCol] ?? '').trim();
-      if (!compRaw) return true;
-      const m = parseCopetenciaToMonthKey(compRaw);
-      if (m) return m === wantedMonthKey;
-      return compRaw === wantedCopetenciaFull || compRaw === wantedCopetenciaShort;
-    };
-    const matchRowValueOk = (r: Record<string, unknown>): boolean => {
-      const raw = r[recursoValorCol];
-      const cents = parseMoneyToCents(raw);
-      if (cents !== null && cents === valueCents) return true;
-      const rawStr = String(raw ?? '').trim();
-      if (rawStr && (rawStr === String(opts.value ?? '').trim() || rawStr === centsToPtBr(valueCents))) return true;
-      if (valueCents === 0) {
-        if (
-          rawStr === '0' ||
-          rawStr === '0,00' ||
-          rawStr === '0.00' ||
-          rawStr === 'R$ 0,00' ||
-          rawStr === 'R$0,00' ||
-          rawStr === 'R$ 0.00' ||
-          rawStr === 'R$0.00'
-        ) {
-          return true;
+    for (const r of recursoRows) {
+      if (recursoCompCol) {
+        const compRaw = String(r[recursoCompCol] ?? '').trim();
+        if (compRaw) {
+          const m = parseCopetenciaToMonthKey(compRaw);
+          if (m && m !== wantedMonthKey) continue;
+          if (!m && compRaw !== wantedCopetenciaFull && compRaw !== wantedCopetenciaShort) continue;
         }
       }
-      return false;
-    };
-
-    const lvl1Strict: typeof matchedRecursoRows = [];
-    const lvl2CpfLoose: typeof matchedRecursoRows = [];
-    const lvl3NomeStrict: typeof matchedRecursoRows = [];
-    const lvl4NomeLoose: typeof matchedRecursoRows = [];
-
-    for (const r of recursoRows) {
-      if (!matchRowCompetenciaOk(r)) continue;
       const rowCpfDigits = normalizeCpfDigits(r[recursoCpfCol]);
-      const rowNomeRaw =
+      if (rowCpfDigits.length !== 11 || rowCpfDigits !== cpfDigits) continue;
+      let cents: number | null = null;
+      for (const c of recursoValorCols) {
+        const parsed = parseMoneyToCents(r[c]);
+        if (parsed !== null) { cents = parsed; break; }
+      }
+      if (cents === null || cents !== valueCents) continue;
+      const rowNome =
         recursoNomeCol && typeof r[recursoNomeCol] === 'string'
           ? String(r[recursoNomeCol]).trim()
           : '';
-      const rowNomeKey = normalizeNameForMatch(rowNomeRaw);
-      const cents = parseMoneyToCents(r[recursoValorCol]);
-      const valueOk = matchRowValueOk(r);
-      const safeCents = cents === null ? valueCents : cents;
-      const pushRow = (bucket: typeof matchedRecursoRows) => {
-        bucket.push({
-          cpf: normalizeCpfValue(r[recursoCpfCol]) || cpf,
-          nome: rowNomeRaw || nome,
-          cents: safeCents,
-          sourceRecursoTable: candidateTable,
-        });
-      };
-
-      // Nível 1: CPF exato + valor exato (regra original)
-      if (rowCpfDigits.length === 11 && rowCpfDigits === cpfDigits && valueOk) {
-        pushRow(lvl1Strict);
-        continue;
-      }
-      // Nível 2: CPF exato, valor aproximadamente zero mas parseMoney rejeitou (estilo N/D / vazio string / etc) — só aceita se valueCents for 0
-      if (
-        rowCpfDigits.length === 11 &&
-        rowCpfDigits === cpfDigits &&
-        valueCents === 0 &&
-        (String(r[recursoValorCol] ?? '').trim() === '' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'N/D' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'ND')
-      ) {
-        pushRow(lvl2CpfLoose);
-        continue;
-      }
-      // Nível 3: Nome rigoroso (normalizado idêntico) + valor OK (CPF pode vazio/diferente por falha de importação)
-      if (desiredNomeKey && rowNomeKey && rowNomeKey === desiredNomeKey && valueOk) {
-        pushRow(lvl3NomeStrict);
-        continue;
-      }
-      // Nível 4: Nome loose (substring normalizada) + valor OK + valueCents zero (se CPF faltando mas nome sugere a pessoa)
-      if (
-        desiredNomeKey &&
-        rowNomeKey &&
-        valueCents === 0 &&
-        (rowNomeKey.includes(desiredNomeKey) || desiredNomeKey.includes(rowNomeKey)) &&
-        (valueOk ||
-          String(r[recursoValorCol] ?? '').trim() === '' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'N/D' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'ND')
-      ) {
-        pushRow(lvl4NomeLoose);
-        continue;
-      }
+      matchedRecursoRows.push({
+        cpf: normalizeCpfValue(r[recursoCpfCol]),
+        nome: rowNome || nome,
+        cents,
+        sourceRecursoTable: candidateTable,
+      });
     }
-
-    if (lvl1Strict.length > 0) matchedRecursoRows.push(...lvl1Strict);
-    else if (lvl2CpfLoose.length > 0) matchedRecursoRows.push(...lvl2CpfLoose);
-    else if (lvl3NomeStrict.length > 0) matchedRecursoRows.push(...lvl3NomeStrict);
-    else if (lvl4NomeLoose.length > 0) matchedRecursoRows.push(...lvl4NomeLoose);
-
     if (requestedSourceRecursoTable && matchedRecursoRows.length > 0) break;
   }
 
-  if (matchedRecursoRows.length === 0 && isQuitado) {
+  if (matchedRecursoRows.length === 0) {
     throw new Error(
       'Nenhum registro do Recurso do Órgão encontrado para esse CPF e valor na competência selecionada.',
     );
-  }
-  if (matchedRecursoRows.length === 0 && !action.startsWith('clonar_para_relatorio_sisbr')) {
-    throw new Error(
-      'Nenhum registro do Recurso do Órgão encontrado para esse CPF e valor na competência selecionada.',
-    );
-  }
-  if (matchedRecursoRows.length === 0 && action.startsWith('clonar_para_relatorio_sisbr')) {
-    matchedRecursoRows.push({
-      cpf,
-      nome,
-      cents: valueCents,
-      sourceRecursoTable: '__stub_clone_sem_recurso__',
-    });
   }
 
   const resolveRelatorioEmpresaRaw = (): string => {
@@ -16503,83 +15442,30 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
     normalizeRelatorioCopetenciaToFullYear(db);
     const relCpfText = cpf;
     const relValorText = centsToPtBr(valueCents);
-    const desiredNomeKey = normalizeNameForMatch(nome);
     const desiredEmpresaKey = normalizeRelatorioOrgaoForMatch(relEmpresa);
     const selectExisting = db.prepare(
-      `SELECT rowid as __rowid, ${escapeSqlIdentifier('EMPRESA')} as EMPRESA, ${escapeSqlIdentifier('Copetencia')} as Copetencia, ${escapeSqlIdentifier('Nome')} as Nome, ${escapeSqlIdentifier('Valor Parcela')} as "Valor Parcela"
+      `SELECT rowid as __rowid, ${escapeSqlIdentifier('EMPRESA')} as EMPRESA, ${escapeSqlIdentifier('Copetencia')} as Copetencia
        FROM relatorio_consignado
-       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?;`,
+       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?
+         AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')}, '')) = ?;`,
     );
-    const matchesSisbrValue = (raw: unknown): boolean => {
-      const cents = parseMoneyToCents(raw);
-      if (cents !== null && cents === valueCents) return true;
-      const rawStr = String(raw ?? '').trim();
-      if (rawStr && (rawStr === relValorText || rawStr === String(opts.value ?? '').trim())) return true;
-      if (valueCents === 0) {
-        if (
-          rawStr === '' ||
-          rawStr === '0' ||
-          rawStr === '0,00' ||
-          rawStr === '0.00' ||
-          rawStr === 'R$ 0,00' ||
-          rawStr === 'R$0,00' ||
-          rawStr === 'R$ 0.00' ||
-          rawStr === 'R$0.00' ||
-          rawStr.toUpperCase() === 'N/D' ||
-          rawStr.toUpperCase() === 'ND'
-        ) {
-          return true;
-        }
-      }
-      return false;
-    };
     const existingEmpresas = new Map<string, { count: number; raw: string }>();
-    let hasStrictCloneDuplicate = false;
-    const duplicateDetails: Array<{ empresa: string; nome: string }> = [];
     try {
-      selectExisting.bind([cpfDigits] as unknown as any[]);
+      selectExisting.bind([cpfDigits, relValorText] as unknown as any[]);
       while (selectExisting.step()) {
         const row = selectExisting.getAsObject() as Record<string, unknown>;
-        const valorRaw = row['Valor Parcela'];
-        if (!matchesSisbrValue(valorRaw)) continue;
         const cop = typeof row.Copetencia === 'string' ? row.Copetencia.trim() : '';
         const rowMonthKey = parseCopetenciaToMonthKey(cop);
         if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
-        const rowNome = typeof row.Nome === 'string' ? row.Nome.trim() : '';
-        const rowNomeKey = normalizeNameForMatch(rowNome);
         const emp = typeof row.EMPRESA === 'string' ? row.EMPRESA.trim() : '';
         const empKey = normalizeRelatorioOrgaoForMatch(emp) ?? '';
-        if (empKey) {
-          const cur = existingEmpresas.get(empKey);
-          if (cur) cur.count += 1;
-          else existingEmpresas.set(empKey, { count: 1, raw: emp });
-        }
-        if (!isQuitado && action.startsWith('clonar_para_relatorio_sisbr') && desiredNomeKey) {
-          if (rowNomeKey && rowNomeKey === desiredNomeKey) {
-            hasStrictCloneDuplicate = true;
-            if (duplicateDetails.length < 3) duplicateDetails.push({ empresa: emp, nome: rowNome });
-          }
-        }
+        if (!empKey) continue;
+        const cur = existingEmpresas.get(empKey);
+        if (cur) cur.count += 1;
+        else existingEmpresas.set(empKey, { count: 1, raw: emp });
       }
     } finally {
       selectExisting.free();
-    }
-
-    if (!isQuitado && action.startsWith('clonar_para_relatorio_sisbr') && hasStrictCloneDuplicate) {
-      const seen = new Set<string>();
-      const uniqEmpresas: string[] = [];
-      for (const d of duplicateDetails) {
-        if (!d.empresa || seen.has(d.empresa)) continue;
-        seen.add(d.empresa);
-        uniqEmpresas.push(d.empresa);
-      }
-      const hint =
-        uniqEmpresas.length > 0
-          ? ` (Registro encontrado em: ${uniqEmpresas.join(' | ')} — Nome "${duplicateDetails[0]?.nome || nome}")`
-          : '';
-      throw new Error(
-        `Não é possível "Clonar para Relatório SISBR": já existe um registro na tabela do Relatório SISBR com o mesmo CPF, Nome e Valor nesta competência.${hint}`,
-      );
     }
 
     const existingInTarget = desiredEmpresaKey ? existingEmpresas.get(desiredEmpresaKey)?.count ?? 0 : 0;
@@ -19373,7 +18259,6 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
       foundCpf?: boolean;
       foundNome?: boolean;
       competencia?: string | null;
-      valorColuna: string;
     } | null = null;
 
     for (const tableName of allTables) {
@@ -19384,36 +18269,11 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
         pickFirstExistingColumn(cols, ['CPF', 'Cpf']) ??
         pickFirstColumnContaining(cols, ['cpf']);
       const nomeCol =
-        pickFirstExistingColumn(cols, [
-          'NOME',
-          'Nome',
-          'CLIENTE',
-          'Servidor',
-          'Funcionário',
-          'Funcionario',
-          'Nome Funcionário',
-          'Nome Funcionario',
-          'Nome_1',
-        ]) ??
-        pickFirstColumnContaining(cols, ['nome', 'cliente', 'servidor', 'funcionario', 'funcionário']);
+        pickFirstExistingColumn(cols, ['NOME', 'Nome']) ??
+        pickFirstColumnContaining(cols, ['nome']);
       const valorCol =
-        pickFirstExistingColumn(cols, [
-          'VALOR DESC HOLERITE',
-          'Valor da Parcela',
-          'Valor Parcela',
-          'VALOR',
-          'Valor',
-        ]) ??
-        pickFirstColumnContaining(cols, [
-          'valor desc',
-          'holerite',
-          'desconto',
-          'valor parcela',
-          'valor da parcela',
-          'valor averbad',
-          'valor enviad',
-          'valor',
-        ]);
+        pickFirstExistingColumn(cols, ['VALOR', 'Valor']) ??
+        pickFirstColumnContaining(cols, ['valor']);
       const copCol =
         pickFirstExistingColumn(cols, [
           'Copetencia',
@@ -19481,7 +18341,6 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
               foundCpf: cpfMatch,
               foundNome: nomeMatchRow,
               competencia: comp,
-              valorColuna: valorCol,
             };
             break;
           }
@@ -19504,9 +18363,8 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
       const identificadores = detalhe.length ? detalhe.join(' + ') : 'Identificador';
       const compInfo = blockedReason.competencia ? ` (competência ${blockedReason.competencia})` : '';
       throw new Error(
-        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real (coluna "${blockedReason.valorColuna}") nos recursos/extratos com valor > R$ 0,00 para este servidor.\n` +
+        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real nos recursos/extratos com valor > R$ 0,00 para este servidor.\n` +
           `- Tabela de origem: ${blockedReason.table}\n` +
-          `- Coluna de valor usada como referência: ${blockedReason.valorColuna}\n` +
           `- Match por: ${identificadores}${compInfo}\n` +
           `- CPF: ${cpfFmt} / Nome: ${nome}\n` +
           `- Valor encontrado: R$ ${centsToPtBr(blockedReason.valueCents)}\n` +
@@ -19546,126 +18404,39 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
   const relatorioColsSql = relatorioCols.map(escapeSqlIdentifier).join(', ');
   const matchedRowIds: number[] = [];
   const snapshotRows: Array<Record<string, unknown>> = [];
-  const seenRowIds = new Set<number>();
-  const nomeMatchKey = normalizeNameForMatch(nome);
+  const selectRel = db.prepare(
+    `SELECT rowid as __rowid, ${relatorioColsSql}
+     FROM relatorio_consignado
+     WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?;`,
+  );
+  try {
+    selectRel.bind([cpf] as unknown as any[]);
+    while (selectRel.step()) {
+      const row = selectRel.getAsObject() as Record<string, unknown>;
+      const rowid = Number((row as any).__rowid);
+      if (!Number.isFinite(rowid) || rowid <= 0) continue;
 
-  const matchesValue = (row: Record<string, unknown>): boolean => {
-    const raw = (row as any)['Valor Parcela'];
-    const cents = parseMoneyToCents(raw);
-    if (cents !== null && cents === valueCents) return true;
-    const rawStr = String(raw ?? '').trim();
-    if (rawStr && rawStr === valorParcela) return true;
-    if (valueCents === 0) {
-      if (rawStr === '0' || rawStr === '0,00' || rawStr === '0.00' || rawStr === 'R$ 0,00' || rawStr === 'R$0,00') {
-        return true;
+      const cop = typeof (row as any).Copetencia === 'string' ? String((row as any).Copetencia).trim() : '';
+      const rowMonthKey = parseCopetenciaToMonthKey(cop);
+      if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
+
+      const cents = parseMoneyToCents((row as any)['Valor Parcela']);
+      if (cents === null || cents !== valueCents) continue;
+
+      if (targetEmpresaKey) {
+        const emp = typeof (row as any).EMPRESA === 'string' ? String((row as any).EMPRESA).trim() : '';
+        const empKey = normalizeRelatorioOrgaoForMatch(emp);
+        if (!empKey || empKey !== targetEmpresaKey) continue;
       }
+
+      matchedRowIds.push(rowid);
+      const snap: Record<string, unknown> = {};
+      for (const c of relatorioCols) snap[c] = (row as any)[c];
+      snapshotRows.push(snap);
     }
-    return false;
-  };
-
-  const matchesCompetencia = (row: Record<string, unknown>): boolean => {
-    const cop = typeof (row as any).Copetencia === 'string' ? String((row as any).Copetencia).trim() : '';
-    const rowMonthKey = parseCopetenciaToMonthKey(cop);
-    return !!rowMonthKey && rowMonthKey === wantedMonthKey;
-  };
-
-  const matchesEmpresa = (row: Record<string, unknown>): boolean => {
-    if (!targetEmpresaKey) return true;
-    const emp = typeof (row as any).EMPRESA === 'string' ? String((row as any).EMPRESA).trim() : '';
-    const empKey = normalizeRelatorioOrgaoForMatch(emp);
-    return !!empKey && empKey === targetEmpresaKey;
-  };
-
-  const tryCollect = (row: Record<string, unknown>, requireEmpresa: boolean) => {
-    const rowid = Number((row as any).__rowid);
-    if (!Number.isFinite(rowid) || rowid <= 0) return;
-    if (seenRowIds.has(rowid)) return;
-    if (!matchesCompetencia(row)) return;
-    if (!matchesValue(row)) return;
-    if (requireEmpresa && !matchesEmpresa(row)) return;
-    seenRowIds.add(rowid);
-    matchedRowIds.push(rowid);
-    const snap: Record<string, unknown> = {};
-    for (const c of relatorioCols) snap[c] = (row as any)[c];
-    snapshotRows.push(snap);
-  };
-
-  {
-    const selectCpf = db.prepare(
-      `SELECT rowid as __rowid, ${relatorioColsSql}
-       FROM relatorio_consignado
-       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?;`,
-    );
-    try {
-      selectCpf.bind([cpf] as unknown as any[]);
-      while (selectCpf.step()) {
-        const row = selectCpf.getAsObject() as Record<string, unknown>;
-        tryCollect(row, true);
-      }
-    } finally {
-      selectCpf.free();
-    }
+  } finally {
+    selectRel.free();
   }
-
-  if (matchedRowIds.length === 0) {
-    const selectCpfLoose = db.prepare(
-      `SELECT rowid as __rowid, ${relatorioColsSql}
-       FROM relatorio_consignado
-       WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?;`,
-    );
-    try {
-      selectCpfLoose.bind([cpf] as unknown as any[]);
-      while (selectCpfLoose.step()) {
-        const row = selectCpfLoose.getAsObject() as Record<string, unknown>;
-        tryCollect(row, false);
-      }
-    } finally {
-      selectCpfLoose.free();
-    }
-  }
-
-  if (matchedRowIds.length === 0 && nomeMatchKey && nomeMatchKey.length >= 3) {
-    const nomeCol = pickFirstExistingColumn(relatorioCols, ['NOME', 'Nome']) ??
-      pickFirstColumnContaining(relatorioCols, ['nome']);
-    if (nomeCol) {
-      const selectNome = db.prepare(
-        `SELECT rowid as __rowid, ${relatorioColsSql}
-         FROM relatorio_consignado;`,
-      );
-      try {
-        while (selectNome.step()) {
-          const row = selectNome.getAsObject() as Record<string, unknown>;
-          const rawNome = typeof (row as any)[nomeCol] === 'string' ? String((row as any)[nomeCol]) : '';
-          if (normalizeNameForMatch(rawNome) !== nomeMatchKey) continue;
-          tryCollect(row, true);
-        }
-      } finally {
-        selectNome.free();
-      }
-    }
-  }
-
-  if (matchedRowIds.length === 0 && nomeMatchKey && nomeMatchKey.length >= 3) {
-    const nomeCol = pickFirstExistingColumn(relatorioCols, ['NOME', 'Nome']) ??
-      pickFirstColumnContaining(relatorioCols, ['nome']);
-    if (nomeCol) {
-      const selectNomeLoose = db.prepare(
-        `SELECT rowid as __rowid, ${relatorioColsSql}
-         FROM relatorio_consignado;`,
-      );
-      try {
-        while (selectNomeLoose.step()) {
-          const row = selectNomeLoose.getAsObject() as Record<string, unknown>;
-          const rawNome = typeof (row as any)[nomeCol] === 'string' ? String((row as any)[nomeCol]) : '';
-          if (normalizeNameForMatch(rawNome) !== nomeMatchKey) continue;
-          tryCollect(row, false);
-        }
-      } finally {
-        selectNomeLoose.free();
-      }
-    }
-  }
-
   if (matchedRowIds.length === 0) {
     throw new Error('Nenhum registro do Relatório SISBR encontrado.');
   }
@@ -21354,49 +20125,6 @@ const CONFIG_KEY_OCCURRENCES_PANORAMA_DIRETORIA_EMAIL =
 const CONFIG_KEY_OCCURRENCES_PANORAMA_GERENTES_EMAIL =
   'occurrencesPanoramaGerentesEmail';
 const CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT = 'occurrencesPanoramaLastSentAt';
-const PANORAMA_DAILY_KEY_PREFIX = 'occurrencesPanoramaDaily::v1::';
-const PANORAMA_DAILY_SENDING_TTL_MS = 15 * 60 * 1000;
-let _panoramaDailyMemoDateKey: string | null = null;
-
-function getPanoramaDailyDateKey(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-function panoramaDailyKey(dateKey: string, field: 'status' | 'updatedAtIso'): string {
-  return `${PANORAMA_DAILY_KEY_PREFIX}${dateKey}::${field}`;
-}
-
-function panoramaDailyReadLock(db: Database, dateKey: string): { status: 'none' | 'sending' | 'sent'; updatedAtMs: number | null; raw: string | null; } {
-  const raw = getConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'status'));
-  const updatedAtRaw = getConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'updatedAtIso'));
-  const updatedAtMs = updatedAtRaw ? new Date(updatedAtRaw).getTime() || null : null;
-  if (!raw || raw === 'none') return { status: 'none', updatedAtMs, raw };
-  if (raw === 'sent') return { status: 'sent', updatedAtMs, raw };
-  if (raw === 'sending') return { status: 'sending', updatedAtMs, raw };
-  return { status: 'none', updatedAtMs, raw };
-}
-
-function panoramaDailyWriteLock(db: Database, dateKey: string, status: 'sending' | 'sent'): void {
-  const nowIso = new Date().toISOString();
-  setConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'status'), status);
-  setConsignadoAppConfigValue(db, panoramaDailyKey(dateKey, 'updatedAtIso'), nowIso);
-}
-
-function panoramaDailyAcquireSendLock(db: Database, dateKey: string, forceSend: boolean): { acquired: boolean; alreadySent: boolean; stale: boolean; } {
-  if (forceSend) return { acquired: true, alreadySent: false, stale: false };
-  const nowMs = Date.now();
-  const info = panoramaDailyReadLock(db, dateKey);
-  if (info.status === 'sent') return { acquired: false, alreadySent: true, stale: false };
-  if (info.status === 'sending' && info.updatedAtMs != null && nowMs - info.updatedAtMs <= PANORAMA_DAILY_SENDING_TTL_MS) {
-    return { acquired: false, alreadySent: false, stale: false };
-  }
-  const stale = info.status === 'sending' && info.updatedAtMs != null && nowMs - info.updatedAtMs > PANORAMA_DAILY_SENDING_TTL_MS;
-  panoramaDailyWriteLock(db, dateKey, 'sending');
-  return { acquired: true, alreadySent: false, stale };
-}
 const CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_REFRESH_TOKEN =
   'notificationTeamsDelegatedRefreshToken';
 const CONFIG_KEY_NOTIFICATION_TEAMS_DELEGATED_DEVICE_CODE =
@@ -22196,43 +20924,20 @@ export async function importExtratosTemporario(opts: {
     const mm = String(month).padStart(2, '0');
     return `${mm}/${yy}`;
   };
-  const fnForTemp = path.basename(resolvedPath);
-  const parsedFile = detectCustomFileRules({ sourceFile: fnForTemp, fileColumns, firstRowsSample: rows.slice(0, 10) });
-  const fileHasFixedCompetencia = Boolean(parsedFile?.competenciaFixa);
-  const addCompetenciaCol = Boolean(refCol) || fileHasFixedCompetencia;
+  const addCompetenciaCol = Boolean(refCol);
   const baseColumns = headerMap.mappedColumns;
   const effectiveColumns = (() => {
-    const addCols: string[] = [];
-    if (fileHasFixedCompetencia) {
-      if (!baseColumns.includes('CompetenciaArquivo')) addCols.push('CompetenciaArquivo');
-      if (!baseColumns.includes('Copetencia')) addCols.push('Copetencia');
-    } else if (addCompetenciaCol) {
-      if (!baseColumns.includes('Competencia')) addCols.push('Competencia');
-    }
-    if (addCols.length === 0) return baseColumns;
-    const refIdx = refCol ? baseColumns.indexOf(refCol) : -1;
-    if (refIdx < 0) return baseColumns.concat(addCols);
-    return baseColumns.slice(0, refIdx).concat(addCols).concat(baseColumns.slice(refIdx));
+    if (!addCompetenciaCol) return baseColumns;
+    if (baseColumns.includes('Competencia')) return baseColumns;
+    const idx = baseColumns.indexOf(refCol ?? '');
+    if (idx < 0) return baseColumns.concat('Competencia');
+    return baseColumns.slice(0, idx).concat('Competencia', baseColumns.slice(idx));
   })();
   const historicoTarget = headerMap.historicoTarget;
   const historicoSource = historicoTarget ? (headerMap.sourceColumnByTarget.get(historicoTarget) ?? null) : null;
   const sourceForTarget = (target: string): string => headerMap.sourceColumnByTarget.get(target) ?? target;
-  const credTedStrictFilterColumn: string | null =
-    (headerMap && typeof (headerMap as any).credTedFilterColumn === 'string' && (headerMap as any).credTedFilterColumn) ||
-    fileColumns.find((c) => normalizeHeaderKey(c) === 'HISTORICO') ||
-    null;
-  const hasTodosExtratoStrictProfile = (() => {
-    try {
-      const fnorm = String(fnForTemp ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-      return /^TODOS.*\.(XLSX|XLSM|XLS)$/i.test(fnorm.trim());
-    } catch { return false; }
-  })();
 
   const filteredRows = rows.filter((row) => {
-    if (hasTodosExtratoStrictProfile && credTedStrictFilterColumn) {
-      const raw = String(row[credTedStrictFilterColumn] ?? '').trim();
-      return /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(raw);
-    }
     if (!historicoSource) return true;
     const raw = row[historicoSource];
     return historicoCellHasCredTedMarker(raw);
@@ -22246,15 +20951,13 @@ export async function importExtratosTemporario(opts: {
       db,
       kind: `temporario:${tableName}`,
       tableName,
-      fileName: fnForTemp,
+      fileName: path.basename(resolvedPath),
       sourceUrl: null,
       fileColumns: effectiveColumns,
       rows: filteredRows,
       mapRowToValues: (row) =>
         effectiveColumns.map((col) => {
           if (col === 'Competencia' && refColSource) return computeCompetencia(row[refColSource]);
-          if (col === 'Copetencia' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
-          if (col === 'CompetenciaArquivo' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
           const src = sourceForTarget(col);
           const raw = src in row ? toStableValue(row[src]) : '';
           if (col === 'HISTÓRICO') {
@@ -22337,43 +21040,20 @@ export async function importExtratosTemporarioFromBuffer(opts: {
     const mm = String(month).padStart(2, '0');
     return `${mm}/${yy}`;
   };
-  const fnForTemp = String(opts.fileName ?? 'upload');
-  const parsedFile = detectCustomFileRules({ sourceFile: fnForTemp, fileColumns, firstRowsSample: rows.slice(0, 10) });
-  const fileHasFixedCompetencia = Boolean(parsedFile?.competenciaFixa);
-  const addCompetenciaCol = Boolean(refCol) || fileHasFixedCompetencia;
+  const addCompetenciaCol = Boolean(refCol);
   const baseColumns = headerMap.mappedColumns;
   const effectiveColumns = (() => {
-    const addCols: string[] = [];
-    if (fileHasFixedCompetencia) {
-      if (!baseColumns.includes('CompetenciaArquivo')) addCols.push('CompetenciaArquivo');
-      if (!baseColumns.includes('Copetencia')) addCols.push('Copetencia');
-    } else if (addCompetenciaCol) {
-      if (!baseColumns.includes('Competencia')) addCols.push('Competencia');
-    }
-    if (addCols.length === 0) return baseColumns;
-    const refIdx = refCol ? baseColumns.indexOf(refCol) : -1;
-    if (refIdx < 0) return baseColumns.concat(addCols);
-    return baseColumns.slice(0, refIdx).concat(addCols).concat(baseColumns.slice(refIdx));
+    if (!addCompetenciaCol) return baseColumns;
+    if (baseColumns.includes('Competencia')) return baseColumns;
+    const idx = baseColumns.indexOf(refCol ?? '');
+    if (idx < 0) return baseColumns.concat('Competencia');
+    return baseColumns.slice(0, idx).concat('Competencia', baseColumns.slice(idx));
   })();
   const historicoTarget = headerMap.historicoTarget;
   const historicoSource = historicoTarget ? (headerMap.sourceColumnByTarget.get(historicoTarget) ?? null) : null;
   const sourceForTarget = (target: string): string => headerMap.sourceColumnByTarget.get(target) ?? target;
-  const credTedStrictFilterColumn: string | null =
-    (headerMap && typeof (headerMap as any).credTedFilterColumn === 'string' && (headerMap as any).credTedFilterColumn) ||
-    fileColumns.find((c) => normalizeHeaderKey(c) === 'HISTORICO') ||
-    null;
-  const hasTodosExtratoStrictProfile = (() => {
-    try {
-      const fnorm = String(fnForTemp ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-      return /^TODOS.*\.(XLSX|XLSM|XLS)$/i.test(fnorm.trim());
-    } catch { return false; }
-  })();
 
   const filteredRows = rows.filter((row) => {
-    if (hasTodosExtratoStrictProfile && credTedStrictFilterColumn) {
-      const raw = String(row[credTedStrictFilterColumn] ?? '').trim();
-      return /^\s*CR[ÉE]D\.?\s*TED-STR\s*$/i.test(raw);
-    }
     if (!historicoSource) return true;
     const raw = row[historicoSource];
     return historicoCellHasCredTedMarker(raw);
@@ -22387,15 +21067,13 @@ export async function importExtratosTemporarioFromBuffer(opts: {
       db,
       kind: `temporario:${tableName}`,
       tableName,
-      fileName: fnForTemp,
+      fileName: opts.fileName,
       sourceUrl: null,
       fileColumns: effectiveColumns,
       rows: filteredRows,
       mapRowToValues: (row) =>
         effectiveColumns.map((col) => {
           if (col === 'Competencia' && refColSource) return computeCompetencia(row[refColSource]);
-          if (col === 'Copetencia' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
-          if (col === 'CompetenciaArquivo' && fileHasFixedCompetencia) return parsedFile?.competenciaFixa ?? '';
           const src = sourceForTarget(col);
           const raw = src in row ? toStableValue(row[src]) : '';
           if (col === 'HISTÓRICO') {
@@ -24128,9 +22806,9 @@ async function createConciliacaoPorDataPdfBuffer(opts: {
   let logoBuf: Buffer | null = null;
   try {
     const candidates = [
-      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
     ];
     const logoPath = candidates.find((candidate) => fs.existsSync(candidate));
     logoBuf = logoPath ? fs.readFileSync(logoPath) : null;
@@ -25926,8 +24604,8 @@ export async function getConciliacaoPorDataPreview(opts: {
         if (!isQuitado && !isAntecipado) return acc;
         const liquidationDate = String(occ?.devolucaoDate ?? '').trim();
         if (!/^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)) return acc;
-        const debitCents = parseMoneyToCents(occ?.value) ?? 0;
-        if (debitCents === null) return acc;
+        const debitCents = parseMoneyToCents(occ?.value);
+        if (debitCents === null || debitCents === 0) return acc;
         const event = isAntecipado ? 'DEVOLUÇÃO (ANTECIPADO)' : 'DEVOLUÇÃO (QUITADO)';
         const key = `${event}|${liquidationDate}`;
         const current = acc.get(key) ?? {
@@ -26285,12 +24963,11 @@ export async function getOrgaoDePara() {
   return { items, dbFilePath };
 }
 
-export async function listHomeConciliacaoStatuses(opts: { month: string; crossPorData?: boolean }) {
+export async function listHomeConciliacaoStatuses(opts: { month: string }) {
   const monthKey = String(opts.month ?? '').trim();
   if (!/^\d{4}-\d{2}$/.test(monthKey)) {
     throw new Error('Informe a competência no formato YYYY-MM.');
   }
-  const crossPorData = Boolean(opts.crossPorData);
 
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
@@ -26322,30 +24999,6 @@ export async function listHomeConciliacaoStatuses(opts: { month: string; crossPo
       return `${m[3]}${m[2]}${m[1]}`;
     };
     return parseKey(a).localeCompare(parseKey(b), 'pt-BR');
-  };
-
-  const pickLiquidationDateGlobal = (r: any) => {
-    const occs = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
-    for (const o of occs) {
-      const liq = typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
-      if (liq && /^\d{2}\/\d{2}\/\d{4}$/.test(liq)) return liq;
-    }
-    return null;
-  };
-  const pickDevolucaoDateQuitadoGlobal = (r: any) => {
-    const occs = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
-    for (const o of occs) {
-      const action = typeof o?.action === 'string' ? o.action.trim() : '';
-      const isQuitado = action === 'quitado_recurso' || action.startsWith('quitado_recurso');
-      const isAntecipado =
-        action === 'antecipado_devolvido_relatorio_sisbr' || action.startsWith('antecipado_devolvido');
-      if (!isQuitado && !isAntecipado) continue;
-      const dev = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
-      if (dev && /^\d{2}\/\d{2}\/\d{4}$/.test(dev)) return dev;
-      const m = action.match(/\b(\d{2}\/\d{2}\/\d{4})\b/);
-      if (m && m[1]) return m[1];
-    }
-    return null;
   };
 
   const validationMap = listConciliacaoPorDataValidationMap(db, monthKey);
@@ -26383,29 +25036,9 @@ export async function listHomeConciliacaoStatuses(opts: { month: string; crossPo
 
     const allVencimentosSet = new Set<string>();
     const relatorioRows = Array.isArray(conciliacao?.relatorio) ? conciliacao.relatorio : [];
-    const vencimentoToLiquidationDatesCross = new Map<string, Set<string>>();
     for (const row of relatorioRows) {
       const vencimento = getLinkedRelatorioVencimentoLabel(row);
       if (vencimento && vencimento !== '-') allVencimentosSet.add(vencimento);
-      if (crossPorData && vencimento && vencimento !== '-') {
-        const l1 = pickLiquidationDateGlobal(row);
-        const l2 = pickDevolucaoDateQuitadoGlobal(row);
-        const lds = new Set<string>();
-        if (l1) lds.add(l1);
-        if (l2) lds.add(l2);
-        const occs = Array.isArray(row?.ocorrencias) ? row.ocorrencias : row?.ocorrencia ? [row.ocorrencia] : [];
-        for (const o of occs) {
-          const d1 = typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
-          const d2 = typeof o?.devolucaoDate === 'string' ? o.devolucaoDate.trim() : '';
-          if (d1 && /^\d{2}\/\d{2}\/\d{4}$/.test(d1)) lds.add(d1);
-          if (d2 && /^\d{2}\/\d{2}\/\d{4}$/.test(d2)) lds.add(d2);
-        }
-        if (lds.size > 0) {
-          const existing = vencimentoToLiquidationDatesCross.get(vencimento) ?? new Set<string>();
-          lds.forEach((x) => existing.add(x));
-          vencimentoToLiquidationDatesCross.set(vencimento, existing);
-        }
-      }
     }
     for (const vencimento of closedVencimentos) {
       if (vencimento && vencimento !== '-') allVencimentosSet.add(vencimento);
@@ -26441,33 +25074,6 @@ export async function listHomeConciliacaoStatuses(opts: { month: string; crossPo
       continue;
     }
 
-    const isPorDataApprovedCross = (vencimento: string) => {
-      if (!crossPorData) return false;
-      const globalOrgao = 'Todos os órgãos';
-      const fromGlobalVencimento = validationMap.get(
-        buildConciliacaoPorDataValidationCompositeKey(monthKey, globalOrgao, vencimento),
-      )?.status === 'approved';
-      const fromOrgaoVencimento = validationMap.get(
-        buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, vencimento),
-      )?.status === 'approved';
-      if (fromGlobalVencimento || fromOrgaoVencimento) return true;
-      const liquids = vencimentoToLiquidationDatesCross.get(vencimento);
-      if (!liquids || liquids.size === 0) return false;
-      for (const liqDate of liquids) {
-        if (
-          validationMap.get(
-            buildConciliacaoPorDataValidationCompositeKey(monthKey, globalOrgao, liqDate),
-          )?.status === 'approved'
-        ) return true;
-        if (
-          validationMap.get(
-            buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, liqDate),
-          )?.status === 'approved'
-        ) return true;
-      }
-      return false;
-    };
-
     for (const vencimento of allVencimentos) {
       const globalOrgao = 'Todos os órgãos';
       const contabilidadeValidated =
@@ -26477,8 +25083,7 @@ export async function listHomeConciliacaoStatuses(opts: { month: string; crossPo
         )?.status === 'approved') ||
           (validationMap.get(
             buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, vencimento),
-          )?.status === 'approved') ||
-          isPorDataApprovedCross(vencimento));
+          )?.status === 'approved'));
       items.push({
         orgao,
         vencimento,
@@ -26502,7 +25107,6 @@ export async function listHomeConciliacaoStatuses(opts: { month: string; crossPo
 
   return {
     month: monthKey,
-    crossPorData,
     items,
     dbFilePath,
   };
@@ -27014,8 +25618,27 @@ function parseJsonArraySafe(value: unknown): unknown[] {
 }
 
 export async function getConsignadoAccessEmails() {
-  return withRetryOnDbClosed('getConsignadoAccessEmails', async () => {
+  type ConsignadoAccessEmailsResponse = {
+    entries: Array<{
+      email: string;
+      role: ConsignadoAccessRole;
+      menus: ConsignadoMenuPermission[];
+      flowStages: ConsignadoFlowStagePermission[];
+    }>;
+    emails: string[];
+    fixedEmail: string;
+    dbFilePath: string;
+  };
+  const anyThis = globalThis as any;
+  if (!anyThis.__consignadoAccessEmailsCache) anyThis.__consignadoAccessEmailsCache = null;
+  const getCache = (): ConsignadoAccessEmailsResponse | null => anyThis.__consignadoAccessEmailsCache as ConsignadoAccessEmailsResponse | null;
+  const setCache = (v: ConsignadoAccessEmailsResponse) => { anyThis.__consignadoAccessEmailsCache = v; };
+
+  try {
     const dbFilePath = getSqlitePath();
+    // #region debug-point B:access-emails-service-enter
+    (()=>{let u='http://127.0.0.1:7777/event',s='access-validation-503';try{const e=fs.readFileSync('/var/www/html/Portal-Administrativo/.dbg/access-validation-503.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}void fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'B',location:'import-consignado.ts:getConsignadoAccessEmails:enter',msg:'[DEBUG] Iniciando leitura de acessos do consignado',data:{dbFilePath},ts:Date.now()})}).catch(()=>{});})();
+    // #endregion
     const db = await openDatabase(dbFilePath);
     ensureSchema(db);
 
@@ -27041,6 +25664,9 @@ export async function getConsignadoAccessEmails() {
       }))
       .filter((r) => Boolean(r.email))
       .filter((r, i, arr) => arr.findIndex((x) => x.email === r.email) === i);
+    // #region debug-point B:access-emails-service-rows
+    (()=>{let u='http://127.0.0.1:7777/event',s='access-validation-503';try{const e=fs.readFileSync('/var/www/html/Portal-Administrativo/.dbg/access-validation-503.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}void fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'B',location:'import-consignado.ts:getConsignadoAccessEmails:rows',msg:'[DEBUG] Leitura da tabela consignado_access_emails concluida',data:{rows:rows.length,fromDb:fromDb.length},ts:Date.now()})}).catch(()=>{});})();
+    // #endregion
 
     const fixed = FIXED_ACCESS_EMAIL;
     const fixedSaved = fromDb.find((e) => e.email === fixed);
@@ -27073,18 +25699,43 @@ export async function getConsignadoAccessEmails() {
           ]);
         }
       } finally {
-        try { if (stmt && typeof stmt.free === 'function') stmt.free(); } catch {}
+        stmt.free();
       }
       persistDatabase(db, dbFilePath);
     }
 
-    return {
+    // #region debug-point B:access-emails-service-success
+    (()=>{let u='http://127.0.0.1:7777/event',s='access-validation-503';try{const e=fs.readFileSync('/var/www/html/Portal-Administrativo/.dbg/access-validation-503.env','utf8');u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u;s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s}catch{}void fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'B',location:'import-consignado.ts:getConsignadoAccessEmails:success',msg:'[DEBUG] Retornando acessos do consignado',data:{entries:entries.length,hasFixed},ts:Date.now()})}).catch(()=>{});})();
+    // #endregion
+    const out: ConsignadoAccessEmailsResponse = {
       entries,
       emails: entries.map((e) => e.email),
       fixedEmail: FIXED_ACCESS_EMAIL,
       dbFilePath,
     };
-  });
+    setCache(out);
+    return out;
+  } catch (e) {
+    safeLogError('getConsignadoAccessEmails fallback', e);
+    const cached = getCache();
+    if (cached) return cached;
+    const dbFilePath = getSqlitePath();
+    const fixed = FIXED_ACCESS_EMAIL;
+    const entries = [{
+      email: fixed,
+      role: 'admin' as const,
+      menus: [...CONSIGNADO_MENU_PERMISSION_VALUES],
+      flowStages: [...CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES],
+    }];
+    const out: ConsignadoAccessEmailsResponse = {
+      entries,
+      emails: entries.map((x) => x.email),
+      fixedEmail: fixed,
+      dbFilePath,
+    };
+    setCache(out);
+    return out;
+  }
 }
 
 export async function setConsignadoAccessEmails(opts: {
@@ -27096,18 +25747,9 @@ export async function setConsignadoAccessEmails(opts: {
   }>;
   emails?: string[];
 }) {
-  return withRetryOnDbClosed('setConsignadoAccessEmails', async () => {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
-
-  // ===== REGRAS IMUTÁVEIS ACESSOS (conforme regra usuário 2026-09-04):
-  //   1. Deploy NUNCA apaga/alterar acessos. Apenas a UI (este setConsignadoAccessEmails) pode alterar.
-  //   2. NÃO permite salvar com menos de 2 e-mails (mínimo fixed admin + pelo menos 1 usuário).
-  //   3. NÃO executa mais DELETE * full (era causa de perder acessos ao salvar com UI carregada vazia).
-  //      Agora é UPSERT incremental: atualiza os que vieram + insere novos; NÃO apaga NINGUÉM
-  //      que exista no banco mesmo que não venha no body (segurança máxima contra perda acidental).
-  // ==================
 
   const incomingEntries = Array.isArray(opts.entries)
     ? opts.entries
@@ -27128,13 +25770,6 @@ export async function setConsignadoAccessEmails(opts: {
     .filter((e) => Boolean(e.email))
     .filter((e, i, arr) => arr.findIndex((x) => x.email === e.email) === i);
 
-  // [REGRA B] Salvar com <2 emails = ERRO 400: mínimo fixed + 1 usuário.
-  if (normalized.length < 2) {
-    throw new Error(
-      `Não é permitido salvar acessos com menos de 2 e-mails (mínimo: 1 administrador fixo + pelo menos 1 usuário). Tamanho recebido=${normalized.length}.`,
-    );
-  }
-
   const fixedSaved = normalized.find((e) => e.email === FIXED_ACCESS_EMAIL);
   const fixedEntry = {
     email: FIXED_ACCESS_EMAIL,
@@ -27148,34 +25783,25 @@ export async function setConsignadoAccessEmails(opts: {
     ? normalized.map((e) => (e.email === FIXED_ACCESS_EMAIL ? fixedEntry : e))
     : [fixedEntry, ...normalized];
 
-  // [REGRA C] UPSERT INCREMENTAL (não executa DELETE FROM full).
-  // Estratégia: BEGIN → UPDATE cada email existente → INSERT OR IGNORE novos → COMMIT
-  // Resultado: e-mails novos aparecem; existentes são atualizados; e-mails do DB que
-  // não vieram no body PERMANECEM intactos (à prova de bug de carregamento UI vazio).
   db.run('BEGIN;');
   try {
+    db.run('DELETE FROM consignado_access_emails;');
     const createdAt = new Date().toISOString();
-    const stmtUpd = db.prepare(
-      `UPDATE consignado_access_emails SET role=?, menu_permissions_json=?, flow_stage_permissions_json=? WHERE email=?;`,
-    );
-    const stmtIns = db.prepare(
+    const stmt = db.prepare(
       `INSERT OR IGNORE INTO consignado_access_emails (email, role, menu_permissions_json, flow_stage_permissions_json, created_at) VALUES (?, ?, ?, ?, ?);`,
     );
     try {
       for (const e of entries) {
-        const menusJson = JSON.stringify(e.menus);
-        const flowJson = JSON.stringify(e.flowStages);
-        const changesBefore = db.getRowsModified();
-        stmtUpd.run([e.role, menusJson, flowJson, e.email]);
-        const upd = db.getRowsModified() - changesBefore;
-        if (!upd) {
-          // UPDATE não alterou → e-mail não existe → INSERT OR IGNORE novo
-          stmtIns.run([e.email, e.role, menusJson, flowJson, createdAt]);
-        }
+        stmt.run([
+          e.email,
+          e.role,
+          JSON.stringify(e.menus),
+          JSON.stringify(e.flowStages),
+          createdAt,
+        ]);
       }
     } finally {
-      try { if (stmtUpd && typeof stmtUpd.free === 'function') stmtUpd.free(); } catch {}
-      try { if (stmtIns && typeof stmtIns.free === 'function') stmtIns.free(); } catch {}
+      stmt.free();
     }
     db.run('COMMIT;');
   } catch (e) {
@@ -27194,7 +25820,6 @@ export async function setConsignadoAccessEmails(opts: {
     fixedEmail: FIXED_ACCESS_EMAIL,
     dbFilePath,
   };
-  });
 }
 
 async function ensureChildFolder(opts: {
@@ -27357,6 +25982,12 @@ function buildUniqueImportedFileName(fileName: string): string {
     .replace(/\.\d{3}Z$/, '')
     .replace('T', '-');
   return `${base} (${stamp})${ext}`;
+}
+
+async function sleepMs(ms: number) {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 async function getDriveItemParentId(opts: {
@@ -27947,21 +26578,15 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#039;');
 }
 
-function escapeAttr(value: string): string {
-  return escapeHtml(value);
-}
-
 function getEmailLogoDataUri(): string | null {
   try {
     const candidates = [
-      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), 'frontend/dist/assets/sicoob-juriscred.png'),
-      path.resolve(process.cwd(), '../frontend/dist/assets/sicoob-juriscred.png'),
       path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
       path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
       path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
     ];
     const p = candidates.find((x) => fs.existsSync(x));
     if (!p) return null;
@@ -27980,93 +26605,57 @@ function buildEmailTemplateHtml(opts: {
   contentHtml: string;
   title?: string;
   introHtml?: string;
-  accentColor?: string;
 }): string {
   const subtitle = escapeHtml(String(opts.subtitle ?? '').trim());
   const title = escapeHtml(String(opts.title ?? 'Portal Administrativo').trim() || 'Portal Administrativo');
   const logoDataUri = getEmailLogoDataUri();
-  const headerBg = '#003641';
-  const topBarColor = opts.accentColor || '#00ae9d';
+  const headerBg = '#ffffff';
+  const topBarColor = '#003641';
   const bottomBarColor = '#00ae9d';
   return `<!doctype html>
 <html>
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${title}</title>
-    <!--[if mso]>
-    <style type="text/css">
-      body, table, td, a { font-family: Arial, sans-serif !important; }
-      table { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
-    </style>
-    <![endif]-->
   </head>
-  <body style="margin:0;padding:24px 8px;background-color:#eef2f7;font-family:Arial,Helvetica,sans-serif;color:#0f172a;-webkit-font-smoothing:antialiased;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-      <tr>
-        <td align="center">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:680px;background:#ffffff;border-radius:16px;border:1px solid #d7e0ea;box-shadow:0 12px 32px rgba(15,23,42,0.08);overflow:hidden;">
-            <!-- ======= INTRO PILL STRIP ======= -->
-            ${String(opts.introHtml ?? '').trim()
-              ? `<tr>
-                  <td style="padding:18px 28px 0;">
-                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-                      <tr><td align="left">${String(opts.introHtml ?? '')}</td></tr>
-                    </table>
-                  </td>
-                </tr>`
-              : ''
-            }
-            <!-- ======= HEADER BRANDED ======= -->
-            <tr>
-              <td>
-                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:${headerBg};border-top:6px solid ${topBarColor};border-bottom:4px solid ${bottomBarColor};">
-                  <tr>
-                    <td style="padding:20px 28px 16px;">
-                      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-                        <tr>
-                          <td align="left" valign="middle" width="150" style="white-space:nowrap;">
-                            ${logoDataUri
-                                ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height:30px;display:block;background-color:rgba(255,255,255,0.1);padding:4px 10px;border-radius:8px;">`
-                                : `<span style="color:#ffffff;font-weight:900;font-size:16px;">SICOOB Juriscred</span>`
-                            }
-                          </td>
-                          <td align="center" valign="middle" style="padding:0 10px;">
-                            <div style="font-size:22px;font-weight:900;letter-spacing:-0.02em;line-height:1.05;color:#ffffff;white-space:normal;word-break:break-word;">${title}</div>
-                          </td>
-                          <td align="right" valign="middle" width="100" style="white-space:nowrap;">&nbsp;</td>
-                        </tr>
-                        <tr>
-                          <td colspan="3" align="center" style="padding-top:10px;">
-                            <div style="font-size:13px;line-height:1.45;color:#e2e8f0;font-weight:600;white-space:normal;word-break:break-word;">${subtitle}</div>
-                          </td>
-                        </tr>
-                      </table>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-            </tr>
-            <!-- ======= CONTENT ======= -->
-            <tr>
-              <td style="padding:28px;background-color:#ffffff;color:#0f172a;line-height:1.65;">
-                ${String(opts.contentHtml ?? '')}
-              </td>
-            </tr>
-            <!-- ======= FOOTER ======= -->
-            <tr>
-              <td style="background-color:#003641;border-top:1px solid #004958;padding:14px 20px;text-align:center;">
-                <div style="font-size:11px;color:#e2e8f0;line-height:1.4;font-weight:600;">
-                  © 2026 Sicoob Juriscred • Portal Administrativo<br>
-                  Desenvolvido Por: Departamento de Tecnologia da Informação - Juriscred<br>
-                  <span style="color:#94a3b8;">🤖 E-mail automático — Por favor não responder.</span>
-                </div>
-              </td>
-            </tr>
-          </table>
-        </td>
-      </tr>
-    </table>
+  <body style="margin:0;padding:20px 12px;background:#eef2f7;">
+    <div style="font-family: Arial, sans-serif; max-width: 720px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #d7e0ea; box-shadow: 0 12px 32px rgba(15,23,42,0.08);">
+      ${
+        String(opts.introHtml ?? '').trim()
+          ? `<div style="padding: 22px 24px 18px; background:#ffffff; border-bottom:1px solid #e2e8f0; color:#334155; line-height:1.7;">
+              ${String(opts.introHtml ?? '')}
+            </div>`
+          : ''
+      }
+      <div style="background: ${headerBg}; border-top: 6px solid ${topBarColor}; border-bottom: 4px solid ${bottomBarColor}; padding: 18px 24px 16px;">
+        <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse: collapse;">
+          <tr>
+            <td align="left" valign="middle" style="width: 180px; white-space: nowrap;">
+              ${
+                logoDataUri
+                  ? `<img src="${logoDataUri}" alt="Sicoob Juriscred" style="height: 36px; background-color: #f1f5f9; padding: 4px 10px; border-radius: 8px; display: block;">`
+                  : '<span style="color:#0f172a; font-weight:900; font-size:18px;">SICOOB Juriscred</span>'
+              }
+            </td>
+            <td align="center" valign="middle" style="padding:0 12px;">
+              <div style="font-size:26px;font-weight:900;letter-spacing:-0.02em;line-height:1.15;color:#0f172a;">${title}</div>
+              <div style="font-size:13px;margin-top:8px;line-height:1.45;color:#334155;font-weight:600;">${subtitle}</div>
+            </td>
+            <td style="width: 180px;">&nbsp;</td>
+          </tr>
+        </table>
+      </div>
+
+      <div style="padding: 28px; color: #0f172a; line-height: 1.65; background:#ffffff;">
+        ${String(opts.contentHtml ?? '')}
+      </div>
+
+      <div style="background-color: #f8fafc; border-top:1px solid #e2e8f0; padding: 18px 15px; text-align: center; font-size: 12px; color: #334155; line-height:1.6; font-weight:600;">
+        © 2026 Sicoob Juriscred • Portal Administrativo<br>
+        Desenvolvido Por: Departamento de Tecnologia da Informação - Juriscred<br>
+        E-mail automático - Por favor não responder.
+      </div>
+    </div>
   </body>
 </html>`;
 }
@@ -28131,7 +26720,7 @@ function getPortalAdministrativoPublicBaseUrl(): string {
   return raw.replace(/\/+$/g, '');
 }
 
-export async function sendImportFinishedEmailNotification(input: {
+async function sendImportFinishedEmailNotification(input: {
   notificationTo: string | string[] | null | undefined;
   forceKind: string | null | undefined;
   folderUrlPreview: string | null | undefined;
@@ -28147,14 +26736,11 @@ export async function sendImportFinishedEmailNotification(input: {
     profileId: string;
     insertedRows: number;
     skippedRows: number;
-    debugSisbr?: unknown;
   }>;
-  scannedFileNames?: string[];
   errorMessage?: string | null;
   mode?: string | null;
-  jobSentFlagRef?: { value: boolean };
-}): Promise<{ attempted: boolean; sent: boolean; to: string[]; error?: string | null; deduplicated?: boolean }> {
-  const out = { attempted: false, sent: false, to: [] as string[], error: null as string | null, deduplicated: false };
+}): Promise<{ attempted: boolean; sent: boolean; to: string[]; error?: string | null }> {
+  const out = { attempted: false, sent: false, to: [] as string[], error: null as string | null };
   try {
     const notificationFromEnv = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
     let recipients = splitEmailRecipients(input.notificationTo);
@@ -28177,7 +26763,7 @@ export async function sendImportFinishedEmailNotification(input: {
             out.to = dbRecipients;
           }
         } finally {
-          void dbFallback;
+          try { if (dbFallback && typeof dbFallback.close === 'function') { dbFallback.close(); } } catch { /* ignore close errors */ }
         }
       } catch { /* ignore SQLite fallback open errors — try last env fallback below */ }
       // (2) Último fallback: usar o e-mail REMETENTE como destinatário (notificacoes@sicoobjuriscred.com.br)
@@ -28207,447 +26793,39 @@ export async function sendImportFinishedEmailNotification(input: {
     catch (e) { out.error = `Falha ao obter token Graph: ${e instanceof Error ? e.message : String(e)}`; return out; }
     if (!token) { out.error = 'Token Graph vazio.'; return out; }
 
+    const outcomeLabel: Record<string, { title: string; sub: string; accent: string }> = {
+      success:   { title: 'Importação concluída com sucesso',     sub: 'Todos os arquivos foram processados.',                       accent: '#166534' },
+      partial:   { title: 'Importação concluída parcialmente',    sub: 'Alguns arquivos tiveram linhas puladas ou processadas.',     accent: '#92400e' },
+      failed:    { title: 'Falha na importação',                   sub: 'Ocorreu um erro durante o processamento dos arquivos.',     accent: '#991b1b' },
+      cancelled: { title: 'Importação cancelada',                  sub: 'A operação foi cancelada antes da conclusão.',              accent: '#475569' },
+    };
+    const display = outcomeLabel[input.outcome] ?? outcomeLabel.failed;
     const forceKindDisplay = String(input.forceKind ?? 'Não especificado').trim() || 'Não especificado';
     const modeDisplay = String(input.mode ?? 'append').trim() || 'append';
-
-    const forceKindLower = forceKindDisplay.toLowerCase();
-    const scannedNames = Array.isArray(input.scannedFileNames) ? input.scannedFileNames.slice(0, 8) : [];
-    const scannedNamesDisplay = scannedNames.length > 0
-      ? scannedNames.map(n => `<span style="display:inline-block;padding:2px 8px;margin:2px 4px 2px 0;border-radius:999px;background:#dbeafe;border:1px solid #93c5fd;color:#1e3a8a;font-size:11px;font-weight:700;line-height:1.3;">${escapeHtml(n)}</span>`).join('')
-      : '';
-    let perfilInfo = {
-      nomePerfilAmigavel: forceKindDisplay,
-      tipoArquivoEsperado: 'Excel (.xlsx) ou PDF',
-      exemploNomeArquivos: 'arquivos compatíveis com o perfil selecionado',
-      pastaAlvo: 'a pasta correspondente ao perfil',
-      notasPerfil: '',
-    };
-    if (forceKindLower.includes('sisbr') || forceKindLower.includes('relatorio') || forceKindLower.includes('orgao')) {
-      perfilInfo = {
-        nomePerfilAmigavel: 'Relatório SISBR (Convênios / Órgãos)',
-        tipoArquivoEsperado: 'PDF posicional (relatórios emitidos pelo SISBR)',
-        exemploNomeArquivos: 'Ex.: "ELETRA - FUNDACAO PREVIDENCIA.pdf", "GOIAS MP PROCURADORIA.pdf" — NÃO importa o nome do arquivo, só o layout interno com colunas Cliente / Matrícula / Operação / Competência / Vencimento / Valor Parcela',
-        pastaAlvo: 'a subpasta "Relatório Sisbr" (única pasta pesquisada para este perfil)',
-        notasPerfil: 'Este perfil NÃO filtra por nome do arquivo — valida APENAS a estrutura interna (6+ colunas do SISBR).',
-      };
-    } else if (forceKindLower.includes('mpgo')) {
-      perfilInfo = {
-        nomePerfilAmigavel: 'Recursos MPGO (Ministério Público GO)',
-        tipoArquivoEsperado: 'PDF — relatório emitido pelo MPGO',
-        exemploNomeArquivos: 'Ex.: "MPGO-AGOSTO-2026.pdf", "MPGO JULHO 2026.pdf" — nome do arquivo deve conter "MPGO" e ser .pdf',
-        pastaAlvo: 'a pasta do mês/ano correspondente em "9.Recuperação de Crédito / {Ano} / {Mês} / Relatório Orgão / MPGO',
-        notasPerfil: 'Este perfil espera SOMENTE PDF do MPGO. Não confundir com planilhas Recurso/Relatório que são perfis separados.',
-      };
-    } else if (forceKindLower.includes('recurso') || forceKindLower.includes('recursos')) {
-      perfilInfo = {
-        nomePerfilAmigavel: 'Recursos / Precatórios (TRE/TRT/TJGO/ADFEGO/TCE/TCM/ALEGO/Eletra/Demais',
-        tipoArquivoEsperado: 'Excel (.xlsx) — planilha fornecida pelo órgão fórum/precatório',
-        exemploNomeArquivos: 'Ex.: "TRE-GO_AGOSTO_2026.xlsx", "TJGO JULHO 2026.xlsx"',
-        pastaAlvo: 'a pasta do mês/ano correspondente em Recuperação de Crédito / {Ano} / {Mês} / Relatório Orgão / {Nome do órgão}',
-        notasPerfil: 'Se não bater, confira: (a) aba/sheet correta; (b) se não foi salvo como PDF em vez de XLSX; (c) se a 1ª linha é cabeçalho.',
-      };
-    } else if (forceKindLower.includes('extrato') || forceKindLower.includes('todos')) {
-      perfilInfo = {
-        nomePerfilAmigavel: 'Extratos Bancários (TODOS / ALEGO / ADFEGO)',
-        tipoArquivoEsperado: 'Excel (.xlsx) — exportação direta do internet banking',
-        exemploNomeArquivos: 'Ex.: "TODOS-AGOSTO-2026.xlsx", "ALEGO-AGOSTO-2026.xlsx", "CRÉD.TED-STR-*.xlsx" — colunas Data / Histórico / Valor / Saldo (ou equivalentes)',
-        pastaAlvo: 'a pasta do mês/ano correspondente (Ex.: Extratos / 2026 / 08 Agosto)',
-        notasPerfil: 'Se não bater, confira: (a) extensão .xlsx (CSV não funciona); (b) colunas Data, Valor, Histórico presentes; (c) não é um arquivo ZIP de PDF de boleto.',
-      };
-    } else if (forceKindLower.includes('tre') || forceKindLower.includes('trt') || forceKindLower.includes('tjgo') || forceKindLower.includes('adfego')) {
-      perfilInfo = {
-        nomePerfilAmigavel: `${forceKindDisplay} (Fórum / Precatório / Convênio)`,
-        tipoArquivoEsperado: 'Excel (.xlsx) — planilha fornecida pelo órgão / fórum',
-        exemploNomeArquivos: 'Arquivos nomeados com TRE/TRT/TJGO/ADFEGO + Mês/Ano, com colunas identificáveis de operação / vencimento / valor / cliente',
-        pastaAlvo: 'a pasta correspondente ao órgão / mês',
-        notasPerfil: 'Se não bater, provavelmente o layout do relatório do órgão mudou — avise a TI para atualizar o perfil.',
-      };
-    }
-
     const folderShort = String(input.folderUrlPreview ?? '').trim().slice(0, 180);
-    const recipientsKey = recipients.map((r) => r.toLowerCase().trim()).sort().join('|');
-    const filesSignature = input.importedFiles.slice(0, 10).map((f) => `${f.fileName}:${f.insertedRows}:${f.skippedRows}`).join('|');
-    const idempotencyRaw = [
-      'import-notification:v1',
-      String(input.outcome || ''),
-      String(input.totalFilesScanned),
-      String(input.totalFilesMatched),
-      String(input.totalRowsInserted),
-      String(input.totalRowsSkipped),
-      forceKindDisplay,
-      folderShort,
-      recipientsKey,
-      filesSignature,
-    ].join('::');
-    const crypto = require('crypto');
-    const idempotencyKey = String(crypto.createHash ? crypto.createHash('sha256').update(idempotencyRaw, 'utf8').digest('hex').slice(0, 32) : idempotencyRaw.slice(0, 32));
-    const nowTs = Date.now();
-    try {
-      for (const [k, ts] of Array.from(__importNotificationSent.entries())) {
-        if (nowTs - ts > IMPORT_NOTIFICATION_IDEMPOTENCY_TTL_MS) __importNotificationSent.delete(k);
-      }
-    } catch { /* ignore prune */ }
-    if (__importNotificationSent.has(idempotencyKey)) {
-      out.deduplicated = true;
-      out.error = `Deduplicado (já enviado há ${Math.floor((nowTs - (__importNotificationSent.get(idempotencyKey) ?? 0)) / 1000)}s).`;
-      return out;
-    }
-    if (input.jobSentFlagRef && input.jobSentFlagRef.value) {
-      out.deduplicated = true;
-      out.error = 'Deduplicado (job já disparou notificação nesta execução).';
-      return out;
-    }
-
-    const outcomeConfig: Record<string, {
-      title: string; summary: string; accent: string; bg: string; border: string; pillLabel: string; emoji: string;
-    }> = {
-      success: {
-        title: 'Importação concluída com sucesso',
-        summary: 'Todos os arquivos foram processados e as linhas foram gravadas no banco.',
-        accent: '#15803d',
-        bg: 'linear-gradient(135deg,#ecfdf5 0%,#bbf7d0 100%)',
-        border: '#86efac',
-        pillLabel: 'Sucesso',
-        emoji: '✅',
-      },
-      dup_ok: {
-        title: 'Nenhum dado novo encontrado',
-        summary: 'Os arquivos já haviam sido importados antes — proteção contra duplicata ativou automaticamente. Nenhuma ação necessária.',
-        accent: '#075985',
-        bg: 'linear-gradient(135deg,#eff6ff 0%,#bfdbfe 100%)',
-        border: '#93c5fd',
-        pillLabel: 'Tudo já salvo',
-        emoji: '📬',
-      },
-      partial: {
-        title: 'Algumas linhas ficaram de fora',
-        summary: 'Uma parte dos dados foi gravada e outra não. Veja abaixo o que aconteceu e o que fazer.',
-        accent: '#b45309',
-        bg: 'linear-gradient(135deg,#fffbeb 0%,#fde68a 100%)',
-        border: '#fcd34d',
-        pillLabel: 'Parcial',
-        emoji: '⚠️',
-      },
-      failed: {
-        title: 'Não foi possível importar',
-        summary: 'Ocorreu um problema durante o processamento. Veja a causa e o que fazer abaixo.',
-        accent: '#b91c1c',
-        bg: 'linear-gradient(135deg,#fef2f2 0%,#fecaca 100%)',
-        border: '#fca5a5',
-        pillLabel: 'Falha',
-        emoji: '❌',
-      },
-      cancelled: {
-        title: 'Importação cancelada',
-        summary: 'A importação foi cancelada antes de terminar.',
-        accent: '#475569',
-        bg: 'linear-gradient(135deg,#f1f5f9 0%,#cbd5e1 100%)',
-        border: '#94a3b8',
-        pillLabel: 'Cancelada',
-        emoji: '⏹️',
-      },
-    };
     const isOk = input.totalRowsInserted > 0 && !input.errorMessage;
-    const hasAnyInsert = input.totalRowsInserted > 0;
-    const hasAnySkip = input.totalRowsSkipped > 0;
-    const matchedSomething = input.totalFilesMatched > 0;
-    const allSkippedZeroInsert = matchedSomething && !hasAnyInsert && hasAnySkip;
-    let effectiveOutcome: keyof typeof outcomeConfig = input.outcome === 'success'
-      ? (isOk ? 'success' : (hasAnySkip ? 'partial' : 'success'))
-      : (input.outcome && (input.outcome in outcomeConfig) ? (input.outcome as keyof typeof outcomeConfig) : 'failed');
-    if (allSkippedZeroInsert && effectiveOutcome !== 'cancelled') effectiveOutcome = 'dup_ok';
-    const display = outcomeConfig[effectiveOutcome] ?? outcomeConfig.failed;
-
-    type IssueEntry = {
-      title: string;
-      cause: string;
-      action: string;
-      severity: 'Ação necessária' | 'Verificar' | 'Informativo';
-      detail?: string;
-    };
-    const issues: IssueEntry[] = [];
-    const err = (input.errorMessage || '').trim();
-    const errLower = err.toLowerCase();
-
-    if (effectiveOutcome === 'cancelled') {
-      issues.push({
-        title: 'Importação cancelada',
-        cause: 'A execução foi interrompida antes de concluir (cancelamento manual, tempo esgotado, ou sistema reiniciado).',
-        action: 'Rode a importação novamente. Se cancelou de propósito, pode ignorar este e-mail.',
-        severity: 'Informativo',
-      });
-    }
-    if (input.totalFilesScanned <= 0 && effectiveOutcome !== 'cancelled') {
-      issues.push({
-        title: `Nenhum arquivo encontrado na pasta (Perfil: ${perfilInfo.nomePerfilAmigavel})`,
-        cause: `O perfil selecionado foi "${perfilInfo.nomePerfilAmigavel}" — ele espera arquivos do tipo: ${perfilInfo.tipoArquivoEsperado}.\nNão encontrei NENHUM arquivo (nem PDF, nem XLSX) em ${perfilInfo.pastaAlvo}.\nCausas mais comuns: (a) Ainda não colocaram os arquivos este mês; (b) A pasta está vazia; (c) EU NÃO TENHO PERMISSÃO DE LEITURA na pasta SharePoint (veja se você consegue abrir a URL abaixo manualmente); (d) O mês/ano escolhido ainda não tem documentação.`,
-        action: `1) ABRA A PASTA SharePoint clicando no link abaixo — se aparecer "Você não tem acesso" → PEÇA PERMISSÃO ao dono da pasta. 2) Confira se existem arquivos. 3) Confirme que os arquivos estão no formato certo: ${perfilInfo.tipoArquivoEsperado}. 4) Se for perfil de planilha (XLSX), certifique-se de não estar com arquivo PDF disfarçado salvo como .xlsx.`,
-        severity: 'Ação necessária',
-      });
-    }
-    if (input.totalFilesScanned > 0 && input.totalFilesMatched <= 0) {
-      const namesHint = scannedNames.length > 0
-        ? `\n\n📋 Arquivos QUE FORAM ENCONTRADOS: ${scannedNames.join(' | ')}`
-        : '';
-      issues.push({
-        title: `${input.totalFilesScanned} arquivo(s) encontrados — NENHUM compatível com "${perfilInfo.nomePerfilAmigavel}"`,
-        cause: `Foram encontrados ${input.totalFilesScanned} arquivo(s) na pasta, mas NENHUM bate com o perfil selecionado.\n\n📋 Perfil SELECIONADO AGORA: "${perfilInfo.nomePerfilAmigavel}"\n✅ Formato ESPERADO: ${perfilInfo.tipoArquivoEsperado}\n💡 Exemplos de nomes/formatos QUE FUNCIONAM: ${perfilInfo.exemploNomeArquivos}\n📂 Pasta pesquisada: ${perfilInfo.pastaAlvo}${namesHint}\n${perfilInfo.notasPerfil ? 'ℹ️ ' + perfilInfo.notasPerfil : ''}\n\nCausas MAIS COMUNS: (1) Tipo de importação errado na tela Automação; (2) Arquivo veio como PDF mas perfil espera XLSX (ou vice-versa); (3) Layout do órgão/banco MUDOU; (4) Extensão salva errada (ex: .pdf renomeado para .xlsx sem converter).`,
-        action: `1) NA TELA AUTOMAÇÃO → confira o campo "Tipo de importação" está correto. 2) Confira a EXTENSÃO do arquivo (botão direito → Propriedades): o nome pode parecer .xlsx mas ser .pdf disfarçado. 3) Abra o arquivo e confira o conteúdo: ${perfilInfo.tipoArquivoEsperado}. 4) Se tudo certo e ainda não bate → envie o arquivo para a TI atualizar o perfil.`,
-        severity: 'Ação necessária',
-      });
-    }
-    if (input.totalFilesMatched > 0 && input.totalRowsInserted <= 0 && input.totalRowsSkipped <= 0 && effectiveOutcome !== 'cancelled' && effectiveOutcome !== 'dup_ok') {
-      issues.push({
-        title: `${input.totalFilesMatched} arquivo(s) reconhecido(s) mas VAZIOS (sem linhas de dados) — ${perfilInfo.nomePerfilAmigavel}`,
-        cause: `O arquivo foi identificado como "${perfilInfo.nomePerfilAmigavel}" corretamente, mas NÃO TEM LINHAS para gravar.\nMais comum: (a) Planilha só tem a 1ª linha (cabeçalho) SEM dados abaixo; (b) PDF tem só as capas sem a tabela de operações; (c) ABA/sheet da planilha foi apagada ou renomeada; (d) Arquivo salvo em branco.`,
-        action: `1) Abra o arquivo MANUALMENTE (Excel para XLSX / navegador para PDF). 2) ROLA PARA BAIXO → confirme se existem linhas de dados (não só cabeçalho). 3) Se XLSX, confirme a ABA (sheet) ativa é a correta. 4) Se PDF SISBR → confira se as colunas Cliente / Matrícula / Operação aparecem com dados abaixo.`,
-        severity: 'Ação necessária',
-      });
-    }
-    if (hasAnySkip && effectiveOutcome !== 'cancelled') {
-      const totalFiles = Math.max(1, input.importedFiles.length);
-      const filesAllDup = input.importedFiles.filter(f => Number(f.skippedRows || 0) > 0 && Number(f.insertedRows || 0) === 0).length;
-      const filesPartialDup = input.importedFiles.filter(f => Number(f.skippedRows || 0) > 0 && Number(f.insertedRows || 0) > 0).length;
-      if (allSkippedZeroInsert && effectiveOutcome === 'dup_ok') {
-        issues.push({
-          title: `${input.totalRowsSkipped} linha(s) já existiam e foram preservadas (${perfilInfo.nomePerfilAmigavel})`,
-          cause: `Sistema de segurança (hash SHA-256 por linha) ativou automaticamente — você nunca importará o mesmo dado 2x por engano.\n\nTodos os arquivos desta rodada (${filesAllDup}/${totalFiles}) já haviam sido importados completamente em uma ocasião anterior.\n\n✅ NÃO é um erro. É comportamento desejado.`,
-          action: `Nenhuma ação necessária. Se QUISER MESMO reimportar (porque alterou dado do arquivo e quer substituir), primeiro remova as linhas antigas da tabela (solicite à TI se não tiver acesso) e rode novamente.`,
-          severity: 'Informativo',
-        });
-      } else {
-        const dupCause = filesAllDup === totalFiles
-          ? `Todos os ${totalFiles} arquivo(s) já foram importados ANTES no seu TODO (100% duplicata, antiduplicata).`
-          : filesPartialDup > 0
-          ? `${filesPartialDup} arquivo(s) são PARCIAIS: parte entrou como NOVA e parte já existia (pulou as antigas).`
-          : `Algumas linhas já existiam ou foram puladas.`;
-        issues.push({
-          title: `${input.totalRowsSkipped} linha(s) pulada(s) no perfil ${perfilInfo.nomePerfilAmigavel}`,
-          cause: `${dupCause}\n\nOutro motivo possível (SE NÃO é duplicata): algumas linhas do arquivo NÃO passaram pelos CRITÉRIOS do perfil "${perfilInfo.nomePerfilAmigavel}". Exemplo: coluna "Competência" vazia; valor na coluna diferente do esperado; linha com R$ 0,00 ou data inválida.`,
-          action: `1) PRIMEIRO → abra a tabela "Arquivos processados" ABAIXO e veja em QUAL arquivo pulou mais linhas. 2) SEGUNDO → confira se VOCÊ JÁ RODOU este arquivo antes (nessa caso é NORMAL). 3) TERCEIRO → se NUNCA rodou e pulou mesmo assim, abra o arquivo XLSX/PDF e confira as colunas esperadas: ${perfilInfo.tipoArquivoEsperado}.`,
-          severity: hasAnyInsert ? 'Verificar' : 'Ação necessária',
-        });
-      }
-    }
-    if (err.length > 0) {
-      if (isDatabaseClosedError(err as unknown as Error)) {
-        issues.push({
-          title: 'Erro interno de banco (Database closed)',
-          cause: 'O handle interno do SQLite foi invalidado (reload do backend em andamento ou hot reload Nest).',
-          action: 'Rode a importação novamente em 1 minuto — o backend já reabre automaticamente. Se persistir, reinicie o backend NestJS ou o serviço PM2 em produção.',
-          severity: 'Ação necessária',
-        });
-      } else if (/unauthorized|401|403|forbidden|access.?denied|permiss/i.test(errLower)) {
-        issues.push({
-          title: `🚫 SEM PERMISSÃO de leitura na pasta SharePoint (Perfil: ${perfilInfo.nomePerfilAmigavel})`,
-          cause: `O serviço NÃO consegue ler a pasta. Isso NÃO é bug do código.\n\nDiagnóstico exato: a credencial do Graph está SEM ACESSO na URL do SharePoint que você configurou para "${perfilInfo.nomePerfilAmigavel}".\n\nAs 3 causas + ações, em ordem de probabilidade:\n\n1) 🚫 MAIS COMUM: VOCÊ (usuário humano) NÃO TEM PERMISSÃO na pasta. Para testar: COLE a URL SharePoint ABAIXO no seu navegador. Se aparecer "Desculpe, você não tem acesso → o erro é PERMISSÃO DA PASTA.\n2) 🚫 SEGUNDO MAIS COMUM: o Service Principal (aplicativo Azure) não foi adicionado à permissão "Leitura" do Site/Site SharePoint.\n3) Terceiro: Client Secret do Azure AD expirou.`,
-          action: `PASSO-A-PASSO PARA CORRIGIR:\n\n(a) ABRA a URL SharePoint no final deste e-mail usando SEU USUÁRIO.\n(b) Se você NÃO CONSEGUIR abrir → CLIQUE em "Solicitar acesso" ou peça ao DONO DA PASTA (gestor da área) para adicionar VOCÊ (e a TI) com PERMISSÃO DE LEITURA.\n(c) Se VOCÊ CONSEGUIR abrir mas o sistema não → informe a TI: "Adicionar Service Principal App Registration Portal Administrativo como Leitura no site SharePoint."\n(d) Espere 2 minutos após dar permissão e rode a importação novamente.`,
-          severity: 'Ação necessária',
-        });
-      } else if (/not.?found|404|itemNotFound/i.test(errLower)) {
-        issues.push({
-          title: `Pasta SharePoint NÃO EXISTE ou URL mudou (Perfil: ${perfilInfo.nomePerfilAmigavel})`,
-          cause: `A URL configurada na Automação para ${perfilInfo.pastaAlvo} foi removida, renomeada, ou o ANO/MÊS selecionado ainda não foi criado.`,
-          action: `1) Abra a URL SharePoint NO FINAL do e-mail. Se der erro 404 → URL ERRADA. 2) Na tela Automação, atualize a URL Configuração → Colar a URL NOVA. 3) Não se esqueça de criar a subpasta "Relatório Sisbr" no caso do perfil SISBR, ou a pasta do MÊS/ANO.`,
-          severity: 'Ação necessária',
-        });
-      } else if (/corrupt|invalid file|unsupported format|password|protect|couldn'?t be parsed|buffer|xlsx|sheet|workbook/i.test(errLower)) {
-        issues.push({
-          title: `⚠️ Arquivo inválido, corrompido ou com senha (${perfilInfo.nomePerfilAmigavel})`,
-          cause: `Não consegui abrir um dos arquivos.\n\nCausas típicas no ${perfilInfo.nomePerfilAmigavel}: (a) arquivo estava aberto NO EXCEL de outra pessoa (LOCKED); (b) download de e-mail incompleto; (c) arquivo protegido por SENHA; (d) renomeou extensão manualmente (ex: .msg → .xlsx SEM converter); (e) planilha tem MACROS e corrupção do Excel; (f) PDF criptografado pelo emissor.`,
-          action: `1) FECHE o arquivo se estiver aberto no Excel/PDF Reader de OUTRAS PESSOAS. 2) Tente ABRIR o arquivo MANUALMENTE — se pede SENHA → Salvar como → remover senha. 3) Se foi baixado de e-mail, baixe NOVAMENTE. 4) Se XLSX: Arquivo → Informações → Verificar se tem "Pasta de Trabalho Protegida" → Clique em "Habilitar Edição".`,
-          severity: 'Ação necessária',
-        });
-      } else if (/duplicate|hash|já exist|already exis|same file|same content|imported_row_hashes/i.test(errLower) || (input.totalRowsInserted === 0 && input.totalRowsSkipped > 0)) {
-        issues.push({
-          title: `Arquivo ou linhas já haviam sido importadas (${perfilInfo.nomePerfilAmigavel})`,
-          cause: `Antiduplicata ativou — hash do arquivo ou das linhas já existe no banco. É esperado se você rodou o mesmo arquivo mais de uma vez no ${perfilInfo.nomePerfilAmigavel}.`,
-          action: 'Se quer importar de novo, primeiro remova as linhas antigas da tabela ou use um arquivo com dados novos.',
-          severity: 'Informativo',
-        });
-      } else if (/historicoStrict|cred\.?ted|histórico|filtro histó|skipped by historico strict/i.test(errLower)) {
-        issues.push({
-          title: `Filtro estrito do perfil rejeitou linhas (${perfilInfo.nomePerfilAmigavel})`,
-          cause: `O perfil "${perfilInfo.nomePerfilAmigavel}" exige um valor exato para alguma coluna (ex: HISTÓRICO = CRÉD.TED-STR em alguns perfis de EXTRATO) e algumas linhas tem valor DIFERENTE.\n\n${perfilInfo.notasPerfil ? 'Nota do perfil: ' + perfilInfo.notasPerfil : ''}`,
-          action: 'Confira no arquivo se todas as linhas que quer importar possuem exatamente o valor esperado no filtro do perfil. Abra a tabela Excel e filtre a coluna HISTÓRICO / correspondente para ver valores diferentes.',
-          severity: 'Verificar',
-        });
-      } else {
-        issues.push({
-          title: 'Erro inesperado durante o processamento',
-          cause: 'Mensagem técnica: ' + err.slice(0, 500),
-          action: 'Rode a importação novamente. Se continuar, envie este e-mail para a TI — anexe também o arquivo Excel que deu problema.',
-          severity: 'Ação necessária',
-          detail: err,
-        });
-      }
-    }
-
-    const statusBannerHtml = `
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 22px;border-radius:14px;background:${display.bg};border:1px solid ${display.border};">
-        <tr>
-          <td style="padding:18px 20px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-              <tr>
-                <td valign="middle" width="44" style="padding:0 12px 0 0;font-size:28px;line-height:1;">${display.emoji}</td>
-                <td valign="middle" style="padding:0;">
-                  <div style="font-size:20px;font-weight:900;letter-spacing:-.02em;color:${display.accent};line-height:1.35;margin:0 0 6px;">${display.title}</div>
-                  <div style="font-size:13.5px;line-height:1.55;color:#0f172a;font-weight:600;">${display.summary}</div>
-                </td>
-              </tr>
-              <tr><td colspan="2" style="padding:12px 0 0;font-size:0;line-height:0;">&nbsp;</td></tr>
-              <tr>
-                <td colspan="2">
-                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#fff;margin:0 6px 6px 0;">${display.pillLabel}</span>
-                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:900;background:#1e3a8a;color:#eff6ff;margin:0 6px 6px 0;">📋 Perfil: ${escapeHtml(perfilInfo.nomePerfilAmigavel)}</span>
-                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#065f46;color:#ecfdf5;margin:0 6px 6px 0;">✅ Espera: ${escapeHtml(perfilInfo.tipoArquivoEsperado)}</span>
-                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#0f172a;color:#f8fafc;margin:0 6px 6px 0;">${escapeHtml(forceKindDisplay)}</span>
-                  <span style="display:inline-block;padding:4px 10px;border-radius:999px;font-size:11.5px;font-weight:800;background:#334155;color:#f8fafc;margin:0 0 6px;">Modo ${escapeHtml(modeDisplay)}</span>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-      </table>
-    `;
-
-    const summaryHtml = `
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:10px 0;margin:0 0 16px;width:calc(100% + 20px);margin-left:-10px;">
-        <tr>
-          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;">
-            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;margin:0 0 6px;">Arquivos varridos</div>
-            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalFilesScanned}</div>
-            <div style="font-size:11px;color:#1e3a8a;margin-top:5px;font-weight:700;line-height:1.35;">Encontrados na pasta</div>
-            ${scannedNamesDisplay ? `<div style="margin-top:8px;">${scannedNamesDisplay}</div>` : ''}
-          </td>
-          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;">
-            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;margin:0 0 6px;">Compatíveis</div>
-            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalFilesMatched}</div>
-            <div style="font-size:11px;color:#0f766e;margin-top:5px;font-weight:700;line-height:1.35;">Batem com perfil</div>
-          </td>
-          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;">
-            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;margin:0 0 6px;">Linhas inseridas</div>
-            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalRowsInserted}</div>
-            <div style="font-size:11px;color:#14532d;margin-top:5px;font-weight:700;line-height:1.35;">Gravadas no banco</div>
-          </td>
-          <td width="25%" valign="top" style="padding:16px 12px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;">
-            <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;margin:0 0 6px;">Linhas puladas</div>
-            <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;color:#0f172a;line-height:1.1;">${input.totalRowsSkipped}</div>
-            <div style="font-size:11px;color:#92400e;margin-top:5px;font-weight:700;line-height:1.35;">Filtro/duplicata</div>
-          </td>
-        </tr>
-      </table>
-      ${folderShort
-        ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 22px;border-radius:12px;background:#f1f5f9;border:1px solid #cbd5e1;">
-             <tr><td style="padding:14px 16px;">
-               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-                 <td width="52" valign="top" style="padding:0 10px 0 0;"><div style="font-size:22px;line-height:1;">📁</div></td>
-                 <td valign="top" style="font-size:12.5px;line-height:1.55;color:#0f172a;">
-                   <div style="font-weight:900;margin:0 0 4px;">Origem (SharePoint)</div>
-                   <a href="${escapeAttr(folderShort)}" target="_blank" rel="noopener noreferrer" style="color:#0369a1;font-weight:700;word-break:break-all;text-decoration:none;">${escapeHtml(folderShort)}</a>
-                 </td>
-               </tr></table>
-             </td></tr>
-           </table>`
-        : ''
-      }
-    `;
-
-    const issuesHtml = issues.length > 0
-      ? (() => {
-          const hasAcao = issues.some(i => i.severity === 'Ação necessária');
-          const hasVer = issues.some(i => i.severity === 'Verificar');
-          const hasInfo = issues.some(i => i.severity === 'Informativo');
-          const headerColor = hasAcao ? '#b91c1c' : hasVer ? '#b45309' : '#075985';
-          const headerText = hasAcao
-            ? '🔴 Atenção: é preciso agir'
-            : hasVer
-            ? '⚠️ Atenção: recomendamos verificar'
-            : '📋 Observações';
-          const cards = issues.map((it) => {
-            const sevColor = it.severity === 'Ação necessária'
-              ? { bg: '#fef2f2', border: '#fecaca', label: '#b91c1c', icon: '🔴' }
-              : it.severity === 'Verificar'
-              ? { bg: '#fffbeb', border: '#fde68a', label: '#b45309', icon: '🟡' }
-              : { bg: '#eff6ff', border: '#bfdbfe', label: '#075985', icon: '🔵' };
-            const sevLabel = it.severity === 'Informativo' ? 'Informativo' : it.severity;
-            return `
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:12px;border-radius:14px;background:${sevColor.bg};border-left:5px solid ${sevColor.label};border-top:1px solid ${sevColor.border};border-right:1px solid ${sevColor.border};border-bottom:1px solid ${sevColor.border};">
-                <tr>
-                  <td style="padding:14px 16px;">
-                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-                      <tr>
-                        <td width="22" valign="top" style="font-size:14px;padding:2px 10px 0 0;line-height:1;">${sevColor.icon}</td>
-                        <td valign="top">
-                          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-                            <td valign="middle" style="padding:0 8px 8px 0;">
-                              <span style="display:inline-block;padding:3px 10px;border-radius:999px;background:${sevColor.label};color:#fff;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;">${sevLabel}</span>
-                            </td>
-                          </tr></table>
-                          <div style="font-size:14.5px;font-weight:900;color:#0f172a;line-height:1.35;margin:0 0 10px;">${escapeHtml(it.title)}</div>
-                          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:12px 0;width:calc(100% + 24px);margin-left:-12px;">
-                            <tr>
-                              <td width="50%" valign="top" style="background:rgba(255,255,255,.55);border-radius:10px;padding:10px 12px;border:1px solid rgba(0,0,0,0.04);">
-                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">🧭 Por que aconteceu</div>
-                                <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;white-space:pre-wrap;">${escapeHtml(it.cause)}</div>
-                              </td>
-                              <td width="50%" valign="top" style="background:#ffffff;border-radius:10px;padding:10px 12px;border:1px solid ${sevColor.border};">
-                                <div style="font-size:10.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f172a;margin:0 0 5px;">✅ O que fazer</div>
-                                <div style="font-size:12.5px;line-height:1.55;color:#0f172a;font-weight:600;white-space:pre-wrap;">${escapeHtml(it.action)}</div>
-                              </td>
-                            </tr>
-                          </table>
-                          ${it.detail ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:10px;"><tr><td style="padding:10px 12px;border-radius:8px;background:rgba(255,255,255,.7);border:1px dashed ${sevColor.border};font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;color:#111827;white-space:pre-wrap;word-break:break-word;">${escapeHtml(String(it.detail).slice(0, 1500))}</td></tr></table>` : ''}
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-            `;
-          }).join('');
-          return `
-            <div style="margin:0 0 26px;">
-              <div style="font-size:16px;font-weight:900;letter-spacing:-.01em;color:${headerColor};margin-bottom:12px;">${headerText}</div>
-              ${cards}
-            </div>`;
-        })()
-      : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:0 0 26px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#bbf7d0 100%);border:1px solid #86efac;">
-           <tr><td style="padding:16px 18px;">
-             <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
-               <td width="30" valign="middle" style="font-size:20px;padding:0 10px 0 0;line-height:1;">✅</td>
-               <td valign="middle">
-                 <div style="font-weight:900;font-size:14px;color:#14532d;margin:0 0 3px;line-height:1.2;">Tudo certo</div>
-                 <div style="font-size:12.5px;line-height:1.55;color:#14532d;font-weight:600;">Nenhum problema encontrado. Pode fechar este e-mail.</div>
-               </td>
-             </tr></table>
-           </td></tr>
-         </table>`;
+    const effectiveOutcome = input.outcome === 'success' ? (isOk ? 'success' : (input.totalRowsSkipped > 0 ? 'partial' : 'success')) : input.outcome;
 
     const tableRowsHtml = input.importedFiles.length > 0
       ? `<table width="100%" cellpadding="8" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px;color:#0f172a;background:#ffffff;border:1px solid #cbd5e1;border-radius:14px;overflow:hidden;">
           <thead>
             <tr style="background:#0f172a;color:#f8fafc;">
               <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Arquivo</th>
-              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Onde foi salvo</th>
-              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Novas</th>
-              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Já existiam</th>
-              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Situação</th>
+              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Tabela</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Inseridas</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Puladas</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Status</th>
             </tr>
           </thead>
           <tbody>
             ${input.importedFiles.map((f, i) => {
               const insOk = Number(f.insertedRows || 0) > 0;
               const skip = Number(f.skippedRows || 0);
-              let statusLabel = '—';
-              let statusColor = '#334155';
-              if (insOk && skip === 0) { statusLabel = 'Tudo novo salvo'; statusColor = '#14532d'; }
-              else if (insOk && skip > 0) { statusLabel = 'Salvo (tem repetido)'; statusColor = '#92400e'; }
-              else if (!insOk && skip > 0) { statusLabel = 'Já importado antes'; statusColor = '#075985'; }
-              else { statusLabel = 'Sem alterações'; statusColor = '#334155'; }
+              const statusLabel = insOk ? (skip > 0 ? 'Processado parcial' : 'Importado') : (skip > 0 ? 'Pulado' : 'Sem alterações');
+              const statusColor = insOk ? (skip > 0 ? '#92400e' : '#14532d') : (skip > 0 ? '#991b1b' : '#334155');
               const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
               return `<tr style="background:${rowBg};color:#0f172a;">
-                <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;word-break:break-all;font-weight:700;">${escapeHtml(f.fileName)}</td>
+                <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;word-break:break-all;font-weight:600;">${escapeHtml(f.fileName)}</td>
                 <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;">${escapeHtml(f.targetTable || f.kind || '-')}</td>
                 <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#0f766e;">${f.insertedRows ?? 0}</td>
                 <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#9a3412;">${f.skippedRows ?? 0}</td>
@@ -28656,53 +26834,61 @@ export async function sendImportFinishedEmailNotification(input: {
             }).join('')}
           </tbody>
         </table>`
-      : `<div style="padding:16px 18px;border-radius:12px;background:#fef2f2;border:1px dashed #fca5a5;color:#991b1b;font-size:13px;font-weight:700;">Nenhum arquivo foi processado nesta execução.</div>`;
+      : `<div style="padding:16px 18px;border-radius:12px;background:#fef2f2;border:1px dashed #fca5a5;color:#991b1b;font-size:13px;font-weight:600;">Nenhum arquivo foi processado nesta execução.</div>`;
 
-    const techHtml = `
-      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:26px;border-radius:12px;background:#f8fafc;border:1px solid #cbd5e1;">
-        <tr><td style="padding:14px 16px;">
-          <div style="font-weight:900;font-size:12.5px;letter-spacing:.02em;color:#334155;margin:0 0 10px;">ℹ️ Dados técnicos (só para a TI)</div>
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-            <tr>
-              <td width="50%" valign="top" style="padding:0 12px 8px 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Tipo importação:</b> ${escapeHtml(forceKindDisplay)}</td>
-              <td width="50%" valign="top" style="padding:0 0 8px 12px;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Modo:</b> ${escapeHtml(modeDisplay)}</td>
-            </tr>
-            <tr>
-              <td valign="top" style="padding:0 12px 8px 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Resultado sistema:</b> ${escapeHtml(input.outcome)}</td>
-              <td valign="top" style="padding:0 0 8px 12px;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Resultado exibido:</b> ${escapeHtml(effectiveOutcome)}</td>
-            </tr>
-            <tr>
-              <td colspan="2" valign="top" style="padding:4px 0 0;font-size:12px;line-height:1.55;color:#0f172a;"><b style="font-weight:800;">Perfis usados:</b> ${input.importedFiles.length === 0 ? 'Nenhum' : input.importedFiles.map(f => `${escapeHtml(f.fileName)} → ${escapeHtml(f.profileId || '(sem perfil)')}`).join('<br>')}</td>
-            </tr>
-          </table>
-          ${err ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-top:10px;"><tr><td style="padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.45;"><b style="font-weight:900;">Detalhe técnico:</b><br>${escapeHtml(err)}</td></tr></table>` : ''}
-        </td></tr>
-      </table>
-    `;
-
-    const finalContentHtml = statusBannerHtml + summaryHtml + issuesHtml +
-      `<div style="margin:0 0 8px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">📄 Arquivos processados</div>` +
-      tableRowsHtml + techHtml;
+    const summaryHtml = `
+      <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin:0 0 22px;">
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;color:#1e3a8a;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;">Arquivos varridos</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalFilesScanned}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;color:#0f766e;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;">Compatíveis</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalFilesMatched}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;color:#14532d;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;">Linhas inseridas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalRowsInserted}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;color:#92400e;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;">Linhas puladas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${input.totalRowsSkipped}</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:12px;margin:0 0 26px;">
+        <div style="padding:16px 18px;border-radius:14px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px;color:#334155;">Tipo de importação</div>
+          <div style="font-weight:900;font-size:16px;color:#0f172a;">${escapeHtml(forceKindDisplay)}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:#f8fafc;border:1px solid #cbd5e1;color:#0f172a;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;margin-bottom:6px;color:#334155;">Modo</div>
+          <div style="font-weight:900;font-size:16px;color:#0f172a;">${escapeHtml(modeDisplay)}</div>
+        </div>
+      </div>
+      ${folderShort
+        ? `<div style="margin:0 0 22px;padding:14px 16px;border-radius:12px;background:#f1f5f9;border:1px solid #cbd5e1;color:#0f172a;font-size:12.5px;line-height:1.6;word-break:break-all;font-weight:600;">
+            <b style="color:#0f172a;">Origem (SharePoint):</b><br>${escapeHtml(folderShort)}
+          </div>`
+        : ''
+      }
+      ${input.errorMessage
+        ? `<div style="margin:0 0 22px;padding:16px 18px;border-radius:14px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;line-height:1.6;font-weight:600;">
+            <div style="font-weight:900;font-size:15px;margin-bottom:8px;">Erro reportado</div>
+            <div style="font-size:13px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(String(input.errorMessage).slice(0, 4000))}</div>
+          </div>`
+        : ''
+      }
+      <div style="margin:0 0 16px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">Detalhamento por arquivo</div>
+      ${tableRowsHtml}`;
 
     const html = buildEmailTemplateHtml({
-      title: 'Portal Administrativo',
-      subtitle: `${display.emoji} ${display.title} • ${forceKindDisplay}`,
-      contentHtml: finalContentHtml,
-      accentColor: display.accent,
-      introHtml: `<span style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${display.emoji} ${display.pillLabel}</span>`,
+      title: display.title,
+      subtitle: `${display.sub} • ${forceKindDisplay} • ${modeDisplay.toUpperCase()}`,
+      contentHtml: summaryHtml,
+      introHtml: `<div style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${effectiveOutcome === 'success' ? 'Sucesso' : effectiveOutcome === 'partial' ? 'Parcial' : effectiveOutcome === 'failed' ? 'Falha' : 'Cancelado'}</div>`,
     });
     const dataIso = new Date().toISOString().replace('T', ' ').slice(0, 16);
-    const subjectPrefix =
-      effectiveOutcome === 'success' ? '✅' :
-      effectiveOutcome === 'dup_ok'  ? '📬' :
-      effectiveOutcome === 'partial' ? '⚠️' :
-      effectiveOutcome === 'failed'  ? '❌' : '⏹️';
-    const subjectStatus =
-      effectiveOutcome === 'success' ? 'OK' :
-      effectiveOutcome === 'dup_ok'  ? 'Sem dados novos' :
-      effectiveOutcome === 'partial' ? 'PARCIAL' :
-      effectiveOutcome === 'failed'  ? 'FALHA' : 'CANCELADA';
-    const subject = `[Portal Administrativo] ${subjectPrefix} Importação ${subjectStatus} • ${forceKindDisplay} (${dataIso})`;
+    const subject = `[Portal Administrativo] Importação ${effectiveOutcome === 'success' ? 'OK' : effectiveOutcome === 'failed' ? 'FALHA' : effectiveOutcome === 'partial' ? 'PARCIAL' : 'CANCELADA'} • ${forceKindDisplay} (${dataIso})`;
     await sendGraphMail({
       token,
       from: notificationFrom,
@@ -28712,8 +26898,6 @@ export async function sendImportFinishedEmailNotification(input: {
       importance: effectiveOutcome === 'success' ? 'normal' : 'high',
     });
     out.sent = true;
-    __importNotificationSent.set(idempotencyKey, Date.now());
-    if (input.jobSentFlagRef) input.jobSentFlagRef.value = true;
     return out;
   } catch (e) {
     out.attempted = out.attempted || true;
@@ -29402,7 +27586,8 @@ export async function requestConciliacaoPorDataValidation(opts: {
   const hasClosedRowForDate = Array.isArray((preview as any)?.rows)
     ? (preview as any).rows.some((row: any) => {
         const rowDate = String(row?.liquidationDate ?? '').trim();
-        return rowDate === liquidationDate;
+        if (rowDate !== liquidationDate) return false;
+        return !/^DEVOLUÇÃO\b/i.test(String(row?.event ?? '').trim());
       })
     : false;
   if (!hasClosedRowForDate) {
@@ -30218,9 +28403,6 @@ function findLearningProfilesFor(db: Database, url: string, forceKind?: string):
         if (i.startsWith('extratos_tre_trt')) return 30;
         if (i.startsWith('extratos_tre')) return 20;
         if (i.startsWith('extratos_trt')) return 20;
-        if (i.startsWith('extratos_todos')) return 18;
-        if (i.startsWith('extratos_adfego')) return 17;
-        if (i.startsWith('extratos_eletra')) return 16;
         if (i.startsWith('extratos_recurso')) return 10;
         if (i.startsWith('recurso_tre')) return 5;
         if (i.startsWith('recurso_trt')) return 5;
@@ -30370,26 +28552,7 @@ function addMissingColumnsAndImportRows(
         return String(v);
       });
       if (checkDuplicateContent && hashExists) {
-        // ====== REGRA OBRIGATÓRIA: só pula se Nome + CPF + Copetencia + Contrato + N° Parcela forem IGUAIS. ======
-        // Garante que colunas acima SEMPRE entram no hash, independente de importCols (perfil whitelist 9 cols NEOCONSIG não inclui Copetencia explicitamente no headers)
-        const rowObjForced: Record<string, unknown> = Object.fromEntries(importCols.map((c, i) => [c, vals[i]]));
-        const forcedColsSeed = [
-          'Copetencia','Nome','CPF','Contrato','N° Parcela',
-          'Competencia','Matrícula','Matricula','Órgão','Orgao','Secretaria','SECRETARIA',
-          '__competencia','Copetência','COMPETENCIA','COMPETÊNCIA',
-        ].filter((c, idx, arr) => arr.indexOf(c) === idx);
-        const forcedPrefix = forcedColsSeed
-          .map(c => {
-            let v: unknown;
-            if (Object.prototype.hasOwnProperty.call(rowObjForced, c)) v = rowObjForced[c];
-            else if (extraStaticColumns && Object.prototype.hasOwnProperty.call(extraStaticColumns, c)) v = extraStaticColumns[c];
-            else v = '';
-            return `${c}=${toStableValue(v)}`;
-          })
-          .join('\u001E');
-        const rhForced = crypto.createHash('sha256').update(forcedPrefix, 'utf8').digest('hex').slice(0, 16);
-        const rhBase = hashRow(kind, importCols, rowObjForced);
-        const rh = crypto.createHash('sha256').update(`${rhForced}|${rhBase}`, 'utf8').digest('hex');
+        const rh = hashRow(kind, importCols, Object.fromEntries(importCols.map((c, i) => [c, vals[i]])));
         hashExists.bind([kind, rh] as unknown as any[]);
         const found = hashExists.step();
         try { hashExists.reset(); } catch { /* ignore */ }
@@ -30437,7 +28600,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     skippedRows: number;
     headers: string[];
     skippedReason?: string;
-    debugSisbr?: unknown;
   }>;
   totalFilesScanned: number;
   totalFilesMatched: number;
@@ -30468,15 +28630,11 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   }>;
   dbFilePath: string | null;
 }> {
-  return withRetryOnDbClosed('importByLearningProfileFromFolderUrl', async (attempt) => {
-  type FileCandidate = { id: string; name: string; lastModifiedDateTime?: string; folderPath?: string; parentId?: string | null };
   let modeLabel: 'append' | 'replace' = 'append';
   const targetTableNameRef: { value: string | null } = { value: null };
   const movedToImportadosTracker: { ok: boolean; count: number; firstError: string } = { ok: false, count: 0, firstError: '' };
-  const __jobNotificationSentRef: { value: boolean } = { value: false };
   const __dbgTop = __dbg_loaded({ env: true });
   let folderUrl = String(opts.folderUrl ?? '').trim();
-  const candidates: FileCandidate[] = [];
   const importedFiles: Array<{
     fileName: string;
     targetTable: string;
@@ -30486,12 +28644,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     skippedRows: number;
     headers: string[];
     skippedReason?: string;
-    debugSisbr?: unknown;
   }> = [];
   let totalFilesScanned = 0;
   let totalFilesMatched = 0;
   let totalRowsInserted = 0;
   let totalRowsSkipped = 0;
+  const tablesCreatedAgg = new Map<string, { insertedRows: number; skippedRows: number }>();
   let singleSnapPath: string | null | undefined = undefined;
   const _fireProgressIfAny = (extra?: { file?: { idx: number; fileName: string; targetTable?: string; insertedRows: number; skippedRows: number; skippedReason?: string }; endedBatch?: boolean }) => {
     try {
@@ -30654,6 +28812,22 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   const tokenPair = await getSharePointAndTeamsDelegatedTokenForAutomation(db);
   const accessToken = tokenPair.accessToken;
 
+  const importedFiles: Array<{
+    fileName: string;
+    targetTable: string;
+    kind: string;
+    profileId: string;
+    insertedRows: number;
+    skippedRows: number;
+    headers: string[];
+    skippedReason?: string;
+  }> = [];
+
+  let totalFilesScanned = 0;
+  let totalFilesMatched = 0;
+  let totalRowsInserted = 0;
+  let totalRowsSkipped = 0;
+
   try {
     try {
     // Step 1: resolve folder or specificFile (with ADFEGO expansion fallback for security trimming)
@@ -30670,6 +28844,8 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       folderUrl = fallbackDbUrl;
     }
 
+    type FileCandidate = { id: string; name: string; lastModifiedDateTime?: string; folderPath?: string; parentId?: string | null };
+    const candidates: FileCandidate[] = [];
     const seenIds = new Set<string>();
     const pushCandidate = (c: FileCandidate) => {
       if (!c?.id) return;
@@ -30791,16 +28967,23 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                     defaultSubfolders.push('Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso');
                   }
                   if (forceKindRelatorio) {
-                    defaultSubfolders.push('Relatórios de Órgão', 'Relatório de Órgão', 'Relatorios de Orgao', 'Relatorio de Orgao',
-                      'Relatórios Orgão', 'Relatório Orgão', 'Relatorios Orgao', 'Relatorio Orgao',
-                      'Relatório Sisbr', 'Relatorios Sisbr', 'Relatório SISBR', 'Sisbr', 'SISBR', 'sisbr');
+                    defaultSubfolders.push(
+                      'Relatórios SISBR',
+                      'Relatorios SISBR',
+                      'Relatório SISBR',
+                      'Relatorio SISBR',
+                      'Relatório Sisbr',
+                      'Relatorios Sisbr',
+                      'Sisbr',
+                      'SISBR',
+                      'sisbr',
+                    );
                   }
                   const extratosExpanded = await expandRecursoExtratosAnoMesCorrenteCandidates({
                     token: accessToken,
                     driveId: driveIdForExpansion,
                     baseFolderId: driveIdForExpansion,
                     basePath: parsedUrl.restPath || 'Recuperação de Crédito',
-                    rootFolderNameHint: (parsedUrl.restPath || '').split('/').filter(Boolean).pop() || '',
                     subfolderCandidates: defaultSubfolders,
                     permitirPdfSisbr: forceKindRelatorio,
                   });
@@ -30958,29 +29141,19 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         const defaultSubfoldersForDef: string[] = [];
         if (forceKindExtratos) {
           defaultSubfoldersForDef.push('Extrato Recurso', 'Extratos Recurso', 'Extrato de Recurso', 'Extratos de Recurso');
-          const envExtratosSubfolder = String(process.env.SHAREPOINT_EXTRATOS_SUBFOLDER ?? '').trim();
-          if (envExtratosSubfolder) defaultSubfoldersForDef.push(envExtratosSubfolder);
-          // Se tiver learning profiles de extratos no BD com folderCandidates customizado,
-          // inclui também (garante que perfis como extratos_todos_go com subpasta "TODOS" sejam visitados
-          // na expansão ano/mês corrente, mesmo fallback de segurança que já existe p/ relatório).
-          try {
-            const profilesExtratos = profiles.filter((p) => String(p.kind ?? '').trim().toLowerCase() === 'extratos');
-            for (const profileExtrato of profilesExtratos) {
-              if (
-                profileExtrato?.resolvedOptions &&
-                Array.isArray((profileExtrato.resolvedOptions as { folderCandidates?: string[] }).folderCandidates)
-              ) {
-                for (const fc of (profileExtrato.resolvedOptions as { folderCandidates: string[] }).folderCandidates) {
-                  if (typeof fc === 'string' && fc.trim()) defaultSubfoldersForDef.push(fc.trim());
-                }
-              }
-            }
-          } catch { /* ignore */ }
         }
         if (forceKindRelatorio) {
-          defaultSubfoldersForDef.push('Relatórios de Órgão', 'Relatório de Órgão', 'Relatorios de Orgao', 'Relatorio de Orgao',
-            'Relatórios Orgão', 'Relatório Orgão', 'Relatorios Orgao', 'Relatorio Orgao',
-            'Relatório Sisbr', 'Relatorios Sisbr', 'Relatório SISBR', 'Sisbr', 'SISBR', 'sisbr');
+          defaultSubfoldersForDef.push(
+            'Relatórios SISBR',
+            'Relatorios SISBR',
+            'Relatório SISBR',
+            'Relatorio SISBR',
+            'Relatório Sisbr',
+            'Relatorios Sisbr',
+            'Sisbr',
+            'SISBR',
+            'sisbr',
+          );
           // Se tiver um learning profile para relatorio no BD com folderCandidates customizado, usa também (redundância segura)
           try {
             const profileRelatorio = profiles.find((p) => String(p.kind ?? '').trim().toLowerCase() === 'relatorio');
@@ -30996,7 +29169,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           driveId,
           baseFolderId: rootFolderId,
           basePath: String(resolved?.folderPath ?? resolvedItemName ?? '').trim(),
-          rootFolderNameHint: resolvedItemName,
           subfolderCandidates: defaultSubfoldersForDef,
           permitirPdfSisbr: forceKindRelatorio,
         });
@@ -31021,12 +29193,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         const queue: Array<{ id: string; depth: number; path: string }> = [{ id: rootFolderId, depth: 0, path: resolvedItemName }];
         const visited = new Set<string>();
         const isDoc = (n: string) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(n ?? '').trim());
-        const isRelevantFileBfs = (n: string): boolean => {
-          if (isDoc(n)) return true;
-          const lower = String(n ?? '').trim().toLowerCase();
-          return /\.(pdf)$/i.test(lower) &&
-            /(relat[oó]rio|extrato|recurso|tribunal|justi[cç]a|contas|eleitoral|trabalho|ministerio|mpgo|eletra|alego|neoconsig|tjgo|tce|tcm|tre|trt|adfego|sisbr|convenio|mp\s|precatorio)/i.test(lower);
-        };
         while (queue.length > 0) {
           const cur = queue.shift();
           if (!cur) break;
@@ -31039,7 +29205,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             children = [];
           }
           for (const c of children) {
-            if (c.file && isRelevantFileBfs(String(c.name ?? ''))) {
+            if (c.file && isDoc(String(c.name ?? ''))) {
               totalFilesScanned += 1;
               pushCandidate({
                 id: c.id,
@@ -31109,23 +29275,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         });
 
       let profile: LearningProfileMatch | null = matchingProfiles[0] ?? null;
-
-      // ================ v7.13 HOTFIX PERFIL EXCLUSIVO recurso_mpgo ================
-      // REGRA NOVA USUÁRIO 04/09/2026 (autorizada VERBATIM):
-      //   "se for competencia diferente não pode pular / só se nome+cpf+competencia for iguais"
-      // Implementação: desativamos completamente a camada 2 (SHA256 por linha imported_row_hashes).
-      // Apenas a CAMADA 1 (SHA256 arquivo INTEIRO) permanece ativa como proteção idempotência.
-      // Forçado aqui (antes de resolvedOptions ser consumido) para valer independente
-      // do options_json que já exista na tabela import_learning_profiles.
-      if (profile && String(profile.id || '').toLowerCase() === 'recurso_mpgo') {
-        profile = {
-          ...profile,
-          resolvedOptions: {
-            ...(profile.resolvedOptions || {}),
-            checkDuplicateContent: false,
-          },
-        };
-      }
 
       // Profile virtual: se Tipo=Extratos e arquivo é planilha mas não tem Learning Profile salvo no BD,
       // aceita mesmo assim (insertExtratosRows tem as regras customizadas TRE independente de profile).
@@ -31243,6 +29392,85 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           const atLabel = prev.at
             ? new Date(prev.at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
             : 'anteriormente';
+          const kindLowerIdem = String(profile.kind ?? '').toLowerCase();
+          const moveToImportadosDefaultForKindIdem = kindLowerIdem === 'relatorio' || kindLowerIdem === 'extratos' || kindLowerIdem === 'recurso_adfego' || kindLowerIdem === 'recurso_eletra' || kindLowerIdem === 'recurso_neoconsig_demais';
+          const moveToImportadosIdem = profile.resolvedOptions?.moveToImportadosSubfolderAfterImport === false
+            ? false
+            : Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? moveToImportadosDefaultForKindIdem);
+          if (
+            (kindLowerIdem === 'recurso_adfego' || kindLowerIdem === 'recurso_eletra' || kindLowerIdem === 'recurso_trt' || kindLowerIdem === 'recurso_tre' || kindLowerIdem === 'recurso_neoconsig_demais' || kindLowerIdem === 'extratos' || kindLowerIdem === 'relatorio') &&
+            moveToImportadosIdem &&
+            driveId &&
+            file?.id &&
+            file?.name
+          ) {
+            try {
+              const anyFile = file as unknown as { folderPath?: string; parentId?: string };
+              let parentIdRaw =
+                typeof (file as any)?.parentId === 'string'
+                  ? String((file as any).parentId).trim()
+                  : '';
+              if (!parentIdRaw && driveId && typeof anyFile.folderPath === 'string' && anyFile.folderPath.length > 0 && anyFile.folderPath !== 'base') {
+                try {
+                  const fp = String(anyFile.folderPath).replace(/^\s*\/+|\/+\s*$/g, '');
+                  if (fp) {
+                    const r = await resolveDrivePathDirect(accessToken, driveId, fp);
+                    if (r?.id && r.folder) parentIdRaw = String(r.id).trim();
+                  }
+                } catch { /* ignore */ }
+              }
+              const parentId = parentIdRaw || null;
+              if (parentId) {
+                let importadosId: string | null = null;
+                const listChildrenUrl = `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(parentId)}/children?$select=id,name,folder`;
+                const lres = await fetch(listChildrenUrl, { headers: { authorization: `Bearer ${accessToken}` } });
+                if (lres.ok) {
+                  const ldata = await (lres.json() as Promise<{ value?: Array<{ id?: string; name?: string; folder?: unknown }> }>);
+                  if (Array.isArray(ldata.value)) {
+                    for (const c of ldata.value) {
+                      if (String(c.name ?? '').trim().toLowerCase() === 'importados' && c.folder && c.id) {
+                        importadosId = String(c.id);
+                        break;
+                      }
+                    }
+                  }
+                }
+                if (!importadosId) {
+                  const createUrl = `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(parentId)}/children`;
+                  const cres = await fetch(createUrl, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
+                    body: JSON.stringify({ name: 'Importados', folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }),
+                  });
+                  if (cres.ok) {
+                    const cdata = await (cres.json() as Promise<{ id?: string }>);
+                    if (cdata?.id) importadosId = String(cdata.id);
+                  }
+                }
+                if (importadosId) {
+                  const moveUrl = `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(file.id)}`;
+                  const mres = await fetch(moveUrl, {
+                    method: 'PATCH',
+                    headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` },
+                    body: JSON.stringify({
+                      parentReference: { id: importadosId },
+                      name: file.name,
+                    }),
+                  });
+                  if (mres.ok) {
+                    movedToImportadosTracker.ok = true;
+                    movedToImportadosTracker.count += 1;
+                  } else if (!movedToImportadosTracker.firstError) {
+                    let txt = '';
+                    try { txt = (await mres.text()).slice(0, 200); } catch { /* ignore */ }
+                    movedToImportadosTracker.firstError = txt || `HTTP ${mres.status}`;
+                  }
+                }
+              }
+            } catch (e) {
+              if (!movedToImportadosTracker.firstError) movedToImportadosTracker.firstError = e instanceof Error ? e.message.slice(0, 200) : String(e ?? '').slice(0, 200);
+            }
+          }
           importedFiles.push({
             fileName: file.name,
             targetTable: profile.target_table,
@@ -31252,29 +29480,24 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             skippedRows: 0,
             headers: [],
             skippedReason: `idempotente: bytes idênticos já importados em ${atLabel}`,
-            debugSisbr: (() => {
-              try {
-                const store = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
-                return store?.__sisbrDebugLastByFile?.get?.(file.name) ?? null;
-              } catch { return null; }
-            })(),
           });
           totalRowsSkipped += 0;
           continue;
         }
       }
 
-      const tableName = escapeOrCreateTableName(db, profile.target_table);
-
       const modeOverride =
         (typeof opts.forceMode === 'string' && (opts.forceMode === 'append' || opts.forceMode === 'replace'))
           ? opts.forceMode
           : (String(profile.resolvedOptions.mode ?? 'append').toLowerCase() === 'replace' ? 'replace' : 'append');
       modeLabel = modeOverride;
-      if (!targetTableNameRef.value) targetTableNameRef.value = tableName;
       const checkDup = Boolean(profile.resolvedOptions.checkDuplicateContent ?? true);
 
       const kindLower = String(profile.kind ?? '').toLowerCase();
+      const tableName = kindLower === 'recurso_neoconsig_demais'
+        ? 'Múltiplas (NEOCONSIG)'
+        : escapeOrCreateTableName(db, profile.target_table);
+      if (!targetTableNameRef.value && kindLower !== 'recurso_neoconsig_demais') targetTableNameRef.value = tableName;
 
       // Pre-fill sourceFile (para __source_file coluna + parentId para mover Importados):
       const sourceFileFull = typeof (file as any)?.folderPath
@@ -31282,7 +29505,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         : String(file.name);
       const anyFile = file as unknown as { folderPath?: string; parentId?: string };
       let parentFolderId: string | null = null;
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_alego' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'recurso_tjgo' || kindLower === 'recurso_mpgo' || kindLower === 'extratos' || kindLower === 'relatorio') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') {
         parentFolderId = typeof anyFile.parentId === 'string' && anyFile.parentId.trim() ? anyFile.parentId.trim() : null;
         // Fallback: se não veio parentId mas temos folderPath (agora JÁ é caminho completo) + driveId → resolver via path direto.
         if (!parentFolderId && driveId && typeof anyFile.folderPath === 'string' && anyFile.folderPath.length > 0 && anyFile.folderPath !== 'base') {
@@ -31304,7 +29527,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       const strictMinMatches = Number(profile.resolvedOptions?.strictColumnMinMatches ?? 5) || 0;
       const extractCompet = Boolean(profile.resolvedOptions?.extractCompetenciaFromTopHeader ?? false);
       // Mover para Importados: default TRUE quando kind=relatorio (regra oficial), a menos que explicitamente desativado via resolvedOptions.
-      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_alego' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'recurso_tjgo' || kindLower === 'recurso_mpgo';
+      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_neoconsig_demais';
       const moveToImportados = profile.resolvedOptions?.moveToImportadosSubfolderAfterImport === false
         ? false
         : Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? moveToImportadosDefaultForKind);
@@ -31325,10 +29548,9 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
 
       // ============================================================
-      // SWITCH PDF EXCLUSIVOS:
-      //   1) SISBR:     kind=relatorio AND PDF AND (pasta sisbr OR perfil relatorio_orgao_sisbr)
-      //   2) MPGO:      kind=recurso_mpgo AND PDF (Relatório de Movimento Financeiro MP GO)
-      //   Qualquer outro caso → Excel via SheetJS readSheetTable.
+      // SWITCH EXCLUSIVO SISBR PDF — SOMENTE aqui, sem impactar outros fluxos:
+      // Condição de ativação (TODAS): kind=relatorio AND arquivo=PDF AND (pasta com "sisbr" OU perfil BD=relatorio_orgao_sisbr)
+      // Qualquer outro caso → Excel via SheetJS readSheetTable.
       // ============================================================
       const temSisbrNaPasta: boolean = (() => {
         const k = normalizeNameForMatch(String((file as any).folderPath ?? ''));
@@ -31341,16 +29563,17 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         return magic !== -1 && magic < 1024;
       })();
       const usarParserPdfSisbr = kindLower === 'relatorio' && ehPdfReal && (temSisbrNaPasta || perfilSisbrExplicito);
-      const usarParserPdfMpgo = kindLower === 'recurso_mpgo' && ehPdfReal;
-      const usarAlgumParserPdf = usarParserPdfSisbr || usarParserPdfMpgo;
 
       const parsedFinal: {
         headers: string[];
         rows: Array<Record<string, unknown>>;
         extractedCompetenciaMmAaaa: string | null;
         topHeaderLines: string[];
-      } = usarAlgumParserPdf
+      } = usarParserPdfSisbr
         ? (() => {
+            // IIFE async não é necessário aqui abaixo, pois já estamos num escopo async com await.
+            // No entanto, para satisfazer TypeScript sem asserção bruta, montamos inline:
+            // (será sobreescrito abaixo com await para evitar Promises não resolvidas)
             return {
               headers: [],
               rows: [],
@@ -31363,12 +29586,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Resolver definitivamente (escopo já é async):
       if (usarParserPdfSisbr) {
         const pdf = await readRelatorioTable(String(file.name ?? ''), buffer);
-        (parsedFinal as any).headers = pdf.headers;
-        (parsedFinal as any).rows = pdf.rows;
-        (parsedFinal as any).extractedCompetenciaMmAaaa = null;
-        (parsedFinal as any).topHeaderLines = [];
-      } else if (usarParserPdfMpgo) {
-        const pdf = await readMpgoPdfTable(String(file.name ?? ''), buffer);
         (parsedFinal as any).headers = pdf.headers;
         (parsedFinal as any).rows = pdf.rows;
         (parsedFinal as any).extractedCompetenciaMmAaaa = null;
@@ -31386,20 +29603,20 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Regra: DEPOIS de extrair o parsedFinal.headers e ANTES do whitelist matching / fill-down de 10 colunas principais,
       // criamos um header aliases bidirecional: (1) se header original = alias → substitui headers por canônico;
       // (2) renomeia chaves em rowsToImport; (3) preserva o valor original em colunas extras (duplicamos antes de sobrescrever).
-      if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_neoconsig_demais') {
+      if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
         const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
-          { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente','SERVIDOR NOME','Nome do Servidor Completo','Associado','Associada'] },
-          { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf','CPF CLIENTE','Cpf Cliente','CPF Associado','CPF do Cliente','CPF do Associado'] },
+          { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
+          { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
           { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
-          { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico','PRODUTO'] },
-          { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero','CONTRATO'] },
-          { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)','NUMERO PARCELAS','Numero Parcelas','Número Parcelas','N° Parcelas','Nº da Parcela','Numero da Parcela Atual','Número da Parcela Atual'] },
+          { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
+          { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
+          { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
           { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
-          { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento','VENCIMENTO PARCELA','Vencimento da Parcela','Data de Vencimento Parcela','Vencimento 1 Parcela','Venc. Parcela'] },
-          { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento','SITUACAO','Status Parcela','STATUS','STATUS ATUAL PARCELA','Status Atual Parcela','Situação Atual','Situacao Atual'] },
-          { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto','VALOR PARC AVERBADA','Valor Parc Averbada','VALOR PARCELA AVERBADA','Valor Parcela Averbada','VALOR DESC HOLERITE','Valor Desconto Holerite','Valor Parc Enviada','VALOR PARC ENVIADA','Valor da Parcela em Folha','Parcela Valor R$','Parcela (R$)','Valor Parcela Original'] },
+          { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
+          { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
+          { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
         ];
-        const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+        const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
         const aliasLut = new Map<string, string>();
         for (const entry of canonicalAliasMap) {
           for (const a of [entry.canonical, ...entry.aliases]) {
@@ -31418,15 +29635,13 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         }
       }
       // =================== FIM ALIAS MAPEAMENTO CABEÇALHOS ===================
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo' || kindLower === 'recurso_neoconsig_demais') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais') {
         competFromHeader = extractCompet ? (parsedFinal.extractedCompetenciaMmAaaa ?? null) : null;
-        // ===== 🔑 EXTRAIR COPETÊNCIA DE NOME DO ARQUIVO =====
-        //   TRT/SISBR default → competenciaMesArquivoSemIncremento=FALSE: MÊS+1 (JULHO→08/2026)
-        //   MPGO (forçado) / outros com flag TRUE → MÊS do arquivo SEM +1 (AGOSTO→08/2026)
-        const extraiCompetArquivoHabilitado = kindLower === 'recurso_mpgo'
-          || Boolean(profile.resolvedOptions?.extractCompetenciaFromFileName ?? false)
-          || Boolean(profile.resolvedOptions?.competenciaMesArquivoSemIncremento ?? false);
-        if (extraiCompetArquivoHabilitado) {
+        // ===== 🔑 EXTRAIR COPETÊNCIA DE NOME DO ARQUIVO (padrão TRT-JULHO-2026.xlsx / TRE-MAIO-2026.xlsm / etc) =====
+        // Regra do perfil TRT oficial (R17):
+        //   competenciaMesArquivoSemIncremento=FALSE (TRT/SISBR default) → MÊS+1, JULHO→08/2026. Dezembro→janeiro do ANO+1.
+        //   competenciaMesArquivoSemIncremento=TRUE (outros perfis) → MÊS do arquivo sem +1.
+        if (Boolean(profile.resolvedOptions?.extractCompetenciaFromFileName ?? false) || Boolean(profile.resolvedOptions?.competenciaMesArquivoSemIncremento ?? false)) {
           const mmNome: Record<string, number> = {
             janeiro:1, fev:2, fevereiro:2, feve:2, mar:3, marco:3, março:3, marÇo:3,
             abr:4, abril:4, mai:5, maio:5, jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8,
@@ -31463,11 +29678,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 else { mmFinal = mm + 1; }
               }
               const cop = `${String(mmFinal).padStart(2,'0')}/${String(anoFinal)}`;
-              if (kindLower === 'recurso_mpgo') {
-                competFromHeader = cop;
-              } else if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) {
-                competFromHeader = cop;
-              }
+              if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) competFromHeader = cop;
             }
           }
         }
@@ -31521,12 +29732,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               skippedRows: parsedFinal.rows.length,
               headers: parsedFinal.headers,
               skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatches}`,
-              debugSisbr: (() => {
-                try {
-                  const store = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
-                  return store?.__sisbrDebugLastByFile?.get?.(file.name) ?? null;
-                } catch { return null; }
-              })(),
             });
             totalRowsSkipped += parsedFinal.rows.length;
             {
@@ -31545,7 +29750,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           const finalHeaders = strictWhitelist.slice();
           const sourceToTarget = new Map<string, string>();
           for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
-          const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+          const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
           const sourceToTargetNorm = new Map<string, string>();
           for (const [k, v] of sourceToTarget.entries()) {
             const nk = buildNormKey(k);
@@ -31593,7 +29798,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               if (srcRawCpf.length >= 11) outRow['CPF'] = (src as any)['CPF'];
             }
             if (!String(outRow['Nome'] ?? '').trim()) {
-              const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente','SERVIDOR NOME','Nome do Servidor Completo','Associado','Associada'];
+              const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome'];
               for (const cand of nomeAliases) {
                 const v = Object.prototype.hasOwnProperty.call(src, cand) ? (src as any)[cand] : null;
                 if (v !== null && v !== undefined && String(v).trim().length > 2) {
@@ -31605,7 +29810,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                 for (const srcKey of Object.keys(src)) {
                   const nk = buildNormKey(srcKey);
                   if (!nk) continue;
-                  if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome' || nk === 'cliente' || nk === 'nome do cliente' || nk === 'servidor nome' || nk === 'nome do servidor completo' || nk === 'associado' || nk === 'associada')) continue;
+                  if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome')) continue;
                   const v = src[srcKey];
                   if (v !== null && v !== undefined && String(v).trim().length > 2) {
                     outRow['Nome'] = v;
@@ -32292,48 +30497,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
       // ====== FIM DEBUG RECURSO TRT/TRE ======
 
-      // ====== SPLIT DINÂMICO POR SECRETARIA — PERFIL recurso_neoconsig_demais ======
-      // Regra: coluna SECRETARIA do Excel define a tabela "Recurso <SECRETARIA>" dinâmica.
-      // Fallback: SECRETARIA vazia / NÃO IDENTIFICADA / sem coluna → tabela fixa "Recurso (NEOCONSIG)".
-      const splitBySecretariaEnabled: boolean =
-        kindLower === 'recurso_neoconsig_demais' && Array.isArray(rowsToImport) && rowsToImport.length > 0;
-      let neoconSecretariaGroups: Array<{ secretaria: string; targetTable: string; rows: Array<Record<string, unknown>> }> = [];
-      if (splitBySecretariaEnabled) {
-        const secretariaHeadersCandidates: string[] = [];
-        const firstRowKeys = Object.keys(rowsToImport[0] ?? {});
-        for (const k of firstRowKeys) {
-          if (normalizeHeaderKey(k).replace(/\s+/g, '') === 'SECRETARIA') {
-            secretariaHeadersCandidates.push(k);
-          }
-        }
-        const secretariaKey: string | null = secretariaHeadersCandidates[0] ?? null;
-        if (secretariaKey) {
-          const map = new Map<string, Array<Record<string, unknown>>>();
-          for (const rawRow of rowsToImport as Array<Record<string, unknown>>) {
-            const raw = String((rawRow as any)[secretariaKey] ?? '').trim();
-            let norm = String(raw ?? '')
-              .normalize('NFD')
-              .replace(/[\u0300-\u036f]/g, '')
-              .toUpperCase()
-              .replace(/\s+/g, ' ')
-              .trim();
-            if (norm === '' || norm === 'NÃO IDENTIFICADA' || norm === 'NAO IDENTIFICADA') {
-              norm = '';
-            }
-            const bucketKey = norm;
-            if (!map.has(bucketKey)) map.set(bucketKey, []);
-            (map.get(bucketKey) as Array<Record<string, unknown>>).push(rawRow as Record<string, unknown>);
-          }
-          neoconSecretariaGroups = Array.from(map.entries()).map(([norm, rows]) => {
-            const targetTable: string = norm === '' ? String(tableName) : 'Recurso ' + norm;
-            return { secretaria: norm === '' ? '(fallback)' : norm, targetTable, rows };
-          }).sort((a, b) => b.rows.length - a.rows.length);
-        } else {
-          neoconSecretariaGroups = [{ secretaria: '(coluna SECRETARIA ausente — fallback)', targetTable: String(tableName), rows: rowsToImport as Array<Record<string, unknown>> }];
-        }
-      }
-      // ====== FIM SPLIT DINÂMICO POR SECRETARIA ======
-
       let res: { insertedRows: number; skippedRows: number };
       if (kindLower === 'extratos') {
         const ir = insertExtratosRows({
@@ -32349,32 +30512,78 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               : null,
         });
         res = { insertedRows: ir.insertedRows, skippedRows: ir.skippedRows };
-      } else if (splitBySecretariaEnabled && neoconSecretariaGroups.length > 0) {
-        // Chama addMissingColumnsAndImportRows UMA VEZ POR GRUPO DE SECRETARIA e acumula resultados
-        const extraArg = Object.keys(extraStatic).length > 0 ? extraStatic : undefined;
+        if (!tablesCreatedAgg.has(tableName)) tablesCreatedAgg.set(tableName, { insertedRows: 0, skippedRows: 0 });
+        const cur = tablesCreatedAgg.get(tableName)!;
+        cur.insertedRows += res.insertedRows;
+        cur.skippedRows += res.skippedRows;
+      } else if (kindLower === 'recurso_neoconsig_demais') {
+        const buildNorm = (s: string) =>
+          String(s ?? '')
+            .normalize('NFD').replace(/\p{M}/gu, '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const normWanted = 'secretaria';
+        const detectSecretariaKey = (row: Record<string, unknown>): string | null => {
+          for (const k of Object.keys(row)) {
+            if (buildNorm(k) === normWanted) return k;
+          }
+          for (const k of Object.keys(row)) {
+            if (buildNorm(k).includes(normWanted)) return k;
+          }
+          return null;
+        };
+
+        const secretariaKey =
+          (headersToImport.find((h) => buildNorm(h) === normWanted) ?? null)
+          ?? (headersToImport.find((h) => buildNorm(h).includes(normWanted)) ?? null)
+          ?? (rowsToImport.length > 0 ? detectSecretariaKey(rowsToImport[0] as Record<string, unknown>) : null);
+
+        if (!secretariaKey) {
+          throw new Error('Perfil NEOCONSIG: coluna "Secretária/Secretaria" não encontrada no Excel.');
+        }
+
+        if (competFromHeader) {
+          rowsToImport = rowsToImport.map((r) => ({ ...r, Copetencia: competFromHeader }));
+          if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
+        }
+
+        const byTable = new Map<string, Array<Record<string, unknown>>>();
+        for (const r of rowsToImport) {
+          const raw = String((r as any)?.[secretariaKey] ?? '').trim();
+          const sec = raw.replace(/\s+/g, ' ').trim().toUpperCase();
+          if (!sec) continue;
+          const tbl = escapeOrCreateTableName(db, `Recurso ${sec}`);
+          const arr = byTable.get(tbl) ?? [];
+          arr.push(r);
+          byTable.set(tbl, arr);
+        }
+
+        if (byTable.size === 0) {
+          throw new Error('Perfil NEOCONSIG: nenhuma linha com valor preenchido na coluna "Secretária/Secretaria".');
+        }
+
         let insertedTotal = 0;
         let skippedTotal = 0;
-        const splitterDebugLines: string[] = [];
-        splitterDebugLines.push('\n' + '═'.repeat(110));
-        splitterDebugLines.push(`║ [SPLIT NEOCONSIG SECRETARIA L32070] totalRows=${rowsToImport?.length ?? -1} grupos=${neoconSecretariaGroups.length}  file=${String(file?.name ?? '?')}`);
-        splitterDebugLines.push('═'.repeat(110));
-        for (let gi = 0; gi < neoconSecretariaGroups.length; gi++) {
-          const g = neoconSecretariaGroups[gi];
-          const part = addMissingColumnsAndImportRows(
+        for (const [tbl, rowsTbl] of byTable.entries()) {
+          const rtbl = addMissingColumnsAndImportRows(
             db,
-            g.targetTable,
+            tbl,
             headersToImport,
-            g.rows as Array<Record<string, any>>,
+            rowsTbl,
             checkDup,
             modeOverride,
-            extraArg,
+            Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
           );
-          insertedTotal += part.insertedRows;
-          skippedTotal += part.skippedRows;
-          splitterDebugLines.push(`║   [GRUPO ${String(gi + 1).padStart(2, '0')}/${String(neoconSecretariaGroups.length).padStart(2, '0')}]  secretaria="${g.secretaria}"  →  tabela="${g.targetTable}"  rows=${String(g.rows.length).padStart(4, ' ')}  inserted=${String(part.insertedRows).padStart(4, ' ')}  skipped=${String(part.skippedRows).padStart(4, ' ')}`);
+          insertedTotal += rtbl.insertedRows;
+          skippedTotal += rtbl.skippedRows;
+          if (!tablesCreatedAgg.has(tbl)) tablesCreatedAgg.set(tbl, { insertedRows: 0, skippedRows: 0 });
+          const cur = tablesCreatedAgg.get(tbl)!;
+          cur.insertedRows += rtbl.insertedRows;
+          cur.skippedRows += rtbl.skippedRows;
         }
-        splitterDebugLines.push('═'.repeat(110) + '\n');
-        console.log(splitterDebugLines.join('\n'));
+
         res = { insertedRows: insertedTotal, skippedRows: skippedTotal };
       } else {
         res = addMissingColumnsAndImportRows(
@@ -32386,12 +30595,16 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           modeOverride,
           Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
         );
+        if (!tablesCreatedAgg.has(tableName)) tablesCreatedAgg.set(tableName, { insertedRows: 0, skippedRows: 0 });
+        const cur = tablesCreatedAgg.get(tableName)!;
+        cur.insertedRows += res.insertedRows;
+        cur.skippedRows += res.skippedRows;
       }
 
       // Mover arquivo para subpasta Importados (Graph API), se perfil pedir e arquivo teve alguma interação OK (inserida ou duplicada pulada)
       let moveResult: { ok: boolean; status?: number; error?: string; destFolder?: string; parentIdUsed?: string; parentIdResolvedFromFolderPath?: boolean; folderPath?: string; driveIdPrefix?: string } = { ok: false };
       if (
-        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_mpgo' || kindLower === 'recurso_alego' || kindLower === 'recurso_tjgo' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') &&
+        (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') &&
         moveToImportados &&
         driveId &&
         file?.id &&
@@ -32522,12 +30735,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
                   : `Parser retornou ${parsedFinal.rows.length} linhas, mas nenhuma inserida nem pulada. Causa provável: linhas vazias, duplicatas pré-processadas, ou colunas não compatíveis.`
               )
             : undefined,
-        debugSisbr: (() => {
-          try {
-            const store = (globalThis as unknown as { __sisbrDebugLastByFile?: Map<string, Record<string, unknown>> });
-            return store?.__sisbrDebugLastByFile?.get?.(file.name) ?? null;
-          } catch { return null; }
-        })(),
       });
       if (res.insertedRows === 0 && res.skippedRows === 0) {
         const __dbg = __dbg_loaded({ env: true });
@@ -32606,14 +30813,13 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       skippedDuplicates: 0,
       skippedNoCpf: 0,
     }));
-    const tablesCreated = targetTableNameRef.value
-      ? [{
-          tableName: targetTableNameRef.value,
-          insertedRows: totalRowsInserted,
-          skippedDuplicates: totalRowsSkipped,
-          skippedNoCpf: 0,
-        }]
-      : [];
+    const tablesCreated =
+      Array.from(tablesCreatedAgg.entries()).map(([tableName, v]) => ({
+        tableName,
+        insertedRows: v.insertedRows,
+        skippedDuplicates: v.skippedRows,
+        skippedNoCpf: 0,
+      }));
     let notificationEmail: { attempted: boolean; sent: boolean; to: string[]; error?: string | null } | undefined = undefined;
     try {
       // Regra oficial do usuário: se nenhuma linha inserida E nenhuma pulada = ERRO, não sucesso.
@@ -32644,10 +30850,8 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             totalRowsInserted,
             totalRowsSkipped,
             importedFiles,
-            scannedFileNames: candidates.slice(0, 10).map(c => c.name),
             errorMessage: errMsg,
             mode: modeLabel,
-            jobSentFlagRef: __jobNotificationSentRef,
           });
         } catch (eNotify) {
           notificationEmail = {
@@ -32669,9 +30873,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         totalRowsInserted,
         totalRowsSkipped,
         importedFiles,
-        scannedFileNames: candidates.slice(0, 10).map(c => c.name),
         mode: modeLabel,
-        jobSentFlagRef: __jobNotificationSentRef,
       });
     } catch (eNotify) {
       notificationEmail = {
@@ -32689,7 +30891,10 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       totalRowsSkipped,
       notificationEmail,
       mode: modeLabel,
-      tableName: targetTableNameRef.value || null,
+      tableName:
+        tablesCreated.length > 1
+          ? 'Múltiplas (por Secretária)'
+          : (targetTableNameRef.value || (tablesCreated[0]?.tableName ?? null)),
       rows: totalRowsInserted,
       columns: columnsInDb,
       skippedDuplicates: totalRowsSkipped,
@@ -32722,7 +30927,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     }
     // #endregion
     try {
-      if (!__jobNotificationSentRef.value) await sendImportFinishedEmailNotification({
+      await sendImportFinishedEmailNotification({
         notificationTo: opts?.notificationTo,
         forceKind: opts?.forceKind ?? forceKindLower,
         folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
@@ -32732,10 +30937,8 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         totalRowsInserted,
         totalRowsSkipped,
         importedFiles,
-        scannedFileNames: candidates.slice(0, 10).map(c => c.name),
         errorMessage: e instanceof Error ? e.message : String(e ?? 'Falha desconhecida na importação.'),
         mode: modeLabel,
-        jobSentFlagRef: __jobNotificationSentRef,
       });
     } catch { /* ignore notification errors on failure path */ }
     throw wrapGraphAutomationError(
@@ -32753,7 +30956,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       /* ignore */
     }
     try {
-      if (!__jobNotificationSentRef.value) await sendImportFinishedEmailNotification({
+      await sendImportFinishedEmailNotification({
         notificationTo: opts?.notificationTo,
         forceKind: opts?.forceKind ?? '',
         folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
@@ -32763,10 +30966,8 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         totalRowsInserted,
         totalRowsSkipped,
         importedFiles,
-        scannedFileNames: candidates.slice(0, 10).map(c => c.name),
         errorMessage: topErr instanceof Error ? topErr.message : String(topErr ?? 'Erro desconhecido na importação.'),
         mode: modeLabel,
-        jobSentFlagRef: __jobNotificationSentRef,
       });
     } catch { /* ignore notification errors on top failure path */ }
     throw topErr instanceof Error ? topErr : new Error(String(topErr ?? 'Erro desconhecido na importação.'));
@@ -32782,7 +30983,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       /* ignore */
     }
   }
-  }, 5);
 }
 
 // #region debug-temp: endpoint para validar expandRecursoExtratos sem UI (tre-import-wrong-columns S4)
@@ -33131,7 +31331,7 @@ export async function debugOneshotTrtLocalImport(opts: {
     out.phase = 'learningProfileResolve';
     const allProfiles = findLearningProfilesFor(db, '', 'recurso_trt');
     let matchedProfile: LearningProfileMatch | null = null;
-    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
     for (const p of allProfiles) {
       try {
         const reTxt = String(p.file_name_regex ?? '').trim();
@@ -33248,7 +31448,7 @@ export async function debugOneshotTrtLocalImport(opts: {
         let competFromHeader: string | null = null;
 
         // ALIAS MAPEAMENTO CABEÇALHOS
-        if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_neoconsig_demais') {
+        if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
           const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
             { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
             { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
@@ -33261,7 +31461,7 @@ export async function debugOneshotTrtLocalImport(opts: {
             { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
             { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
           ];
-          const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+          const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
           const aliasLut = new Map<string, string>();
           for (const entry of canonicalAliasMap) {
             for (const a of [entry.canonical, ...entry.aliases]) {
@@ -33371,7 +31571,7 @@ export async function debugOneshotTrtLocalImport(opts: {
             const finalHeaders = strictWhitelist.slice();
             const sourceToTarget = new Map<string, string>();
             for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
-            const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+            const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
             const sourceToTargetNorm = new Map<string, string>();
             for (const [k, v] of sourceToTarget.entries()) {
               const nk = buildNormKey(k);
@@ -33788,7 +31988,7 @@ export async function debugOneshotTreLocalImport(opts: {
     out.phase = 'learningProfileResolve';
     const allProfiles = findLearningProfilesFor(db, '', 'recurso_tre');
     let matchedProfile: LearningProfileMatch | null = null;
-    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
     for (const p of allProfiles) {
       try {
         const reTxt = String(p.file_name_regex ?? '').trim();
@@ -34292,940 +32492,6 @@ export async function debugOneshotTreLocalImport(opts: {
 }
 // #endregion
 
-// #region debug-oneshot-neoconsig-local
-export async function debugOneshotNeoconsigLocalImport(opts: {
-  localXlsxPath?: string;
-  fileName?: string;
-  folderPath?: string;
-  fileId?: string;
-  parentFolderId?: string;
-  mode?: 'append' | 'replace';
-  resetHashesFirst?: boolean;
-  deleteLixoRowidsGte2?: boolean;
-}): Promise<Record<string, unknown>> {
-  const out: Record<string, unknown> = { ok: false, phase: 'init' };
-  const _crypto = require('crypto') as typeof import('crypto');
-  const _fs = require('fs') as typeof import('fs');
-  const _path = require('path') as typeof import('path');
-  try {
-    const dbFilePath = getSqlitePath();
-    const db = await openDatabase(dbFilePath);
-    ensureSchema(db);
-    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
-
-    if (Boolean(opts.resetHashesFirst ?? true)) {
-      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%NEOCONSIG%' OR value LIKE '%recurso_neoconsig_demais%' OR value LIKE '%neoconsig%')`);
-      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'recurso_neoconsig_demais' OR kind LIKE '%neoconsig%'`);
-      db.run(`DELETE FROM import_batch_rows WHERE kind = 'recurso_neoconsig_demais'`);
-      db.run(`DELETE FROM import_batches WHERE kind = 'recurso_neoconsig_demais'`);
-    }
-    if (Boolean(opts.deleteLixoRowidsGte2 ?? false)) {
-      try {
-        const rDel = db.run('DELETE FROM "Recurso (NEOCONSIG)" WHERE rowid >= 2');
-        out.deletedLixoRowidsGte2 = rDel.getRowsModified();
-      } catch (e) {
-        try {
-          const rDel = db.run('DELETE FROM "Recurso (NEOCONSIG)"');
-          out.deletedLixoRowidsGte2 = rDel.getRowsModified();
-        } catch (_) { out.deletedLixoRowidsGte2 = null; }
-      }
-    }
-
-    const localPath = String(opts.localXlsxPath || '').trim();
-    if (!localPath || !_fs.existsSync(localPath)) {
-      out.error = `localXlsxPath não existe: ${localPath}`;
-      return out;
-    }
-    out.localXlsxPath = localPath;
-    const buffer = _fs.readFileSync(localPath);
-    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
-    out.sha256 = sha256Hex;
-    out.bufferBytes = buffer.length;
-    out.phase = 'sheetRead';
-
-    const fileName = String(opts.fileName || _path.basename(localPath) || 'NEOCONSIG-TODOS-AGOSTO-2026.xlsx');
-    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Agosto/Relatório Demais Orgão');
-    const fileId = String(opts.fileId || 'debug-local-neoconsig-' + Date.now());
-    const parentId = String(opts.parentFolderId || 'debug-local-parent-neoconsig');
-    const mode = String(opts.mode || 'append') as 'append' | 'replace';
-
-    out.phase = 'learningProfileResolve';
-    const allProfiles = findLearningProfilesFor(db, '', 'recurso_neoconsig_demais');
-    let matchedProfile: LearningProfileMatch | null = null;
-    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-    for (const p of allProfiles) {
-      try {
-        const reTxt = String(p.file_name_regex ?? '').trim();
-        if (!reTxt) continue;
-        if (new RegExp(reTxt, 'i').test(fileName)) {
-          matchedProfile = p; break;
-        }
-      } catch (_re) { /* ignore */ }
-    }
-    if (!matchedProfile && allProfiles.length > 0) matchedProfile = allProfiles[0];
-    if (!matchedProfile) {
-      out.error = `Nenhum learning profile kind=recurso_neoconsig_demais encontrou arquivo ${fileName}. Perfil upsert falhou?`;
-      try { persistDatabase(db, dbFilePath); } catch (_) {}
-      try { await db.close(); } catch (_) {}
-      return out;
-    }
-    out.profile = { id: matchedProfile.id, kind: matchedProfile.kind, target_table: matchedProfile.target_table, file_name_regex: matchedProfile.file_name_regex };
-    const profile: any = {
-      id: matchedProfile.id,
-      kind: matchedProfile.kind,
-      target_table: matchedProfile.target_table,
-      resolvedOptions: typeof matchedProfile.options_json === 'string' ? JSON.parse(matchedProfile.options_json) : (matchedProfile.options_json || {}),
-    };
-
-    const kindLower = String(profile?.kind || '').trim().toLowerCase();
-    out.kindLower = kindLower;
-    const tableName = String(profile?.target_table || 'Recurso (NEOCONSIG)');
-    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
-    const moveToImportados = Boolean(profile?.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? false);
-    const modeOverride: any = mode;
-
-    const file: any = { name: fileName, folderPath, id: fileId, parentId, size: buffer.length };
-    const parsedFinal: any = readSheetTable(buffer, 'recurso_neoconsig_demais');
-    out.sheetHeaders = parsedFinal.headers?.slice(0, 40) || [];
-    out.sheetHeadersCount = parsedFinal.headers?.length || 0;
-    out.sheetRowsCount = parsedFinal.rows?.length || 0;
-    out.extractedCompetenciaMmAaaa = parsedFinal.extractedCompetenciaMmAaaa || null;
-    out.phase = 'importPerFile (pipeline 10 cols inline)';
-    const importedFiles: any[] = [];
-    let insertedRows = 0;
-    let skippedRows = 0;
-    let totalRowsSkipped = 0;
-    const driveId = 'debug-local-drive';
-    const parentFolderId = parentId;
-    const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
-
-    try {
-      {
-        const kindLowerInner = kindLower;
-        const parsedFinalScoped: any = parsedFinal;
-        const fileScoped: any = file;
-        const profileScoped: any = profile;
-        const extractCompet = Boolean(profileScoped?.resolvedOptions?.extractCompetenciaFromTopHeader || profileScoped?.resolvedOptions?.extractCompetenciaFromFileName || profileScoped?.resolvedOptions?.competenciaMesArquivoSemIncremento);
-        const strictWhitelist = Array.isArray(profileScoped?.resolvedOptions?.strictColumnWhitelist) ? profileScoped.resolvedOptions.strictColumnWhitelist.slice() : [];
-        const strictMinMatches = Number(profileScoped?.resolvedOptions?.strictColumnMinMatches ?? 0);
-        const tableNameInner = tableName;
-        const checkDupFinal = checkDup;
-        const moveToImportadosFinal = moveToImportados;
-        const driveIdFinal: any = driveId;
-        const parentFolderIdFinal = parentFolderId;
-        const anyFileFinal: any = file;
-        const modeOverrideFinal: any = modeOverride;
-
-        let headersToImport: string[] = parsedFinalScoped.headers;
-        let rowsToImport: Array<Record<string, unknown>> = parsedFinalScoped.rows;
-        let competFromHeader: string | null = null;
-
-        if (kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre' || kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_neoconsig_demais') {
-          const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
-            { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente','SERVIDOR NOME','Nome do Servidor Completo','Associado','Associada'] },
-            { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf','CPF CLIENTE','Cpf Cliente','CPF Associado','CPF do Cliente','CPF do Associado'] },
-            { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
-            { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico','PRODUTO'] },
-            { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero','CONTRATO'] },
-            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)','NUMERO PARCELAS','Numero Parcelas','Número Parcelas','N° Parcelas','Nº da Parcela','Numero da Parcela Atual','Número da Parcela Atual'] },
-            { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
-            { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento','VENCIMENTO PARCELA','Vencimento da Parcela','Data de Vencimento Parcela','Vencimento 1 Parcela','Venc. Parcela'] },
-            { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento','SITUACAO','Status Parcela','STATUS','STATUS ATUAL PARCELA','Status Atual Parcela','Situação Atual','Situacao Atual'] },
-            { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto','VALOR PARC AVERBADA','Valor Parc Averbada','VALOR PARCELA AVERBADA','Valor Parcela Averbada','VALOR DESC HOLERITE','Valor Desconto Holerite','Valor Parc Enviada','VALOR PARC ENVIADA','Valor da Parcela em Folha','Parcela Valor R$','Parcela (R$)','Valor Parcela Original'] },
-          ];
-          const buildNormAlias = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-          const aliasLut = new Map<string, string>();
-          for (const entry of canonicalAliasMap) {
-            for (const a of [entry.canonical, ...entry.aliases]) {
-              aliasLut.set(buildNormAlias(a), entry.canonical);
-            }
-          }
-          const headerRenames = new Map<string, string>();
-          const newHeaders: string[] = [];
-          for (const h of headersToImport) {
-            const canonical = aliasLut.get(buildNormAlias(h));
-            if (canonical && !headerRenames.has(h)) headerRenames.set(h, canonical);
-            newHeaders.push(canonical || h);
-          }
-          if (headerRenames.size > 0) headersToImport = newHeaders;
-        }
-
-        let profileOptionsAny: any = profileScoped?.resolvedOptions ?? {};
-        const strictWhitelistFinal = strictWhitelist;
-        const strictMinMatchesFinal = strictMinMatches;
-        const extractCompetFinal = extractCompet;
-
-        if (kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre' || kindLowerInner === 'recurso_neoconsig_demais') {
-          competFromHeader = extractCompetFinal ? (parsedFinalScoped.extractedCompetenciaMmAaaa ?? null) : null;
-          if (Boolean(profileOptionsAny?.extractCompetenciaFromFileName ?? false) || Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false)) {
-            const mmNome: Record<string, number> = {
-              janeiro:1, fev:2, fevereiro:2, feve:2, mar:3, marco:3, março:3, marÇo:3,
-              abr:4, abril:4, mai:5, maio:5, jun:6, junho:6, jul:7, julho:7, ago:8, agosto:8,
-              set:9, sep:9, setembro:9, out:10, outu:10, outubro:10, nov:11, novembro:11, dez:12, dezembro:12,
-              jan:1, feb:2, apr:4, may:5, jun_e:6, jul_e:7, aug:8, oct:10, dec:12,
-              january:1, february:2, march:3, april:4, june:6, july:7, august:8, september:9, october:10, november:11, december:12,
-            };
-            const buildNorm2 = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-            const fnNorm = buildNorm2(String(fileScoped.name ?? ''));
-            const mAno = fnNorm.match(/\b(20\d{2}|[12]\d{3})\b/);
-            let mmTok = '';
-            const sortedKeys = Object.keys(mmNome).sort((a, b) => b.length - a.length);
-            for (const k of sortedKeys) {
-              if (fnNorm.includes(' ' + k + ' ') || fnNorm.includes('-' + k + '-') || fnNorm.includes('_' + k + '_') || fnNorm.startsWith(k + ' ') || fnNorm.endsWith(' ' + k)) {
-                mmTok = k; break;
-              }
-              const re = new RegExp('(^|[ _-])' + k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '([ _-]|$)','i');
-              if (re.test(fnNorm)) { mmTok = k; break; }
-            }
-            if (!mmTok) {
-              const toks = fnNorm.split(/[ _-]+/).filter(Boolean);
-              for (const t of toks) {
-                if (Object.prototype.hasOwnProperty.call(mmNome, t) && t.length >= 3) { mmTok = t; break; }
-              }
-            }
-            if (mAno && mmTok) {
-              const mm = mmNome[mmTok];
-              if (mm >= 1 && mm <= 12) {
-                const semIncremento = Boolean(profileOptionsAny?.competenciaMesArquivoSemIncremento ?? false);
-                let mmFinal = mm;
-                let anoFinal = Number(mAno[1]);
-                if (!semIncremento) {
-                  if (mm === 12) { mmFinal = 1; anoFinal = anoFinal + 1; }
-                  else { mmFinal = mm + 1; }
-                }
-                const cop = `${String(mmFinal).padStart(2,'0')}/${String(anoFinal)}`;
-                if (!competFromHeader || /^0[1-9]|1[0-2]\/\d{4}$/.test(cop)) competFromHeader = cop;
-              }
-            }
-          }
-          if (!competFromHeader && typeof fileScoped.folderPath === 'string' && fileScoped.folderPath.length > 0) {
-            const fp = String(fileScoped.folderPath).replace(/\\/g, '/');
-            const mAno = fp.match(/(^|\/)(20\d{2})(\/|$)/);
-            const m = fp.match(/(^|\/)(Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)(\/|$)/i);
-            if (mAno && m) {
-              const mm = (['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro']
-                .map((x) => x.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase())
-                .indexOf(String(m[2]).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase()) + 1);
-              if (mm >= 1 && mm <= 12) competFromHeader = `${String(mm).padStart(2,'0')}/${String(mAno[2])}`;
-            }
-          }
-          out.competFromHeader = competFromHeader;
-          if (strictWhitelistFinal && strictWhitelistFinal.length > 0) {
-            const norm = (s: string) =>
-              String(s ?? '')
-                .normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
-                .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-            const whitelistNorm = strictWhitelistFinal.map((w) => ({ orig: w, norm: norm(w) }));
-            out.whitelistNorm = whitelistNorm;
-            const matchedBySource: Array<{ sourceHeader: string; targetHeader: string }> = [];
-            for (let idx = 0; idx < headersToImport.length; idx++) {
-              const hOrig = parsedFinalScoped.headers[idx] || headersToImport[idx];
-              const hNormKey = headersToImport[idx] || hOrig;
-              const hn = norm(hNormKey);
-              const hit = whitelistNorm.find((w) => w.norm === hn || (hn && w.norm && (w.norm.startsWith(hn) || hn.startsWith(w.norm)) && Math.abs(w.norm.length - hn.length) <= 5));
-              if (hit) matchedBySource.push({ sourceHeader: hOrig, targetHeader: hit.orig });
-            }
-            const seenTargets = new Set<string>();
-            const dedupedMatches: Array<{ sourceHeader: string; targetHeader: string }> = [];
-            for (const m of matchedBySource) {
-              if (seenTargets.has(m.targetHeader)) continue;
-              seenTargets.add(m.targetHeader);
-              dedupedMatches.push(m);
-            }
-            const realMatches = dedupedMatches;
-            out.strictMatches = realMatches;
-            out.strictMatchesCount = realMatches.length;
-            out.strictMinMatches = strictMinMatchesFinal;
-            if (realMatches.length < strictMinMatchesFinal) {
-              importedFiles.push({
-                fileName: fileScoped.name, targetTable: tableNameInner, kind: profileScoped.kind,
-                profileId: profileScoped.id, insertedRows: 0, skippedRows: parsedFinalScoped.rows.length,
-                headers: parsedFinalScoped.headers,
-                skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatchesFinal}`,
-              });
-              totalRowsSkipped += parsedFinalScoped.rows.length;
-              skippedRows = parsedFinalScoped.rows.length;
-              insertedRows = 0;
-              out.insertResult = { insertedRows: 0, skippedRows: parsedFinalScoped.rows.length, skippedReason: `strict_whitelist_matches=${realMatches.length} < ${strictMinMatchesFinal}` };
-              throw new Error(`strict whitelist ${realMatches.length} < ${strictMinMatchesFinal}`);
-            }
-            const finalHeaders = strictWhitelistFinal.slice();
-            const sourceToTarget = new Map<string, string>();
-            for (const m of realMatches) sourceToTarget.set(m.sourceHeader, m.targetHeader);
-            const buildNormKey = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
-            const sourceToTargetNorm = new Map<string, string>();
-            for (const [k, v] of sourceToTarget.entries()) {
-              const nk = buildNormKey(k);
-              if (nk && !sourceToTargetNorm.has(nk)) sourceToTargetNorm.set(nk, v);
-            }
-            const finalRowsRaw: Array<Record<string, unknown>> = [];
-            const srcRows = Array.isArray(rowsToImport) && rowsToImport.length > 0 ? rowsToImport : parsedFinalScoped.rows;
-            for (const src of srcRows) {
-              const outRow: Record<string, unknown> = {};
-              for (const targetCol of finalHeaders) outRow[targetCol] = null;
-              for (const srcKey of Object.keys(src)) {
-                let target = sourceToTarget.get(srcKey);
-                if (!target) {
-                  const nk = buildNormKey(srcKey);
-                  if (nk) target = sourceToTargetNorm.get(nk);
-                }
-                if (!target) continue;
-                const v = src[srcKey];
-                outRow[target] = v === undefined ? null : v;
-              }
-              const outRowCpf = String(outRow['CPF'] ?? '').replace(/[^\d]/g, '').trim();
-              if (outRowCpf.length < 11 && typeof (src as any)['CPF'] !== 'undefined' && (src as any)['CPF'] !== null) {
-                const srcRawCpf = String((src as any)['CPF'] ?? '').replace(/[^\d]/g, '').trim();
-                if (srcRawCpf.length >= 11) outRow['CPF'] = (src as any)['CPF'];
-              }
-              if (!String(outRow['Nome'] ?? '').trim()) {
-                const nomeAliases = ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Funcionario','Nome do Servidor','Nome do Servidor','Servidor','Nome Colaborador','Colaborador','Nome','CLIENTE','Cliente','NOME DO CLIENTE','Nome do Cliente'];
-                for (const cand of nomeAliases) {
-                  const v = Object.prototype.hasOwnProperty.call(src, cand) ? (src as any)[cand] : null;
-                  if (v !== null && v !== undefined && String(v).trim().length > 2) {
-                    outRow['Nome'] = v; break;
-                  }
-                }
-                if (!String(outRow['Nome'] ?? '').trim() && typeof buildNormKey === 'function') {
-                  for (const srcKey of Object.keys(src)) {
-                    const nk = buildNormKey(srcKey);
-                    if (!nk) continue;
-                    if (!(nk === 'funcionario' || nk === 'nome completo' || nk === 'nome do funcionario' || nk === 'nome do servidor' || nk === 'servidor' || nk === 'nome colaborador' || nk === 'colaborador' || nk === 'nome' || nk === 'cliente' || nk === 'nome do cliente')) continue;
-                    const v = src[srcKey];
-                    if (v !== null && v !== undefined && String(v).trim().length > 2) {
-                      outRow['Nome'] = v; break;
-                    }
-                  }
-                }
-              }
-              if (extractCompetFinal && competFromHeader) outRow.Copetencia = competFromHeader;
-              const nonEmptyCols = Object.values(outRow).filter((v) => v !== null && v !== undefined && String(v).trim().length > 0).length;
-              if (nonEmptyCols >= 2) finalRowsRaw.push(outRow);
-            }
-            if (srcRows.length === finalRowsRaw.length) {
-              for (let rIdx = 0; rIdx < finalRowsRaw.length; rIdx++) {
-                const src = srcRows[rIdx];
-                const dest = finalRowsRaw[rIdx];
-                if (src && dest && typeof src === 'object' && typeof dest === 'object') {
-                  for (const k of Object.keys(src)) {
-                    if (finalHeaders.includes(k)) continue;
-                    if (Object.prototype.hasOwnProperty.call(dest, k)) continue;
-                    const v = src[k];
-                    dest[k] = v === undefined ? null : v;
-                  }
-                }
-              }
-            }
-            const normContratoBR = (raw: unknown): string => {
-              const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
-              if (!s) return '';
-              const hasComma = s.includes(',');
-              const hasDot = s.includes('.');
-              if (hasComma && !hasDot) return s;
-              if (!hasComma && hasDot) {
-                const lastDot = s.lastIndexOf('.');
-                const tail = s.slice(lastDot + 1);
-                if (tail.length === 3 && /^\d+$/.test(tail)) return s.replace(/\./g, ',');
-                return s.replace(/,/g, '').replace('.', ',');
-              }
-              if (hasComma && hasDot) {
-                if (s.lastIndexOf(',') > s.lastIndexOf('.')) return s.replace(/\./g, '');
-                return s.replace(/,/g, '').replace('.', ',');
-              }
-              if (!hasComma && !hasDot && /^\d{4,}$/.test(s)) {
-                return Number(s).toLocaleString('pt-BR').replace(/\./g, ',');
-              }
-              return s;
-            };
-            const afterTotals: Array<Record<string, unknown>> = [];
-            const seenIntra = new Set<string>();
-            const dedupKey = (r: Record<string, unknown>): string => {
-              const cop = Object.prototype.hasOwnProperty.call(r, 'Copetencia') ? String(r['Copetencia'] ?? '').trim() : '';
-              const nome = Object.prototype.hasOwnProperty.call(r, 'Nome') ? String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase() : '';
-              const cpf = (String(Object.prototype.hasOwnProperty.call(r, 'CPF') ? r['CPF'] : '') ?? '').replace(/[^\d]/g, '').trim();
-              const contrato = normContratoBR(Object.prototype.hasOwnProperty.call(r, 'Contrato') ? r['Contrato'] : '');
-              const nParcela = Object.prototype.hasOwnProperty.call(r, 'N Parcela') ? String(r['N Parcela'] ?? '').trim() : '';
-              return `${cop}|${cpf}|${nome}|${contrato}|${nParcela}`;
-            };
-            for (const r of finalRowsRaw) {
-              const vals = Object.values(r);
-              const anyTotal = vals.some((v) => {
-                const s = v === null || v === undefined ? '' : String(v).trim().toUpperCase();
-                return s === 'TOTAL' || s === 'TOTAIS' || s.startsWith('TOTAL ') || s.startsWith('TOTAL:') || s.startsWith('TOTAIS');
-              });
-              if (anyTotal) continue;
-              const anyNotEmpty = vals.some((v) => {
-                const s = v === null || v === undefined ? '' : String(v).trim();
-                return s.length > 0;
-              });
-              if (!anyNotEmpty) continue;
-              if (Object.prototype.hasOwnProperty.call(r, 'Contrato')) r['Contrato'] = normContratoBR(r['Contrato']);
-              const k = dedupKey(r);
-              if (seenIntra.has(k)) continue;
-              seenIntra.add(k);
-              afterTotals.push(r);
-            }
-            const finalRows: Array<Record<string, unknown>> = afterTotals;
-            const maskCpf = (raw: unknown): string => {
-              const digits = String(raw ?? '').replace(/\D/g, '').slice(0, 11);
-              if (digits.length === 0) return '';
-              if (digits.length <= 3) return digits;
-              if (digits.length <= 6) return `${digits.slice(0,3)}.${digits.slice(3)}`;
-              if (digits.length <= 9) return `${digits.slice(0,3)}.${digits.slice(3,6)}.${digits.slice(6)}`;
-              return `${digits.slice(0,3)}.${digits.slice(3,6)}.${digits.slice(6,9)}-${digits.slice(9)}`;
-            };
-            const normValorParcela = (raw: unknown): string => {
-              let s = String(raw ?? '').replace(/\s+/g, ' ').trim();
-              if (!s) return '';
-              let only = s.replace(/R\$\s*/i, '').trim();
-              if (!only) return '';
-              const lastComma = only.lastIndexOf(',');
-              const lastDot = only.lastIndexOf('.');
-              if (lastComma >= 0 && lastDot < 0) only = only.replace(',', '.');
-              else if (lastComma >= 0 && lastDot >= 0) {
-                if (lastComma > lastDot) only = only.replace(/\./g, '').replace(',', '.');
-                else only = only.replace(/,/g, '');
-              }
-              return `R$ ${only}`;
-            };
-            for (const r of finalRows) {
-              if (Object.prototype.hasOwnProperty.call(r, 'Nome')) {
-                r['Nome'] = String(String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase());
-              }
-              if (Object.prototype.hasOwnProperty.call(r, 'CPF')) r['CPF'] = maskCpf(r['CPF']);
-              if (Object.prototype.hasOwnProperty.call(r, 'Desc Finalidade')) r['Desc Finalidade'] = String(r['Desc Finalidade'] ?? '').replace(/\s+/g, ' ').trim();
-              if (Object.prototype.hasOwnProperty.call(r, 'Critério de Débito')) r['Critério de Débito'] = String(r['Critério de Débito'] ?? '').replace(/\s+/g, ' ').trim();
-              if (Object.prototype.hasOwnProperty.call(r, 'Valor Parcela')) r['Valor Parcela'] = normValorParcela(r['Valor Parcela']);
-              if (Boolean(profileOptionsAny?.descFinalidadeDefaultCreditoConsignado ?? false)) {
-                const produtoRaw = Object.prototype.hasOwnProperty.call(r, 'Produto') ? r['Produto'] : null;
-                const produtoUpper = String(produtoRaw ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
-                const currDesc = String(r['Desc Finalidade'] ?? '').trim().toUpperCase();
-                if (!currDesc || currDesc === produtoUpper || produtoUpper === 'EMPRESTIMO') {
-                  r['Desc Finalidade'] = 'CREDITO CONSIGNADO';
-                }
-              }
-              if (Boolean(profileOptionsAny?.contratoNormalizadoBrMilhar ?? false)) {
-                const c = String(r['Contrato'] ?? '').replace(/\s+/g,' ').trim();
-                if (c) r['Contrato'] = normContratoBR(c);
-              }
-            }
-            const canonical10ColsOrder: string[] = [
-              'Nome','CPF','Copetencia','Desc Finalidade','Contrato',
-              'N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela',
-            ];
-            const allAvailableHeaders = new Set<string>(['Copetencia', ...finalHeaders]);
-            for (const r of finalRows) for (const k of Object.keys(r)) allAvailableHeaders.add(k);
-            const canonicalBasePresent: string[] = canonical10ColsOrder.filter((h) => allAvailableHeaders.has(h));
-            const extraHeadersFromRows: string[] = [];
-            const seenHeaders = new Set<string>(canonicalBasePresent);
-            for (const r of finalRows) {
-              for (const k of Object.keys(r)) {
-                if (seenHeaders.has(k)) continue;
-                seenHeaders.add(k);
-                extraHeadersFromRows.push(k);
-              }
-            }
-            headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
-            rowsToImport = finalRows;
-          } else if (extractCompetFinal && competFromHeader) {
-            rowsToImport = parsedFinalScoped.rows.map((r: any) => ({ ...r, Copetencia: competFromHeader }));
-            if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
-          }
-        }
-
-        const extraStatic: Record<string, string | null> = {};
-        if (kindLowerInner === 'recurso_adfego' || kindLowerInner === 'recurso_eletra' || kindLowerInner === 'recurso_trt' || kindLowerInner === 'recurso_tre' || kindLowerInner === 'recurso_neoconsig_demais' || kindLowerInner === 'extratos' || kindLowerInner === 'relatorio') {
-          if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
-        }
-
-        console.log(`\n` + '═'.repeat(110));
-        console.log(`║ [DEBUG LOCAL NEOCONSIG L30002-ONESHOT] ANTES DO INSERT — arquivo=${String(fileScoped.name ?? '?')}  kind=${kindLowerInner}`);
-        console.log(`═`.repeat(110));
-        const optsX = profileScoped?.resolvedOptions ?? {};
-        console.log(`║ [1/5] profile.resolvedOptions (${Object.keys(optsX).length} chaves):`);
-        Object.keys(optsX).sort().forEach(fn => {
-          const v = (optsX as any)[fn];
-          const mark = (typeof v === 'boolean' && v === true) ? '✅ TRUE ' : (typeof v === 'boolean' ? '❌ FALSE' : `⚠️ ${typeof v}`);
-          console.log(`║       ${mark}  ${fn}${typeof v !== 'boolean' ? ' = ' + JSON.stringify(v).slice(0, 80) : ''}`);
-        });
-        console.log(`║ [2/5] Strict whitelist matches = ${out.strictMatchesCount}/${out.strictMinMatches}`);
-        if (Array.isArray(out.strictMatches)) {
-          out.strictMatches.forEach(m => console.log(`║       ✅ ${m.sourceHeader.padEnd(32)} → ${m.targetHeader}`));
-        }
-        console.log(`║ [3/5] Competência = ${competFromHeader ?? 'NULL'}  |  moveToImportados = ${moveToImportadosFinal}  |  checkDup = ${checkDupFinal}`);
-        console.log(`║ [4/5] headersToImport (${headersToImport.length} cols — ORDEM):`);
-        headersToImport.slice(0, 40).forEach((h, i) => {
-          const cidMark = (i <= 9) ? ` 🔹CID${String(i).padStart(2,'0')}` : `     `;
-          console.log(`║       [${String(i).padStart(2,'0')}]${cidMark}  ${h}`);
-        });
-        if (rowsToImport && rowsToImport.length > 0) {
-          const r0 = rowsToImport[0];
-          console.log(`║ [5/5] rowsToImport[0] — total=${rowsToImport.length} linhas:`);
-          const main10 = ['Nome','CPF','Copetencia','Desc Finalidade','Contrato','N Parcela','Qtd Parcelas','Vencimento','Critério de Débito','Valor Parcela'];
-          for (const mk of main10) {
-            const v = (r0 as any)?.[mk];
-            const ok = (v !== null && v !== undefined && String(v).trim() !== '');
-            console.log(`║       10COLS ${ok ? '✅' : '❌'} ${mk.padEnd(20)} → ${JSON.stringify(v)}`);
-          }
-          Object.keys(r0||{}).filter(k => !main10.includes(k)).slice(0, 20).forEach(k => {
-            const v = (r0 as any)?.[k];
-            if (v === null || v === undefined || String(v).trim() === '') return;
-            console.log(`║       EXTRA  🔹 ${String(k).padEnd(20)} → ${JSON.stringify(String(v ?? '').slice(0, 40))}`);
-          });
-        } else {
-          console.log(`║ [5/5] rowsToImport VAZIO length=0`);
-        }
-        console.log(`═`.repeat(110) + '\n');
-
-        // ====== SPLIT DINÂMICO POR SECRETARIA — ONESHOT NEOCONSIG LOCAL ======
-        let res: { insertedRows: number; skippedRows: number } = { insertedRows: 0, skippedRows: 0 };
-        const splitEnabledOneshot: boolean =
-          kindLowerInner === 'recurso_neoconsig_demais' && Array.isArray(rowsToImport) && rowsToImport.length > 0;
-        const secretariaHeadersCandidates: string[] = [];
-        const firstRowKeys = Object.keys(rowsToImport[0] ?? {});
-        for (const k of firstRowKeys) {
-          if (normalizeHeaderKey(k).replace(/\s+/g, '') === 'SECRETARIA') {
-            secretariaHeadersCandidates.push(k);
-          }
-        }
-        const secretariaKeyOneshot: string | null = secretariaHeadersCandidates[0] ?? null;
-        const groupsOneshot: Array<{ secretaria: string; targetTable: string; rows: Array<Record<string, unknown>> }> = [];
-        if (splitEnabledOneshot && secretariaKeyOneshot) {
-          const map = new Map<string, Array<Record<string, unknown>>>();
-          for (const rawRow of rowsToImport as Array<Record<string, unknown>>) {
-            const raw = String((rawRow as any)[secretariaKeyOneshot] ?? '').trim();
-            let norm = String(raw ?? '')
-              .normalize('NFD')
-              .replace(/[\u0300-\u036f]/g, '')
-              .toUpperCase()
-              .replace(/\s+/g, ' ')
-              .trim();
-            if (norm === '' || norm === 'NÃO IDENTIFICADA' || norm === 'NAO IDENTIFICADA') {
-              norm = '';
-            }
-            if (!map.has(norm)) map.set(norm, []);
-            (map.get(norm) as Array<Record<string, unknown>>).push(rawRow as Record<string, unknown>);
-          }
-          for (const [norm, rows] of Array.from(map.entries()).sort((a, b) => b[1].length - a[1].length)) {
-            const tt: string = norm === '' ? String(tableNameInner) : 'Recurso ' + norm;
-            groupsOneshot.push({ secretaria: norm === '' ? '(fallback)' : norm, targetTable: tt, rows });
-          }
-        }
-        if (groupsOneshot.length > 0) {
-          const extraArg = Object.keys(extraStatic).length > 0 ? extraStatic : undefined;
-          let iTot = 0;
-          let sTot = 0;
-          const lines: string[] = [];
-          lines.push('\n' + '═'.repeat(110));
-          lines.push(`║ [SPLIT NEOCONSIG SECRETARIA ONESHOT] totalRows=${rowsToImport.length} grupos=${groupsOneshot.length}`);
-          lines.push('═'.repeat(110));
-          for (let gi = 0; gi < groupsOneshot.length; gi++) {
-            const g = groupsOneshot[gi];
-            const part = addMissingColumnsAndImportRows(
-              db,
-              g.targetTable,
-              headersToImport,
-              g.rows as Array<Record<string, any>>,
-              checkDupFinal,
-              modeOverrideFinal,
-              extraArg,
-            );
-            iTot += part.insertedRows;
-            sTot += part.skippedRows;
-            lines.push(`║   [GRUPO ${String(gi + 1).padStart(2, '0')}/${String(groupsOneshot.length).padStart(2, '0')}]  secretaria="${g.secretaria}"  →  tabela="${g.targetTable}"  rows=${String(g.rows.length).padStart(4, ' ')}  inserted=${String(part.insertedRows).padStart(4, ' ')}  skipped=${String(part.skippedRows).padStart(4, ' ')}`);
-          }
-          lines.push('═'.repeat(110) + '\n');
-          console.log(lines.join('\n'));
-          res = { insertedRows: iTot, skippedRows: sTot };
-          out.neoconSecretariaGroups = groupsOneshot.map(g => ({ secretaria: g.secretaria, targetTable: g.targetTable, rowsInput: g.rows.length, insertedRows: 0, skippedRows: 0 }));
-        } else {
-          res = addMissingColumnsAndImportRows(
-            db,
-            tableNameInner,
-            headersToImport,
-            rowsToImport,
-            checkDupFinal,
-            modeOverrideFinal,
-            Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
-          );
-        }
-        insertedRows = res.insertedRows;
-        skippedRows = res.skippedRows;
-        out.insertResult = res;
-        out.resGlobal = { insertedRows: res.insertedRows, skippedRows: res.skippedRows };
-        out.gateMovePassa = (res.insertedRows > 0 || res.skippedRows > 0);
-        markFileImportedByContentHash(db, sha256Hex, {
-          fileName,
-          fileId,
-          kind: profile?.kind || null,
-          targetTable: groupsOneshot.length > 0 ? ('multi split: ' + groupsOneshot.map(g => g.targetTable).join(',')) : (profile?.target_table || null),
-          profileId: profile?.id || null,
-          insertedRows: res.insertedRows,
-          skippedRows: res.skippedRows,
-          mode: modeOverrideFinal,
-          at: new Date().toISOString(),
-        });
-        importedFiles.push({
-          fileName,
-          targetTable: groupsOneshot.length > 0 ? groupsOneshot.map(g => g.targetTable) : (profile?.target_table),
-          kind: profile?.kind,
-          profileId: profile?.id,
-          insertedRows: res.insertedRows,
-          skippedRows: res.skippedRows,
-          headers: headersToImport.slice(0, 30),
-          skippedReason: null,
-          groups: groupsOneshot.length > 0 ? groupsOneshot.map(g => ({ secretaria: g.secretaria, targetTable: g.targetTable, rows: g.rows.length })) : null,
-        });
-      }
-      out.importedFiles = importedFiles;
-      out.insertedRowsFinal = insertedRows;
-      out.skippedRowsFinal = skippedRows;
-    } catch (pipeE: any) {
-      out.pipelineError = String(pipeE?.stack || pipeE?.message || pipeE).slice(0, 2000);
-      out.importedFiles = importedFiles;
-      out.insertedRowsFinal = insertedRows;
-      out.skippedRowsFinal = skippedRows;
-    }
-
-    try {
-      const cntQ = db.exec(`SELECT COUNT(*) AS c FROM "Recurso (NEOCONSIG)"`);
-      out.countAll = (cntQ && cntQ[0] && cntQ[0].values && cntQ[0].values[0]) ? cntQ[0].values[0][0] : null;
-      const cntCop = db.exec(`SELECT Copetencia, COUNT(*) AS c FROM "Recurso (NEOCONSIG)" GROUP BY Copetencia ORDER BY Copetencia`);
-      out.countByCopetencia = (cntCop && cntCop[0] && cntCop[0].columns && cntCop[0].values)
-        ? cntCop[0].values.map((v: any) => ({ Copetencia: v[0], count: v[1] }))
-        : [];
-    } catch (qE: any) { out.countError = String(qE.message || qE).slice(0, 200); }
-
-    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
-    try { await db.close(); } catch (_) { /* ignore */ }
-
-    out.ok = true;
-    out.phase = 'done';
-    out.hint = 'Debug oneshot LOCAL NEOCONSIG finalizado. Ver logs acima. SQL final: SELECT rowid,* FROM "Recurso (NEOCONSIG)" ORDER BY rowid DESC LIMIT 10;';
-    return out;
-  } catch (e: any) {
-    out.phase = 'uncaught';
-    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
-    return out;
-  }
-}
-// #endregion
-
-// #region debug-oneshot-adfego-extrato-local
-export async function debugOneshotAdfegoExtratoLocalImport(opts: {
-  localXlsxPath?: string;
-  fileName?: string;
-  folderPath?: string;
-  fileId?: string;
-  parentFolderId?: string;
-  mode?: 'append' | 'replace';
-  resetHashesFirst?: boolean;
-  deleteLixoRowidsGte2?: boolean;
-}): Promise<Record<string, unknown>> {
-  const out: Record<string, unknown> = { ok: false, phase: 'init' };
-  const _crypto = require('crypto') as typeof import('crypto');
-  const _fs = require('fs') as typeof import('fs');
-  const _path = require('path') as typeof import('path');
-  try {
-    const dbFilePath = getSqlitePath();
-    const db = await openDatabase(dbFilePath);
-    ensureSchema(db);
-    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
-
-    if (Boolean(opts.resetHashesFirst ?? true)) {
-      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%ADFEGO%' OR value LIKE '%JULHO%' OR value LIKE '%extratos_adfego%')`);
-      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'extratos'`);
-      db.run(`DELETE FROM import_batch_rows WHERE kind = 'extratos'`);
-      db.run(`DELETE FROM import_batches WHERE kind = 'extratos'`);
-    }
-    if (Boolean(opts.deleteLixoRowidsGte2 ?? true)) {
-      try {
-        const rDel = db.run("DELETE FROM extratos WHERE CompetenciaArquivo LIKE 'ADFEGO-%'");
-        out.deletedLixoRowidsGte2 = rDel.getRowsModified();
-      } catch (_) { out.deletedLixoRowidsGte2 = null; }
-    }
-
-    const localPath = String(opts.localXlsxPath || '').trim();
-    if (!localPath || !_fs.existsSync(localPath)) {
-      out.error = `localXlsxPath não existe: ${localPath}`;
-      return out;
-    }
-    out.localXlsxPath = localPath;
-    const buffer = _fs.readFileSync(localPath);
-    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
-    out.sha256 = sha256Hex;
-    out.bufferBytes = buffer.length;
-    out.phase = 'sheetRead';
-
-    const fileName = String(opts.fileName || _path.basename(localPath) || 'ADFEGO-JULHO-2026.xlsx');
-    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Julho/Extratos de Recurso/ADFEGO');
-    const fileId = String(opts.fileId || 'debug-local-adfego-extrato-' + Date.now());
-    const parentId = String(opts.parentFolderId || 'debug-local-parent-adfego');
-    const mode = String(opts.mode || 'append') as 'append' | 'replace';
-
-    out.phase = 'learningProfileResolve';
-    const allProfilesRaw = findLearningProfilesFor(db, '', 'extratos');
-    const allProfiles = (Array.isArray(allProfilesRaw) ? allProfilesRaw.slice() : []).sort((a: any, b: any) => {
-      const aId = String(a?.id || '').toLowerCase();
-      const bId = String(b?.id || '').toLowerCase();
-      const aGeneric = aId === 'extratos_recurso' ? 1 : 0;
-      const bGeneric = bId === 'extratos_recurso' ? 1 : 0;
-      if (aGeneric !== bGeneric) return aGeneric - bGeneric;
-      return aId.localeCompare(bId);
-    });
-    let matchedProfile: LearningProfileMatch | null = null;
-    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
-    for (const p of allProfiles) {
-      try {
-        const reTxt = String(p.file_name_regex ?? '').trim();
-        if (!reTxt) continue;
-        if (new RegExp(reTxt, 'i').test(fileName)) {
-          matchedProfile = p; break;
-        }
-      } catch (_re) { /* ignore */ }
-    }
-    if (!matchedProfile) {
-      // Fallback: força match no perfil extratos_adfego_go id se ele existir
-      matchedProfile = allProfiles.find((p: any) => String(p.id).toLowerCase() === 'extratos_adfego_go') || null;
-    }
-    if (!matchedProfile && allProfiles.length > 0) matchedProfile = allProfiles[0];
-    if (!matchedProfile) {
-      out.error = `Nenhum learning profile kind=extratos encontrou arquivo ${fileName}. Perfil extratos_adfego_go upsert falhou?`;
-      try { persistDatabase(db, dbFilePath); } catch (_) {}
-      try { await db.close(); } catch (_) {}
-      return out;
-    }
-    out.profile = { id: matchedProfile.id, kind: matchedProfile.kind, target_table: matchedProfile.target_table, file_name_regex: matchedProfile.file_name_regex };
-    const profile: any = {
-      id: matchedProfile.id,
-      kind: matchedProfile.kind,
-      target_table: matchedProfile.target_table,
-      resolvedOptions: typeof matchedProfile.options_json === 'string' ? JSON.parse(matchedProfile.options_json) : (matchedProfile.options_json || {}),
-    };
-
-    const kindLower = String(profile?.kind || '').trim().toLowerCase();
-    out.kindLower = kindLower;
-    const tableName = String(profile?.target_table || 'extratos');
-    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
-
-    const file: any = { name: fileName, folderPath, id: fileId, parentId, size: buffer.length };
-    const parsedFinal: any = readSheetTable(buffer, 'extratos');
-    const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
-    out.headersDetected = (parsedFinal?.headers || []).slice(0, 12);
-    out.rowsDetected = Number(parsedFinal?.rows?.length) || 0;
-    out.phase = 'insertExtratosRows pipeline';
-
-    const ir = insertExtratosRows({
-      db,
-      sourceFile: sourceFileFull,
-      fileColumns: parsedFinal.headers,
-      rows: parsedFinal.rows,
-      learningProfileId: profile?.id ?? null,
-      learningProfileOptions:
-        (profile && profile.resolvedOptions && typeof profile.resolvedOptions === 'object')
-          ? (profile.resolvedOptions as Record<string, unknown>)
-          : null,
-    });
-    out.insertResult = ir;
-    const insertedRows = ir.insertedRows;
-    const skippedRows = ir.skippedRows;
-
-    markFileImportedByContentHash(db, sha256Hex, {
-      fileName,
-      fileId,
-      kind: profile?.kind || null,
-      targetTable: profile?.target_table || null,
-      profileId: profile?.id || null,
-      insertedRows,
-      skippedRows,
-      mode,
-      at: new Date().toISOString(),
-    });
-    out.importedFiles = [{
-      fileName,
-      targetTable: profile?.target_table,
-      kind: profile?.kind,
-      profileId: profile?.id,
-      insertedRows,
-      skippedRows,
-      headers: parsedFinal.headers.slice(0, 24),
-      skippedReason: null,
-    }];
-    out.insertedRowsFinal = insertedRows;
-    out.skippedRowsFinal = skippedRows;
-
-    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
-    try { await db.close(); } catch (_) { /* ignore */ }
-
-    out.ok = true;
-    out.phase = 'done';
-    out.hint = 'Debug oneshot LOCAL ADFEGO extrato finalizado. Validar SQL: SELECT rowid,DATA,DOCUMENTO,HISTÓRICO,VALOR,Copetencia,CompetenciaArquivo,__source_file FROM extratos WHERE CompetenciaArquivo LIKE \'ADFEGO-%\' ORDER BY rowid DESC LIMIT 10;';
-    return out;
-  } catch (e: any) {
-    out.phase = 'uncaught';
-    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
-    return out;
-  }
-}
-// #endregion
-
-// #region debug-oneshot-eletra-extrato-local
-export async function debugOneshotEletraExtratoLocalImport(opts: {
-  localXlsxPath?: string;
-  fileName?: string;
-  folderPath?: string;
-  fileId?: string;
-  parentFolderId?: string;
-  mode?: 'append' | 'replace';
-  resetHashesFirst?: boolean;
-  deleteLixoRowidsGte2?: boolean;
-}): Promise<Record<string, unknown>> {
-  const out: Record<string, unknown> = { ok: false, phase: 'init' };
-  const _crypto = require('crypto') as typeof import('crypto');
-  const _fs = require('fs') as typeof import('fs');
-  const _path = require('path') as typeof import('path');
-  try {
-    const dbFilePath = getSqlitePath();
-    const db = await openDatabase(dbFilePath);
-    ensureSchema(db);
-    try { ensureDefaultLearningProfiles(db); } catch { /* ignore */ }
-
-    if (Boolean(opts.resetHashesFirst ?? true)) {
-      db.run(`DELETE FROM consignado_app_config WHERE key LIKE 'imported_file_sha256::v1::%' AND (value LIKE '%ELETRO%' OR value LIKE '%ELETRA%' OR value LIKE '%EQTPREV%' OR value LIKE '%JULHO%' OR value LIKE '%extratos_eletra%')`);
-      db.run(`DELETE FROM imported_row_hashes WHERE kind = 'extratos'`);
-      db.run(`DELETE FROM import_batch_rows WHERE kind = 'extratos'`);
-      db.run(`DELETE FROM import_batches WHERE kind = 'extratos'`);
-    }
-    if (Boolean(opts.deleteLixoRowidsGte2 ?? true)) {
-      try {
-        const rDel = db.run("DELETE FROM extratos WHERE CompetenciaArquivo LIKE 'ELETRO-%' OR CompetenciaArquivo LIKE 'ELETRA-%' OR CompetenciaArquivo LIKE 'EQTPREV-%'");
-        out.deletedLixoRowidsGte2 = rDel.getRowsModified();
-      } catch (_) { out.deletedLixoRowidsGte2 = null; }
-    }
-
-    const localPath = String(opts.localXlsxPath || '').trim();
-    if (!localPath || !_fs.existsSync(localPath)) {
-      out.error = `localXlsxPath não existe: ${localPath}`;
-      return out;
-    }
-    out.localXlsxPath = localPath;
-    const buffer = _fs.readFileSync(localPath);
-    const sha256Hex = _crypto.createHash('sha256').update(buffer).digest('hex');
-    out.sha256 = sha256Hex;
-    out.bufferBytes = buffer.length;
-    out.phase = 'sheetRead';
-
-    const fileName = String(opts.fileName || _path.basename(localPath) || 'ELETRA-JULHO-2026.xlsx');
-    const folderPath = String(opts.folderPath || '9.Recuperação de Crédito/2026/Julho/Extratos de Recurso/ELETRA');
-    const fileId = String(opts.fileId || 'debug-local-eletra-extrato-' + Date.now());
-    const parentId = String(opts.parentFolderId || 'debug-local-parent-eletra');
-    const mode = String(opts.mode || 'append') as 'append' | 'replace';
-
-    out.phase = 'learningProfileResolve';
-    const allProfilesRaw = findLearningProfilesFor(db, '', 'extratos');
-    const allProfiles = (Array.isArray(allProfilesRaw) ? allProfilesRaw.slice() : []).sort((a: any, b: any) => {
-      const aId = String(a?.id || '').toLowerCase();
-      const bId = String(b?.id || '').toLowerCase();
-      const aGeneric = aId === 'extratos_recurso' ? 1 : 0;
-      const bGeneric = bId === 'extratos_recurso' ? 1 : 0;
-      if (aGeneric !== bGeneric) return aGeneric - bGeneric;
-      return aId.localeCompare(bId);
-    });
-    let matchedProfile: LearningProfileMatch | null = null;
-    const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
-    for (const p of allProfiles) {
-      try {
-        const reTxt = String(p.file_name_regex ?? '').trim();
-        if (!reTxt) continue;
-        if (new RegExp(reTxt, 'i').test(fileName)) {
-          matchedProfile = p; break;
-        }
-      } catch (_re) { /* ignore */ }
-    }
-    if (!matchedProfile) {
-      matchedProfile = allProfiles.find((p: any) => String(p.id).toLowerCase() === 'extratos_eletra_go') || null;
-    }
-    if (!matchedProfile && allProfiles.length > 0) matchedProfile = allProfiles[0];
-    if (!matchedProfile) {
-      out.error = `Nenhum learning profile kind=extratos encontrou arquivo ${fileName}. Perfil extratos_eletra_go upsert falhou?`;
-      try { persistDatabase(db, dbFilePath); } catch (_) {}
-      try { await db.close(); } catch (_) {}
-      return out;
-    }
-    out.profile = { id: matchedProfile.id, kind: matchedProfile.kind, target_table: matchedProfile.target_table, file_name_regex: matchedProfile.file_name_regex };
-    const profile: any = {
-      id: matchedProfile.id,
-      kind: matchedProfile.kind,
-      target_table: matchedProfile.target_table,
-      resolvedOptions: typeof matchedProfile.options_json === 'string' ? JSON.parse(matchedProfile.options_json) : (matchedProfile.options_json || {}),
-    };
-
-    const kindLower = String(profile?.kind || '').trim().toLowerCase();
-    out.kindLower = kindLower;
-    const tableName = String(profile?.target_table || 'extratos');
-    const checkDup = Boolean(profile?.resolvedOptions?.checkDuplicateContent ?? true);
-
-    const file: any = { name: fileName, folderPath, id: fileId, parentId, size: buffer.length };
-    const parsedFinal: any = readSheetTable(buffer, 'extratos');
-    const sourceFileFull = folderPath ? `${folderPath}/${fileName}` : fileName;
-    out.headersDetected = (parsedFinal?.headers || []).slice(0, 12);
-    out.rowsDetected = Number(parsedFinal?.rows?.length) || 0;
-    out.phase = 'insertExtratosRows pipeline';
-
-    const ir = insertExtratosRows({
-      db,
-      sourceFile: sourceFileFull,
-      fileColumns: parsedFinal.headers,
-      rows: parsedFinal.rows,
-      learningProfileId: profile?.id ?? null,
-      learningProfileOptions:
-        (profile && profile.resolvedOptions && typeof profile.resolvedOptions === 'object')
-          ? (profile.resolvedOptions as Record<string, unknown>)
-          : null,
-    });
-    out.insertResult = ir;
-    const insertedRows = ir.insertedRows;
-    const skippedRows = ir.skippedRows;
-
-    markFileImportedByContentHash(db, sha256Hex, {
-      fileName,
-      fileId,
-      kind: profile?.kind || null,
-      targetTable: profile?.target_table || null,
-      profileId: profile?.id || null,
-      insertedRows,
-      skippedRows,
-      mode,
-      at: new Date().toISOString(),
-    });
-    out.importedFiles = [{
-      fileName,
-      targetTable: profile?.target_table,
-      kind: profile?.kind,
-      profileId: profile?.id,
-      insertedRows,
-      skippedRows,
-      headers: parsedFinal.headers.slice(0, 24),
-      skippedReason: null,
-    }];
-    out.insertedRowsFinal = insertedRows;
-    out.skippedRowsFinal = skippedRows;
-
-    try { persistDatabase(db, dbFilePath); out.persistDb = true; } catch (ePers: any) { out.persistDb = String(ePers.message || ePers).slice(0, 120); }
-    try { await db.close(); } catch (_) { /* ignore */ }
-
-    out.ok = true;
-    out.phase = 'done';
-    out.hint = 'Debug oneshot LOCAL ELETRA extrato finalizado. Validar SQL: SELECT rowid,DATA,DOCUMENTO,HISTÓRICO,VALOR,Copetencia,CompetenciaArquivo,__source_file FROM extratos WHERE CompetenciaArquivo LIKE \'ELETRO-%\' OR CompetenciaArquivo LIKE \'ELETRA-%\' OR CompetenciaArquivo LIKE \'EQTPREV-%\' ORDER BY rowid DESC LIMIT 10;';
-    return out;
-  } catch (e: any) {
-    out.phase = 'uncaught';
-    out.error = String(e?.stack || e?.message || String(e || '')).slice(0, 2000);
-    return out;
-  }
-}
-// #endregion
-
 export async function importByLearningProfileFromShareUrl(opts: {
   fileUrl: string;
 }): Promise<ReturnType<typeof importByLearningProfileFromFolderUrl>> {
@@ -35259,10 +32525,6 @@ export async function runImportConsignado(opts: {
   notificationEmail?: { attempted: boolean; sent: boolean; to: string[]; error?: string | null };
   notificationEmailsByKind?: Record<string, { attempted: boolean; sent: boolean; to: string[]; error?: string | null }>;
 }> {
-  const prevSyncRunning = (globalThis as any).__importSyncRunning === true;
-  (globalThis as any).__importSyncRunning = true;
-  try {
-  return await withRetryOnDbClosed('runImportConsignado', async (attempt) => {
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
@@ -35302,8 +32564,6 @@ export async function runImportConsignado(opts: {
   if (rawTarget) {
     const tLow = rawTarget.toLowerCase();
     if (tLow === 'extratos' || tLow === 'extrato') {
-      kinds = [{ kind: 'extratos' }];
-    } else if (tLow === 'extratos_todos' || tLow === 'extrato_todos') {
       kinds = [{ kind: 'extratos' }];
     } else if (tLow === 'relatorio' || tLow === 'relatorios' || tLow === 'sisbr') {
       kinds = [{ kind: 'relatorio' }];
@@ -35400,7 +32660,6 @@ export async function runImportConsignado(opts: {
         tablesCreated: [],
         dbFilePath: null,
       };
-      if (isDatabaseClosedError(e)) throw e;
     }
   }
   const notificationEmailsByKind: Record<string, { attempted: boolean; sent: boolean; to: string[]; error?: string | null }> = {};
@@ -35436,350 +32695,28 @@ export async function runImportConsignado(opts: {
     notificationEmail: primaryNotificationEmail,
     notificationEmailsByKind,
   };
-  }, 5);
-  } finally {
-    if (!prevSyncRunning) {
-      (globalThis as any).__importSyncRunning = false;
-    }
-  }
-}
-
-function formatOccurrencesPanoramaOrgaoLabel(orgaoRaw: unknown): string {
-  const raw = String(orgaoRaw ?? '').trim();
-  const key = normalizeExtratosOrgaoForMatch(raw) ?? '';
-  if (key === 'PIX RECEBIDO OUTRA IF') return '(ELETRA) PIX RECEBIDO - OUTRA IF';
-  if (key === 'CRED LIQUIDACAO COBRANCA') return '(ADFEGO) CRÉD.LIQUIDAÇÃO COBRANÇA';
-  return raw;
-}
-function formatOccurrenceActionLabel(actionRaw: unknown): string {
-  const t = String(actionRaw ?? '').trim().toLowerCase() || '';
-  if (!t) return '-';
-  const simple = t.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!simple) return '-';
-  if (simple.startsWith('solicitar encaminhamento credito')) return 'Solicitar Encaminhamento Crédito';
-  if (simple.startsWith('solicitar encaminhamento negocios')) return 'Solicitar Encaminhamento Negócios';
-  if (simple.startsWith('solicitar recurso sisbr')) return 'Solicitar Recurso SISBR';
-  if (simple.startsWith('enviar para contabilidade')) return 'Enviar para Contabilidade';
-  if (simple.startsWith('fechamento financeiro')) return 'Fechamento Financeiro';
-  if (simple.startsWith('credito liquidacao cobranca')) return 'Crédito Liquidação Cobrança';
-  if (simple.startsWith('liquidacao fora vencimento')) return 'Liquidação Fora Vencimento';
-  if (simple.startsWith('nao possui recurso')) return 'Não Possui Recurso';
-  if (simple.startsWith('clonar sisbr')) return 'Clonar para SISBR';
-  if (simple.startsWith('alterar orgao relatorio')) return 'Alterar Órgão Relatório';
-  if (simple.startsWith('devolucao antecipado')) return 'Devolução (Antecipado)';
-  if (simple.startsWith('devolucao quitado')) return 'Devolução (Quitado)';
-  if (simple.startsWith('antecipado devolvido')) return 'Antecipado Devolvido';
-  return simple.length > 1
-    ? simple.charAt(0).toUpperCase() + simple.slice(1)
-    : simple;
-}
-function formatOccurrencesPanoramaStageLabel(stage: unknown): string {
-  const value = String(stage ?? '').trim().toLowerCase();
-  if (value === 'credito') return 'Crédito';
-  if (value === 'negocios') return 'Negócios';
-  return 'Financeiro';
-}
-function formatOccurrencesPanoramaManagerLabel(emailRaw: unknown): string {
-  const email = String(emailRaw ?? '').trim().toLowerCase();
-  if (!email) return 'Sem gerente';
-  const localPart = email.split('@')[0] ?? '';
-  const words = localPart
-    .split(/[._-]+/g)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => item.charAt(0).toUpperCase() + item.slice(1));
-  return words.length > 0 ? words.join(' ') : email;
-}
-function getOccurrencesPanoramaMonthLabel(monthKey: unknown): string {
-  const match = String(monthKey ?? '').trim().match(/^(\d{4})-(\d{2})$/);
-  if (!match) return String(monthKey ?? '').trim() || '-';
-  return `${match[2]}/${match[1]}`;
-}
-function resolveLatestOccurrencesPanoramaMonthKey(db: Database): string | null {
-  if (!tableExists(db, 'conciliacao_pendencia_actions')) return null;
-  const stmt = db.prepare(`SELECT month
-     FROM conciliacao_pendencia_actions
-     WHERE COALESCE(TRIM(undone_at),'')=''
-       AND COALESCE(TRIM(error),'')=''
-       AND TRIM(COALESCE(month,''))<>''
-     GROUP BY month
-     ORDER BY month DESC
-     LIMIT 1;`);
-  try {
-    if (!stmt.step()) return null;
-    const row = stmt.getAsObject() as any;
-    return String(row.month ?? '').trim() || null;
-  } finally { stmt.free(); }
-}
-
-interface FullPanorama2408Data {
-  monthKey: string;
-  summary: { ocorrenciasEmAtraso: number; orgaosComAtraso: number; filasComAtraso: number };
-  managerCards: Array<{ label: string; total: number }>;
-  topStages: Array<{ label: string; total: number }>;
-  topOrgaos: Array<{ label: string; total: number }>;
-  topActions: Array<{ label: string; total: number }>;
-  recentItems: Array<{ createdAt: string; orgao: string; nome: string; value: string; action: string; stage: string; vencimento: string | null }>;
-  subject: string;
-}
-
-function buildFullPanorama2408Html(opts: {
-  monthKey: string;
-  summary: { ocorrenciasEmAtraso: number; orgaosComAtraso: number; filasComAtraso: number };
-  managerCards: Array<{ label: string; total: number }>;
-  topStages: Array<{ label: string; total: number }>;
-  topOrgaos: Array<{ label: string; total: number }>;
-  topActions: Array<{ label: string; total: number }>;
-  recentItems: Array<{ createdAt: string; orgao: string; nome: string; value: string; action: string; stage: string; vencimento: string | null }>;
-}): string {
-  const summaryCard = (label: string, value: string, tone?: { background?: string; border?: string; labelColor?: string; valueColor?: string }): string => `
-    <td style="padding:0 6px 12px 6px;vertical-align:top;">
-      <div style="padding:14px 16px;border-radius:16px;background:${tone?.background ?? '#f8fafc'};border:1px solid ${tone?.border ?? '#dbe4ee'};min-height:92px;">
-        <div style="font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:${tone?.labelColor ?? '#64748b'};margin-bottom:10px;line-height:1.35;">
-          ${escapeHtml(label)}
-        </div>
-        <div style="font-size:24px;font-weight:900;color:${tone?.valueColor ?? '#0f172a'};line-height:1.1;">
-          ${escapeHtml(value)}
-        </div>
-      </div>
-    </td>`;
-  const renderRankingTable = (title: string, colLabel: string, items: Array<{ label: string; total: number }>): string => `
-    <div style="margin-top:18px;padding:18px;border-radius:18px;background:#ffffff;border:1px solid #e2e8f0;">
-      <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:12px;">${escapeHtml(title)}</div>
-      ${items.length === 0
-        ? '<div style="font-size:13px;color:#64748b;">Nenhum item para exibir.</div>'
-        : `<table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
-             <thead>
-               <tr>
-                 <th style="text-align:left;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">${escapeHtml(colLabel)}</th>
-                 <th style="text-align:right;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Qtd.</th>
-               </tr>
-             </thead>
-             <tbody>
-               ${items.map((item) => `
-                   <tr>
-                     <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:13px;color:#0f172a;">${escapeHtml(item.label)}</td>
-                     <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:13px;color:#0f172a;text-align:right;font-weight:800;">${escapeHtml(String(item.total))}</td>
-                   </tr>`).join('')}
-             </tbody>
-           </table>`}
-    </div>`;
-  const managerCardsHtml = opts.managerCards.length === 0 ? '' : `
-    <div style="margin-top:18px;padding:18px;border-radius:18px;background:#ffffff;border:1px solid #e2e8f0;">
-      <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:12px;">Quantidade em atraso por gerente</div>
-      <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:12px 12px;">
-        <tr>
-          ${opts.managerCards.map((item) => `
-              <td style="width:33.33%;min-width:180px;vertical-align:top;">
-                <div style="padding:14px 16px;border-radius:16px;background:#f8fafc;border:1px solid #dbe4ee;min-height:92px;">
-                  <div style="font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#64748b;margin-bottom:10px;line-height:1.35;">
-                    ${escapeHtml(item.label)}
-                  </div>
-                  <div style="font-size:24px;font-weight:900;color:#0f172a;line-height:1.1;">
-                    ${escapeHtml(String(item.total))}
-                  </div>
-                </div>
-              </td>`).join('')}
-        </tr>
-      </table>
-    </div>`;
-  const recentRows = opts.recentItems.length === 0
-    ? '<tr><td colspan="6" style="padding:12px 0;color:#64748b;font-size:13px;">Nenhuma pendência aberta encontrada.</td></tr>'
-    : opts.recentItems.map((item) => `
-        <tr>
-          <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:12px;color:#475569;white-space:nowrap;">${escapeHtml(formatIsoToPtBrDateTime(item.createdAt))}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.orgao)}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.nome)}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.action)}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;">${escapeHtml(item.stage)}</td>
-          <td style="padding:10px 0;border-bottom:1px solid #eef2f7;font-size:12px;color:#0f172a;text-align:right;white-space:nowrap;">${escapeHtml(item.vencimento || '-')}</td>
-        </tr>`).join('');
-  return `
-    <div style="font-size:14px;color:#334155;line-height:1.7;">
-      <div style="margin:0 0 16px;padding:16px 18px;border-radius:16px;background:linear-gradient(135deg, #f8fafc 0%, #eef6f7 100%);border:1px solid #d9e8eb;">
-        <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:6px;">Panorama diário das ocorrências em atraso</div>
-        <div>Resumo automático apenas das ocorrências já em atraso na competência <b>${escapeHtml(getOccurrencesPanoramaMonthLabel(opts.monthKey))}</b>.</div>
-      </div>
-
-      <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
-        <tr>
-          ${summaryCard('Ocorrências em atraso', String(opts.summary.ocorrenciasEmAtraso), {
-            background: '#ecfeff', border: '#bae6fd', valueColor: '#0f172a', labelColor: '#155e75',
-          })}
-          ${summaryCard('Órgãos com atraso', String(opts.summary.orgaosComAtraso), { background: '#f8fafc', border: '#dbe4ee' })}
-        </tr>
-        <tr>
-          ${summaryCard('Filas com atraso', String(opts.summary.filasComAtraso), {
-            background: '#fff7ed', border: '#fed7aa', valueColor: '#9a3412', labelColor: '#9a3412',
-          })}
-          ${summaryCard('Competência', escapeHtml(getOccurrencesPanoramaMonthLabel(opts.monthKey)), {
-            background: '#f8fafc', border: '#dbe4ee', valueColor: '#0f172a', labelColor: '#64748b',
-          })}
-        </tr>
-      </table>
-
-      ${managerCardsHtml}
-      ${renderRankingTable('Ocorrências em atraso por fila', 'Fila', opts.topStages)}
-      ${renderRankingTable('Top órgãos com ocorrência em atraso', 'Órgão', opts.topOrgaos)}
-      ${renderRankingTable('Top tipos de ocorrência em atraso', 'Ocorrência', opts.topActions)}
-
-      <div style="margin-top:18px;padding:18px;border-radius:18px;background:#ffffff;border:1px solid #e2e8f0;">
-        <div style="font-weight:900;color:#0f172a;font-size:16px;margin-bottom:12px;">Ocorrências em atraso mais recentes</div>
-        <table width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
-          <thead>
-            <tr>
-              <th style="text-align:left;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Data/Hora</th>
-              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Órgão</th>
-              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Nome</th>
-              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Ocorrência</th>
-              <th style="text-align:left;padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Fila</th>
-              <th style="text-align:right;padding:10px 0;border-bottom:1px solid #e2e8f0;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;">Vencimento</th>
-            </tr>
-          </thead>
-          <tbody>${recentRows}</tbody>
-        </table>
-      </div>
-    </div>`;
-}
-
-async function buildFullPanorama2408Data(db: Database, monthKeyInput: unknown): Promise<FullPanorama2408Data> {
-  const monthKey = String(monthKeyInput ?? '').trim() || resolveLatestOccurrencesPanoramaMonthKey(db) || '';
-  if (!monthKey) throw new Error('Nenhuma competência com ocorrências foi encontrada.');
-  const stmt = db.prepare(`
-    SELECT
-      a.id as id,
-      a.created_at as created_at,
-      a.orgao as orgao,
-      a.nome as nome,
-      a.value as value,
-      a.action as action,
-      a.gerente_email as gerente_email,
-      a.meta_json as meta_json,
-      f.sla_due_at as flow_sla_due_at,
-      COALESCE(f.stage, 'financeiro') as flow_stage,
-      COALESCE(f.status, 'aberta') as flow_status
-    FROM conciliacao_pendencia_actions a
-    LEFT JOIN conciliacao_pendencia_flow f ON f.occurrence_id = a.id
-    WHERE a.month = ?
-      AND COALESCE(TRIM(a.undone_at),'') = ''
-      AND COALESCE(TRIM(a.error),'') = '';
-  `);
-  const rows: Array<{
-    id: number;
-    createdAt: string;
-    orgao: string;
-    nome: string;
-    value: string;
-    action: string;
-    stage: 'credito' | 'negocios' | 'financeiro';
-    status: 'aberta' | 'concluida';
-    slaDueAt: string | null;
-    gerenteEmail: string | null;
-    vencimento: string | null;
-  }> = [];
-  const tryPickVencimentoFromMeta = (metaRaw: unknown): string => {
-    const raw = String(metaRaw ?? '').trim();
-    if (!raw) return '';
-    try {
-      const parsed = JSON.parse(raw);
-      const direct = String((parsed as any)?.vencimentoRef ?? (parsed as any)?.vencimento ?? (parsed as any)?.venc ?? '').trim();
-      if (direct) return normalizeVencimentoLabel(direct);
-      const firstRow = Array.isArray((parsed as any)?.rows) ? (parsed as any).rows[0] : null;
-      if (!firstRow || typeof firstRow !== 'object') return '';
-      const v = (firstRow as any)?.Vencimento ?? (firstRow as any)?.vencimento ?? (firstRow as any)?.['Vencto. Operação'] ?? (firstRow as any)?.['Vencto. Operacao'];
-      return v ? normalizeVencimentoLabel(v) : '';
-    } catch {
-      return '';
-    }
-  };
-  try {
-    stmt.bind([monthKey]);
-    while (stmt.step()) {
-      const row = stmt.getAsObject() as any;
-      const action = String(row.action ?? '').trim();
-      const stageRaw = String(row.flow_stage ?? '').trim().toLowerCase();
-      const stage = stageRaw === 'credito' ? 'credito' : stageRaw === 'negocios' ? 'negocios' : 'financeiro';
-      const statusRaw = String(row.flow_status ?? '').trim().toLowerCase();
-      const status = statusRaw === 'concluida' ? 'concluida' : 'aberta';
-      rows.push({
-        id: Number(row.id ?? 0) || 0,
-        createdAt: String(row.created_at ?? '').trim(),
-        orgao: String(row.orgao ?? '').trim(),
-        nome: String(row.nome ?? '').trim(),
-        value: String(row.value ?? '').trim(),
-        action,
-        stage,
-        status,
-        slaDueAt: typeof row.flow_sla_due_at === 'string' ? row.flow_sla_due_at.trim() || null : null,
-        gerenteEmail: typeof row.gerente_email === 'string' ? row.gerente_email.trim().toLowerCase() || null : null,
-        vencimento: (() => {
-          const picked = tryPickVencimentoFromMeta(String(row.meta_json ?? '').trim());
-          return picked && picked !== '-' ? picked : null;
-        })(),
-      });
-    }
-  } finally { stmt.free(); }
-  const nowMs = Date.now();
-  const overdueRows = rows.filter((row) => {
-    if (row.status !== 'aberta') return false;
-    if (!row.slaDueAt) return false;
-    const dueMs = Date.parse(row.slaDueAt);
-    if (!Number.isFinite(dueMs) || dueMs >= nowMs) return false;
-    if (row.action.startsWith('liquidacao_fora_vencimento')) return false;
-    if (row.action.startsWith('clonar_para_relatorio_sisbr')) return false;
-    if (row.action.startsWith('alterar_orgao_relatorio')) return false;
-    return true;
-  });
-  const countBy = <T>(items: T[], resolveKey: (row: T) => string): Array<{ label: string; total: number }> => {
-    const counts = new Map<string, number>();
-    for (const item of items) {
-      const key = resolveKey(item).trim();
-      if (!key) continue;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-    return Array.from(counts.entries())
-      .map(([label, total]) => ({ label, total }))
-      .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label, 'pt-BR'));
-  };
-  const summary = {
-    ocorrenciasEmAtraso: overdueRows.length,
-    orgaosComAtraso: new Set(overdueRows.map((row) => row.orgao).filter(Boolean)).size,
-    filasComAtraso: new Set(overdueRows.map((row) => row.stage).filter(Boolean)).size,
-  };
-  const managerCards = countBy(overdueRows, (row) => formatOccurrencesPanoramaManagerLabel(row.gerenteEmail || '')).slice(0, 6);
-  const topStages = countBy(overdueRows, (row) => formatOccurrencesPanoramaStageLabel(row.stage)).slice(0, 5);
-  const topOrgaos = countBy(overdueRows, (row) => formatOccurrencesPanoramaOrgaoLabel(row.orgao)).slice(0, 8);
-  const topActions = countBy(overdueRows, (row) => formatOccurrenceActionLabel(row.action)).slice(0, 8);
-  const recentItems = overdueRows
-    .slice()
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-    .slice(0, 12)
-    .map((row) => ({
-      createdAt: row.createdAt,
-      orgao: formatOccurrencesPanoramaOrgaoLabel(row.orgao),
-      nome: row.nome,
-      value: row.value,
-      action: formatOccurrenceActionLabel(row.action),
-      stage: formatOccurrencesPanoramaStageLabel(row.stage),
-      vencimento: row.vencimento,
-    }));
-  const subject = `Consignados - Panorama diário de ocorrências em atraso • ${getOccurrencesPanoramaMonthLabel(monthKey)} • ${summary.ocorrenciasEmAtraso} em atraso`;
-  return { monthKey, summary, managerCards, topStages, topOrgaos, topActions, recentItems, subject };
 }
 
 export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, unknown> = {}): Promise<{
   sent: boolean;
-  recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade' | 'custom'; email: string }>;
+  recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade'; email: string }>;
   subjectPrefix: string;
-  effectiveSubject?: string;
   countsByMonth: Record<string, { total: number; byAction: Record<string, number> }>;
-  slaBreaches?: Array<{ ocorrenciaId: number; stage: string; status: string; month: string; orgao: string; nome: string; cpf: string; action: string; value: string; slaStartedAt: string | null; slaDueAt: string | null; atrasoHoras: number; }>;
-  skippedReason?: 'memoSameDay' | 'dailySentPersisted' | 'sendingLock' | 'legacyLastSentAt' | 'noPendencias';
 }> {
+  // --- DESATIVADO POR SOLICITAÇÃO DO USUÁRIO em 2026-08-17 ---
+  // Envio automático e manual do panorama diário estão desligados.
+  // Para reativar no futuro basta remover/condicionar o early return abaixo
+  // (deixando passar apenas quando opts.force === true, por exemplo).
   const forceSend = Boolean(_opts?.force ?? false);
-  const legacyTemplate = Boolean(_opts?.legacyTemplate ?? false);
-  const withCartaDiretoria = Boolean(_opts?.withCartaDiretoria ?? false);
-  const withFullPanorama2408 = Boolean(_opts?.withFullPanorama2408 ?? false);
+  if (!forceSend) {
+    const hoje = formatDatePtBr(new Date());
+    return {
+      sent: false,
+      recipients: [],
+      subjectPrefix: `Panorama diário de ocorrências ${hoje} (desativado)`,
+      countsByMonth: {},
+    };
+  }
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
@@ -35822,140 +32759,35 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
     } finally { s.free(); }
   } catch { /* ignore */ }
 
-  const slaBreaches: Array<{
-    ocorrenciaId: number; stage: string; status: string; month: string; orgao: string; nome: string;
-    cpf: string; action: string; value: string; slaStartedAt: string | null; slaDueAt: string | null; atrasoHoras: number;
-  }> = [];
-  try {
-    const nowMs = Date.now();
-    const s2 = db.prepare(`
-      SELECT f.occurrence_id, f.stage, f.status, f.sla_started_at, f.sla_due_at, f.sla_seconds,
-             a.month, a.orgao, a.cpf, a.nome, a.action, a.value
-      FROM conciliacao_pendencia_flow f
-      INNER JOIN conciliacao_pendencia_actions a ON a.id = f.occurrence_id
-      WHERE COALESCE(f.sla_stopped_at,'') = ''
-        AND COALESCE(f.sla_due_at,'') <> ''
-        AND f.sla_due_at <= ?
-        AND COALESCE(a.undone_at,'') = ''
-      ORDER BY f.sla_due_at ASC
-      LIMIT 100;
-    `);
-    try {
-      s2.bind([new Date(nowMs).toISOString()]);
-      while (s2.step()) {
-        const r = s2.getAsObject() as any;
-        const dueMs = r.sla_due_at ? new Date(String(r.sla_due_at)).getTime() : nowMs;
-        const atrasoHoras = Math.max(0, Math.round(((nowMs - dueMs) / 1000 / 60 / 60) * 10) / 10);
-        slaBreaches.push({
-          ocorrenciaId: Number(r.occurrence_id) || 0,
-          stage: String(r.stage ?? ''),
-          status: String(r.status ?? ''),
-          month: String(r.month ?? ''),
-          orgao: String(r.orgao ?? ''),
-          nome: String(r.nome ?? ''),
-          cpf: String(r.cpf ?? ''),
-          action: String(r.action ?? ''),
-          value: String(r.value ?? ''),
-          slaStartedAt: r.sla_started_at ? String(r.sla_started_at) : null,
-          slaDueAt: r.sla_due_at ? String(r.sla_due_at) : null,
-          atrasoHoras,
-        });
-      }
-    } finally { s2.free(); }
-  } catch { /* ignore */ }
-
   const now = new Date();
   const todayPtBr = formatDatePtBr(now);
-  const dateKey = getPanoramaDailyDateKey(now);
-
-  // ---------------------------------------------------------------
-  // REGRA: NÃO dispara e-mail se NÃO HOUVER pendências.
-  // Critérios considerados (basta 1 positivo para considerar "há pendência"):
-  //   A) countsByMonth — soma total de ocorrências abertas (undone_at) > 0
-  //   B) slaBreaches    — ocorrências com SLA 48h estourado > 0
-  //   C) fullPanorama2408.summary.ocorrenciasEmAtraso > 0 (template carta diretoria)
-  // Exceções que PERMITM envio mesmo vazio:
-  //   • forceSend=true           (usuário clicou manualmente / teste)
-  //   • destinatário customizado (_opts.to/_opts.cc) — quem pediu quer receber mesmo vazio
-  // ---------------------------------------------------------------
-  const totalPendenciasAbertas = Object.values(countsByMonth).reduce((s, x) => s + (x?.total ?? 0), 0);
-  let hasPendenciaToReport = totalPendenciasAbertas > 0 || slaBreaches.length > 0;
-  if (!hasPendenciaToReport && withFullPanorama2408) {
-    try {
-      const fpPreview = await buildFullPanorama2408Data(db, _opts?.month);
-      hasPendenciaToReport = (fpPreview?.summary?.ocorrenciasEmAtraso ?? 0) > 0;
-    } catch { /* ignore, assume false */ }
-  }
-  const isCustomRecipientPreliminary = (_opts?.to !== undefined) || (_opts?.cc !== undefined);
-  if (!forceSend && !isCustomRecipientPreliminary && !hasPendenciaToReport) {
-    _panoramaDailyMemoDateKey = dateKey;
-    panoramaDailyWriteLock(db, dateKey, 'sent');
-    try { setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr); } catch { /* ignore */ }
-    return {
-      sent: false,
-      recipients: [],
-      subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`,
-      countsByMonth,
-      slaBreaches,
-      skippedReason: 'noPendencias',
-    };
-  }
-
-  // Guard persistente 1 envio/dia — ANTES de qualquer processamento.
-  // Mesmo que reinicie o sistema, se status='sent' estiver gravado, NÃO envia de novo.
-  // Se status='sending' por mais de 15min (crash no meio do envio), stale => liberar.
-  if (!forceSend && _panoramaDailyMemoDateKey === dateKey) {
-    return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches, skippedReason: 'memoSameDay' };
-  }
-  const dailyLock = panoramaDailyAcquireSendLock(db, dateKey, forceSend);
-  if (dailyLock.alreadySent || !dailyLock.acquired) {
-    if (!forceSend) _panoramaDailyMemoDateKey = dateKey;
-    return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches, skippedReason: dailyLock.alreadySent ? 'dailySentPersisted' : 'sendingLock' };
-  }
-  // Legacy guard LAST_SENT_AT mantido por compat.
+  // --- FIX (antigo, mantido: evitar enviar o mesmo panorama múltiplas vezes por dia ---
+  // O scheduler roda a cada 1 hora; mas esta função só envia 1 vez por dia (hoje)
+  // comparando occurrencesPanoramaLastSentAt == hoje.
+  // NOTA 2026-08-17: forceSend já foi declarado NO TOPO DA FUNÇÃO (desativação geral).
   if (!forceSend) {
     const lastSentAt = String(
       getConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT) ?? '',
     ).trim();
     if (lastSentAt && lastSentAt === todayPtBr) {
-      panoramaDailyWriteLock(db, dateKey, 'sent');
-      _panoramaDailyMemoDateKey = dateKey;
-      return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth, slaBreaches, skippedReason: 'legacyLastSentAt' };
+      return { sent: false, recipients: [], subjectPrefix: `Panorama diário de ocorrências ${todayPtBr}`, countsByMonth };
     }
   }
-  const slaCount = legacyTemplate ? 0 : slaBreaches.length;
-  const subjectPrefix = (slaCount > 0 && !legacyTemplate)
-    ? `Panorama diário de ocorrências ${todayPtBr} — SLA estourando: ${slaCount}`
-    : `Panorama diário de ocorrências ${todayPtBr}`;
+  const subjectPrefix = `Panorama diário de ocorrências ${todayPtBr}`;
 
-  const recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade' | 'custom'; email: string }> = [];
+  const recipients: Array<{ type: 'diretoria' | 'gerencia' | 'contabilidade'; email: string }> = [];
   const splitEmails = (raw: string): string[] =>
     raw
       .split(/[;,]/)
       .map((s) => s.trim())
       .filter(Boolean);
 
-  const customToRaw = _opts?.to;
-  const customCcRaw = _opts?.cc;
-  const customToArr: string[] = [];
-  const customCcArr: string[] = [];
-  if (Array.isArray(customToRaw)) customToRaw.forEach((e: any) => { const s = String(e ?? '').trim(); if (s) customToArr.push(s); });
-  else if (customToRaw && typeof customToRaw === 'string') splitEmails(String(customToRaw)).forEach((e) => customToArr.push(e));
-  if (Array.isArray(customCcRaw)) customCcRaw.forEach((e: any) => { const s = String(e ?? '').trim(); if (s) customCcArr.push(s); });
-  else if (customCcRaw && typeof customCcRaw === 'string') splitEmails(String(customCcRaw)).forEach((e) => customCcArr.push(e));
-
-  const isCustomRecipient = customToArr.length > 0 || customCcArr.length > 0;
-  if (isCustomRecipient) {
-    customToArr.forEach((e) => recipients.push({ type: 'custom', email: e }));
-    customCcArr.forEach((e) => recipients.push({ type: 'custom', email: e }));
-  } else {
-    if (diretoriaEmail) splitEmails(diretoriaEmail).forEach((e) => recipients.push({ type: 'diretoria', email: e }));
-    if (gerentesEmail) splitEmails(gerentesEmail).forEach((e) => recipients.push({ type: 'gerencia', email: e }));
-    if (contabilidadeEmail) splitEmails(contabilidadeEmail).forEach((e) => recipients.push({ type: 'contabilidade', email: e }));
-  }
+  if (diretoriaEmail) splitEmails(diretoriaEmail).forEach((e) => recipients.push({ type: 'diretoria', email: e }));
+  if (gerentesEmail) splitEmails(gerentesEmail).forEach((e) => recipients.push({ type: 'gerencia', email: e }));
+  if (contabilidadeEmail) splitEmails(contabilidadeEmail).forEach((e) => recipients.push({ type: 'contabilidade', email: e }));
 
   if (!tenantId || !clientId || !notificationFrom || recipients.length === 0) {
-    return { sent: false, recipients, subjectPrefix, countsByMonth, slaBreaches };
+    return { sent: false, recipients, subjectPrefix, countsByMonth };
   }
 
   try {
@@ -35980,183 +32812,35 @@ export async function sendDailyOccurrencesPanoramaEmail(_opts: Record<string, un
             <td style="padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#334155">${topActions || '-'}</td>
           </tr>`;
         }).join('');
-    const slaSummaryHtml = slaCount === 0
-      ? `<div style="margin-top:22px;padding:14px 16px;background:#f0fdf4;border:1px solid #86efac;border-radius:12px">
-           <div style="font-weight:800;color:#166534;margin-bottom:4px">SLA — Todas as ocorrências no prazo ✔</div>
-           <div style="color:#15803d;font-size:13px">Nenhuma pendência com prazo de 48h estourado.</div>
-         </div>`
-      : `<div style="margin-top:22px;padding:14px 16px;background:#fef2f2;border:1px solid #fecaca;border-radius:12px">
-           <div style="font-weight:900;color:#991b1b;margin-bottom:2px;font-size:15px">SLA ESTOURANDO — ${slaCount} ocorrência(s) fora do prazo de 48h</div>
-           <div style="color:#7f1d1d;font-size:13px;margin-bottom:12px">
-             Pendências movidas para Crédito/Negócios que não foram concluídas e já ultrapassaram o vencimento do SLA.
-           </div>
-           <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;background:#fff;border-radius:10px;overflow:hidden">
-             <thead style="background:#fee2e2">
-               <tr>
-                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Atraso</th>
-                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Competência</th>
-                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Estágio</th>
-                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Órgão / Nome</th>
-                 <th style="padding:8px 10px;text-align:left;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Ação / Valor</th>
-                 <th style="padding:8px 10px;text-align:right;font-size:11px;color:#7f1d1d;border-bottom:1px solid #fecaca">Venceu em</th>
-               </tr>
-             </thead>
-             <tbody>
-               ${slaBreaches.map((b) => {
-                 const orgaoCurto = (b.orgao || '').length > 32 ? String(b.orgao).slice(0, 31) + '…' : (b.orgao || '-');
-                 const nomeCurto = (b.nome || '').length > 28 ? String(b.nome).slice(0, 27) + '…' : (b.nome || '-');
-                 const venceu = b.slaDueAt ? new Date(b.slaDueAt) : null;
-                 const venceuStr = venceu
-                   ? `${String(venceu.getDate()).padStart(2,'0')}/${String(venceu.getMonth()+1).padStart(2,'0')}/${venceu.getFullYear()} ${String(venceu.getHours()).padStart(2,'0')}:${String(venceu.getMinutes()).padStart(2,'0')}`
-                   : '-';
-                 return `<tr>
-                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;font-weight:800;color:#b91c1c">${b.atrasoHoras.toFixed(1)}h</td>
-                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca">${b.month || '-'}</td>
-                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca">${String(b.stage || b.status || '').replace(/_/g,' ') || '-'}</td>
-                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;font-size:12px">
-                     <div style="font-weight:700;color:#1f2937">${orgaoCurto}</div>
-                     <div style="color:#475569">${nomeCurto} · ${b.cpf || '-'}</div>
-                   </td>
-                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;font-size:12px">
-                     <div style="font-weight:600;color:#1f2937">${String(b.action || '').replace(/_/g,' ') || '-'}</div>
-                     <div style="color:#475569">${b.value || '-'}</div>
-                   </td>
-                   <td style="padding:8px 10px;border-bottom:1px solid #fecaca;text-align:right;color:#7f1d1d;font-size:12px;white-space:nowrap">${venceuStr}</td>
-                 </tr>`;
-               }).join('')}
-             </tbody>
-           </table>
-         </div>`;
-
-    let fullPanorama2408: FullPanorama2408Data | null = null;
-    let effectiveSubject: string = subjectPrefix;
-    if (withFullPanorama2408) {
-      fullPanorama2408 = await buildFullPanorama2408Data(db, _opts?.month);
-      effectiveSubject = fullPanorama2408.subject;
-    }
-
-    const html = withFullPanorama2408 && fullPanorama2408
-      ? buildEmailTemplateHtml({
-          title: `Panorama Consignados ${getOccurrencesPanoramaMonthLabel(fullPanorama2408.monthKey)}`,
-          subtitle: `${getOccurrencesPanoramaMonthLabel(fullPanorama2408.monthKey)} • ${fullPanorama2408.summary.ocorrenciasEmAtraso} ocorrências em atraso`,
-          introHtml: `
-            <div style="font-size:14px; color:#334155; white-space:pre-line;">
-              À
-              Diretoria do Sicoob Juriscred
-            </div>
-            <div style="margin-top:12px; font-size:14px; color:#0f172a; font-weight:700;">
-              Assunto: Solicitação de apoio na regularização de pendências
-            </div>
-            <div style="margin-top:18px; font-size:14px; color:#334155;">
-              Prezados(as),
-            </div>
-            <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
-              Solicitamos o apoio desta Diretoria na tratativa e regularização das pendências relacionadas abaixo, que permanecem em atraso sob responsabilidade dos Gerentes de PA.
-            </div>
-            <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
-              Ressaltamos que a manutenção dessas ocorrências em aberto e fora do prazo estabelecido tem gerado impactos diretos nos processos financeiros e contábeis da Cooperativa, podendo comprometer o cumprimento dos prazos e a adequada execução das rotinas operacionais.
-            </div>
-            <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
-              Diante do exposto, solicitamos o apoio da Diretoria junto aos responsáveis, visando à priorização e regularização das pendências com a maior brevidade possível.
-            </div>
-            <div style="margin-top:18px; font-size:14px; color:#334155;">
-              Atenciosamente,
-            </div>
-            <div style="margin-top:6px; font-size:14px; color:#334155; font-weight:700;">
-              Financeiro/Contabilidade
-            </div>
-          `.trim(),
-          contentHtml: `
-            ${buildFullPanorama2408Html(fullPanorama2408)}
-          `.trim(),
-        })
-      : withCartaDiretoria
-        ? buildEmailTemplateHtml({
-            title: 'Consignados - Panorama das Ocorrências em Atraso',
-            subtitle: `${todayPtBr} • ${monthsSorted.length} competência(s) ativa(s) • ${Object.values(countsByMonth).reduce((s, x) => s + x.total, 0)} ocorrências`,
-            introHtml: `
-              <div style="font-size:14px; color:#334155; white-space:pre-line;">
-                À
-                Diretoria do Sicoob Juriscred
-              </div>
-              <div style="margin-top:12px; font-size:14px; color:#0f172a; font-weight:700;">
-                Assunto: Solicitação de apoio na regularização de pendências
-              </div>
-              <div style="margin-top:18px; font-size:14px; color:#334155;">
-                Prezados(as),
-              </div>
-              <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
-                Solicitamos o apoio desta Diretoria na tratativa e regularização das pendências relacionadas abaixo, que permanecem em atraso sob responsabilidade dos Gerentes de PA.
-              </div>
-              <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
-                Ressaltamos que a manutenção dessas ocorrências em aberto e fora do prazo estabelecido tem gerado impactos diretos nos processos financeiros e contábeis da Cooperativa, podendo comprometer o cumprimento dos prazos e a adequada execução das rotinas operacionais.
-              </div>
-              <div style="margin-top:10px; font-size:14px; color:#334155; line-height:1.8;">
-                Diante do exposto, solicitamos o apoio da Diretoria junto aos responsáveis, visando à priorização e regularização das pendências com a maior brevidade possível.
-              </div>
-              <div style="margin-top:18px; font-size:14px; color:#334155;">
-                Atenciosamente,
-              </div>
-              <div style="margin-top:6px; font-size:14px; color:#334155; font-weight:700;">
-                Financeiro/Contabilidade
-              </div>
-            `.trim(),
-            contentHtml: `
-              <div style="margin-top:4px">
-                <div style="font-size:15px;font-weight:800;color:#0f172a;margin-bottom:10px">Resumo por competência</div>
-                <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">
-                  <thead style="background:#f8fafc">
-                    <tr>
-                      <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Competência</th>
-                      <th style="padding:10px 12px;text-align:right;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Total Ocorrências</th>
-                      <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Top ações (6 primeiras)</th>
-                    </tr>
-                  </thead>
-                  <tbody>${htmlRows}</tbody>
-                </table>
-              </div>
-              ${legacyTemplate ? '' : slaSummaryHtml}
-            `.trim(),
-          })
-        : `
-        <div style="font-family:Segoe UI,Arial,sans-serif;max-width:860px;margin:auto">
-          <div style="font-size:18px;font-weight:900;color:#0f172a;margin-bottom:8px">${subjectPrefix}</div>
-          <div style="color:#475569;margin-bottom:16px">Resumo de ocorrências ativas (sem undone_at) por competência.</div>
-          <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">
-            <thead style="background:#f8fafc">
-              <tr>
-                <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Competência</th>
-                <th style="padding:10px 12px;text-align:right;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Total Ocorrências</th>
-                <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Top ações (6 primeiras)</th>
-              </tr>
-            </thead>
-            <tbody>${htmlRows}</tbody>
-          </table>
-          ${legacyTemplate ? '' : slaSummaryHtml}
-        </div>`;
-    const customToEmails = recipients.filter((r) => r.type === 'custom').map((r) => r.email);
-    const toList = customToEmails.length > 0
-      ? customToEmails
-      : recipients.filter((r) => r.type === 'diretoria').map((r) => r.email) || [recipients[0]!.email];
-    const ccList = customToEmails.length > 0
-      ? []
-      : recipients.filter((r) => r.type !== 'diretoria').map((r) => r.email) || undefined;
+    const html = `
+      <div style="font-family:Segoe UI,Arial,sans-serif;max-width:860px;margin:auto">
+        <div style="font-size:18px;font-weight:900;color:#0f172a;margin-bottom:8px">${subjectPrefix}</div>
+        <div style="color:#475569;margin-bottom:16px">Resumo de ocorrências ativas (sem undone_at) por competência.</div>
+        <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">
+          <thead style="background:#f8fafc">
+            <tr>
+              <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Competência</th>
+              <th style="padding:10px 12px;text-align:right;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Total Ocorrências</th>
+              <th style="padding:10px 12px;text-align:left;font-size:12px;color:#334155;border-bottom:1px solid #e5e7eb">Top ações (6 primeiras)</th>
+            </tr>
+          </thead>
+          <tbody>${htmlRows}</tbody>
+        </table>
+      </div>`;
     await sendGraphMail({
       token,
       from: notificationFrom,
-      to: toList,
-      cc: ccList,
-      subject: effectiveSubject,
+      to: recipients.filter((r) => r.type === 'diretoria').map((r) => r.email) || [recipients[0]!.email],
+      cc: recipients.filter((r) => r.type !== 'diretoria').map((r) => r.email) || undefined,
+      subject: subjectPrefix,
       html,
     });
+    // --- FIX: marcar que o panorama de HOJE já foi enviado ---
+    // evita re-envio de hora em hora nas próximas execuções do scheduler.
     try {
-      if (!isCustomRecipient) {
-        setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr);
-        panoramaDailyWriteLock(db, dateKey, 'sent');
-        _panoramaDailyMemoDateKey = dateKey;
-      }
+      setConsignadoAppConfigValue(db, CONFIG_KEY_OCCURRENCES_PANORAMA_LAST_SENT_AT, todayPtBr);
     } catch { /* ignore, não bloqueia retorno do envio */ }
-    return { sent: true, recipients, subjectPrefix, effectiveSubject, countsByMonth, slaBreaches };
+    return { sent: true, recipients, subjectPrefix, countsByMonth };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e ?? 'Erro desconhecido');
     throw new Error(`sendDailyOccurrencesPanoramaEmail falhou: ${message}`);
@@ -36710,9 +33394,9 @@ async function createConciliacaoPdfBuffer(opts: {
   let logoBuf: Buffer | null = null;
   try {
     const candidates = [
-      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred_Logo Verde.png'),
-      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred_Logo Verde.png'),
+      path.resolve(process.cwd(), 'frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), '../frontend/public/assets/sicoob-juriscred.png'),
+      path.resolve(process.cwd(), 'public/assets/sicoob-juriscred.png'),
     ];
     const logoPath = candidates.find((p) => fs.existsSync(p));
     logoBuf = logoPath ? fs.readFileSync(logoPath) : null;
@@ -37693,27 +34377,34 @@ export async function getTeamsDelegatedLoginStatus(): Promise<{
 }
 
 let _dailyPanoramaSchedulerStarted = false;
-let _dailyPanoramaTimer: ReturnType<typeof setInterval> | null = null;
 
 export function startDailyOccurrencesPanoramaScheduler(): { started: boolean; alreadyRunning: boolean; nextRunAtIso: string | null; intervalMs: number; } {
+  // --- DESATIVADO POR SOLICITAÇÃO DO USUÁRIO em 2026-08-17 ---
+  // O panorama diário automático foi desligado (ver também main.ts onde a chamada inicial está comentada).
+  // Para reativar no futuro basta:
+  //   (1) descomentar a chamada safeStart() em main.ts; e
+  //   (2) remover o early return abaixo e restaurar o bloco antigo (tick/setInterval).
+  void _dailyPanoramaSchedulerStarted;
+  return {
+    started: false,
+    alreadyRunning: true, // sinaliza "já estava rodando" para logs silenciosos (não dispara mais nada)
+    nextRunAtIso: null,
+    intervalMs: 60 * 60 * 1000,
+  };
+  /* --- código original (para referência / reativação futura):
   const intervalMs = 60 * 60 * 1000;
-  if (String(process.env.DISABLE_PANORAMA_SCHEDULER ?? '').trim().toLowerCase() === 'true') {
-    return { started: false, alreadyRunning: false, nextRunAtIso: null, intervalMs };
-  }
   if (_dailyPanoramaSchedulerStarted) {
     return { started: false, alreadyRunning: true, nextRunAtIso: null, intervalMs };
   }
   _dailyPanoramaSchedulerStarted = true;
   const tick = async () => {
     try {
-      const r = await sendDailyOccurrencesPanoramaEmail({ withFullPanorama2408: true });
-      console.log('[PANORAMA][scheduler] tick executado: sent=' + r.sent + ' subject="' + (r.sent ? r.effectiveSubject || r.subjectPrefix : r.subjectPrefix) + '" recipients=' + r.recipients.length + ' meses=' + Object.keys(r.countsByMonth).length + ' slaBreaches=' + (r.slaBreaches?.length ?? 0));
-    } catch (e) {
-      console.error('[PANORAMA][scheduler] tick falhou:', e instanceof Error ? (e.stack || e.message) : String(e));
-    }
+      await sendDailyOccurrencesPanoramaEmail();
+    } catch { /* ignore * / }
   };
   void tick();
-  _dailyPanoramaTimer = setInterval(() => { void tick(); }, intervalMs);
+  const timer = setInterval(() => { void tick(); }, intervalMs);
+  if (typeof timer === 'undefined' || timer === null) { /* noop * / }
   const nextRunAtIso = new Date(Date.now() + intervalMs).toISOString();
   return {
     started: true,
@@ -37721,6 +34412,7 @@ export function startDailyOccurrencesPanoramaScheduler(): { started: boolean; al
     nextRunAtIso,
     intervalMs,
   };
+  --- fim código original --- */
 }
 
 const JOB_KV_PREFIX = 'job_record::v1::';
@@ -38030,7 +34722,6 @@ class _ImportJobsManagerSingleton {
     };
     const isCancelled = (): boolean => Boolean(rec.cancelled);
     try {
-      try { (globalThis as any).__importSyncRunning = true; } catch { /* ignore */ }
       const result = await run({ onProgress, isCancelled });
       rec.status = 'succeeded';
       rec.finishedAtIso = _jobNowIso();
@@ -38051,7 +34742,6 @@ class _ImportJobsManagerSingleton {
       void _jobPersist(null, rec);
       this._emit(rec.jobId, 'status', { status: rec.status, errorMessage: rec.errorMessage });
     } finally {
-      try { (globalThis as any).__importSyncRunning = false; } catch { /* ignore */ }
       this.active = Math.max(0, this.active - 1);
       void this._drain();
     }
@@ -38234,30 +34924,20 @@ const KEY_CFG_NOTIFY_TEAMS_ENABLED = `${PREFIX_CFG}teams_notify_enabled`;
 const PREFIX_SCHED = 'automation_schedule::v1::';
 const SCHED_DEFAULT_ID = 'lot_diario_08h_uteis';
 
-export interface ScheduleHorarioEntry {
-  hora: number;
-  minuto: number;
-}
 export interface AutomationScheduleRecord {
   id: string;
   title: string;
   kind: 'runImportConsignado' | 'importByLearningProfileFromFolderUrl';
   target?: string | null;
   folderUrl?: string | null;
-  /** @deprecated — use horarios[] (campo mantido p/ backward compat. Quando horarios[] for vazio, usamos hora/minuto) */
   hora: number;
-  /** @deprecated — use horarios[] */
   minuto: number;
-  /** Múltiplos horários por dia (permite agendar 3+ disparos diários no mesmo schedule). Quando vazio, usa hora/minuto legado. */
-  horarios?: ScheduleHorarioEntry[];
   diasUteisOnly: boolean;
   diasSemana?: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>;
   enabled: boolean;
   createdAtIso: string;
   updatedAtIso?: string;
   lastRunAtIso?: string;
-  /** Chaveado por 'HH:mm' → ISO do último disparo naquele horário. Garante que 3 horários/dia rodem INDEPENDENTEMENTE. */
-  lastRunAtPerHorario?: Record<string, string>;
   lastJobId?: string;
   lastStatus?: JobStatus;
   nextRunAtIso?: string;
@@ -38526,73 +35206,46 @@ async function maybeNotifyTeamsJobFinal(rec: JobRecord): Promise<{ ok: boolean; 
 const SCHED_TICK_MS = 30 * 1000;
 const _schedState: SchedTickState = { startedAtIso: new Date().toISOString(), running: false, tickCount: 0 };
 
+function _hasQueuedOrRunningImportJobs(): boolean {
+  try {
+    if (ImportJobsManager.queue.length > 0) return true;
+    for (const j of ImportJobsManager.inMem.values()) {
+      if (j.status === 'queued' || j.status === 'running') return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function _isWeekdayPtBr(d: Date): boolean {
   const w = d.getDay(); return w >= 1 && w <= 5;
 }
-
-function _pad2(n: number): string { return n < 10 ? '0' + n : String(n); }
-
-function _scheduleNormalizeHorarios(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'horarios'>): ScheduleHorarioEntry[] {
-  if (s.horarios && Array.isArray(s.horarios) && s.horarios.length > 0) {
-    return s.horarios
-      .filter((h) => h && typeof h.hora === 'number' && typeof h.minuto === 'number')
-      .map((h) => ({ hora: Math.max(0, Math.min(23, Math.floor(h.hora))), minuto: Math.max(0, Math.min(59, Math.floor(h.minuto))) }))
-      .reduce<ScheduleHorarioEntry[]>((acc, cur) => {
-        const k = _pad2(cur.hora) + ':' + _pad2(cur.minuto);
-        if (!acc.find((x) => _pad2(x.hora) + ':' + _pad2(x.minuto) === k)) acc.push(cur);
-        return acc;
-      }, [])
-      .sort((a, b) => a.hora - b.hora || a.minuto - b.minuto);
+function scheduleCalculateNextRunAt(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'diasUteisOnly' | 'diasSemana'>, from?: Date): string {
+  const base = from ? new Date(from) : new Date();
+  base.setMilliseconds(0); base.setSeconds(0); base.setMinutes(s.minuto); base.setHours(s.hora);
+  for (let i = 0; i < 14; i += 1) {
+    const t = new Date(base.getTime() + i * 24 * 60 * 60 * 1000);
+    const dw = t.getDay() as 0 | 1 | 2 | 3 | 4 | 5 | 6;
+    const diaOk = s.diasUteisOnly ? _isWeekdayPtBr(t) : (s.diasSemana && s.diasSemana.length > 0 ? s.diasSemana.includes(dw) : true);
+    if (!diaOk) continue;
+    if (t.getTime() <= (from?.getTime() ?? Date.now())) continue;
+    return t.toISOString();
   }
-  const hora = typeof s.hora === 'number' ? s.hora : 8;
-  const minuto = typeof s.minuto === 'number' ? s.minuto : 0;
-  return [{ hora: Math.max(0, Math.min(23, Math.floor(hora))), minuto: Math.max(0, Math.min(59, Math.floor(minuto))) }];
+  return new Date(base.getTime() + 24 * 60 * 60 * 1000).toISOString();
 }
-
-function _scheduleHorarioKey(h: ScheduleHorarioEntry): string { return _pad2(h.hora) + ':' + _pad2(h.minuto); }
-
-function scheduleCalculateNextRunAt(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'horarios' | 'diasUteisOnly' | 'diasSemana'>, from?: Date): string {
-  const horarios = _scheduleNormalizeHorarios(s);
-  const baseFrom = from ? new Date(from) : new Date();
-  let best: Date | null = null;
-  for (const entry of horarios) {
-    const base = new Date(baseFrom);
-    base.setMilliseconds(0); base.setSeconds(0); base.setMinutes(entry.minuto); base.setHours(entry.hora);
-    for (let i = 0; i < 14; i += 1) {
-      const t = new Date(base.getTime() + i * 24 * 60 * 60 * 1000);
-      const dw = t.getDay() as 0 | 1 | 2 | 3 | 4 | 5 | 6;
-      const diaOk = s.diasUteisOnly ? _isWeekdayPtBr(t) : (s.diasSemana && s.diasSemana.length > 0 ? s.diasSemana.includes(dw) : true);
-      if (!diaOk) continue;
-      if (t.getTime() <= baseFrom.getTime()) continue;
-      if (!best || t.getTime() < best.getTime()) best = t;
-      break;
-    }
-  }
-  if (best) return best.toISOString();
-  const fallback = new Date(baseFrom.getTime() + 24 * 60 * 60 * 1000);
-  return fallback.toISOString();
-}
-
-interface ScheduleDueNowResult { ok: boolean; horarioKey?: string; }
-function scheduleIsDueNow(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'horarios' | 'diasUteisOnly' | 'diasSemana' | 'lastRunAtIso' | 'lastRunAtPerHorario'>, now?: Date): ScheduleDueNowResult {
+function scheduleIsDueNow(s: Pick<AutomationScheduleRecord, 'hora' | 'minuto' | 'diasUteisOnly' | 'diasSemana' | 'lastRunAtIso'>, now?: Date): boolean {
   const n = now ?? new Date();
   const dw = n.getDay() as 0 | 1 | 2 | 3 | 4 | 5 | 6;
   const diaOk = s.diasUteisOnly ? _isWeekdayPtBr(n) : (s.diasSemana && s.diasSemana.length > 0 ? s.diasSemana.includes(dw) : true);
-  if (!diaOk) return { ok: false };
-  const horarios = _scheduleNormalizeHorarios(s);
-  for (const entry of horarios) {
-    if (n.getHours() !== entry.hora || n.getMinutes() !== entry.minuto) continue;
-    const k = _scheduleHorarioKey(entry);
-    const map = s.lastRunAtPerHorario || {};
-    const lastStr = map[k] || s.lastRunAtIso;
-    const last = lastStr ? new Date(lastStr) : null;
-    if (last) {
-      const msDiff = n.getTime() - last.getTime();
-      if (msDiff < 23 * 60 * 60 * 1000) continue;
-    }
-    return { ok: true, horarioKey: k };
+  if (!diaOk) return false;
+  if (n.getHours() !== s.hora || n.getMinutes() !== s.minuto) return false;
+  const last = s.lastRunAtIso ? new Date(s.lastRunAtIso) : null;
+  if (last) {
+    const msDiff = n.getTime() - last.getTime();
+    if (msDiff < 23 * 60 * 60 * 1000) return false;
   }
-  return { ok: false };
+  return true;
 }
 
 async function _ensureDefaultSchedules(): Promise<void> {
@@ -38608,7 +35261,6 @@ async function _ensureDefaultSchedules(): Promise<void> {
         folderUrl: null,
         hora: cfg.scheduleDefaultHora,
         minuto: cfg.scheduleDefaultMin,
-        horarios: [{ hora: cfg.scheduleDefaultHora, minuto: cfg.scheduleDefaultMin }],
         diasUteisOnly: true,
         enabled: cfg.schedulerEnabled,
         createdAtIso: new Date().toISOString(),
@@ -38623,15 +35275,11 @@ async function _ensureDefaultSchedules(): Promise<void> {
       try {
         const r = JSON.parse(existing) as AutomationScheduleRecord;
         if (typeof r.hora !== 'number' || typeof r.minuto !== 'number') { r.hora = cfg.scheduleDefaultHora; r.minuto = cfg.scheduleDefaultMin; }
-        if (!r.horarios || !Array.isArray(r.horarios) || r.horarios.length === 0) {
-          r.horarios = [{ hora: r.hora, minuto: r.minuto }];
-        }
-        if (!r.lastRunAtPerHorario || typeof r.lastRunAtPerHorario !== 'object') r.lastRunAtPerHorario = {};
         r.nextRunAtIso = scheduleCalculateNextRunAt(r);
         if (cfg.schedulerEnabled && !r.enabled) r.enabled = true;
         r.updatedAtIso = new Date().toISOString();
         await _cfgSet(PREFIX_SCHED + SCHED_DEFAULT_ID, JSON.stringify(r));
-        console.log('[FASE3][_ensureDefaultSchedules] ATUALIZADO schedule default id=' + SCHED_DEFAULT_ID + ' enabled=' + r.enabled + ' nextRunAt=' + r.nextRunAtIso + ' horarios=' + JSON.stringify(r.horarios));
+        console.log('[FASE3][_ensureDefaultSchedules] ATUALIZADO schedule default id=' + SCHED_DEFAULT_ID + ' enabled=' + r.enabled + ' nextRunAt=' + r.nextRunAtIso);
       } catch (e) { console.error('[FASE3][_ensureDefaultSchedules] erro parse existing schedule', e instanceof Error ? (e.stack || e.message) : String(e)); }
     }
   } catch (e) { console.error('[FASE3][_ensureDefaultSchedules] erro GLOBAL', e instanceof Error ? (e.stack || e.message) : String(e)); }
@@ -38645,8 +35293,6 @@ export async function listAutomationSchedules(): Promise<AutomationScheduleRecor
       const raw = await _cfgGet(k);
       if (!raw) continue;
       const obj = JSON.parse(raw) as AutomationScheduleRecord;
-      if (!obj.horarios || !Array.isArray(obj.horarios) || obj.horarios.length === 0) obj.horarios = [{ hora: obj.hora, minuto: obj.minuto }];
-      if (!obj.lastRunAtPerHorario || typeof obj.lastRunAtPerHorario !== 'object') obj.lastRunAtPerHorario = {};
       obj.nextRunAtIso = scheduleCalculateNextRunAt(obj);
       out.push(obj);
     } catch { /* ignore */ }
@@ -38660,8 +35306,6 @@ export async function getAutomationSchedule(id: string): Promise<AutomationSched
   if (!raw) return null;
   try {
     const r = JSON.parse(raw) as AutomationScheduleRecord;
-    if (!r.horarios || !Array.isArray(r.horarios) || r.horarios.length === 0) r.horarios = [{ hora: r.hora, minuto: r.minuto }];
-    if (!r.lastRunAtPerHorario || typeof r.lastRunAtPerHorario !== 'object') r.lastRunAtPerHorario = {};
     r.nextRunAtIso = scheduleCalculateNextRunAt(r);
     return r;
   } catch { return null; }
@@ -38675,100 +35319,7 @@ export async function toggleAutomationSchedule(id: string, force?: boolean): Pro
   await _cfgSet(PREFIX_SCHED + id, JSON.stringify(cur));
   return { ok: true, record: cur };
 }
-
-export async function upsertAutomationSchedule(
-  idRaw: string | null | undefined,
-  payload: Partial<Omit<AutomationScheduleRecord, 'id' | 'createdAtIso' | 'updatedAtIso' | 'nextRunAtIso' | 'lastRunAtIso' | 'lastRunAtPerHorario' | 'lastJobId' | 'lastStatus'>> & { id?: string; createNew?: boolean }
-): Promise<{ ok: boolean; record?: AutomationScheduleRecord; reason?: string }> {
-  try {
-    const idProvided = String((payload.id ?? idRaw ?? '')).trim();
-    const isNew = Boolean(payload.createNew) || !idProvided;
-    const id = isNew
-      ? ('sched_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8))
-      : idProvided;
-    if (!id) return { ok: false, reason: 'id_invalido' };
-
-    const existing = isNew ? null : await getAutomationSchedule(id);
-    const base = existing ?? ({
-      id,
-      title: 'Novo Agendamento',
-      kind: 'runImportConsignado',
-      target: 'both',
-      folderUrl: null,
-      hora: 8,
-      minuto: 0,
-      horarios: [{ hora: 8, minuto: 0 }],
-      diasUteisOnly: true,
-      diasSemana: undefined,
-      enabled: true,
-      createdAtIso: new Date().toISOString(),
-      notificationTeams: false,
-    } as AutomationScheduleRecord);
-
-    if (payload.title !== undefined) base.title = String(payload.title).trim() || base.title;
-    if (payload.kind !== undefined && (payload.kind === 'runImportConsignado' || payload.kind === 'importByLearningProfileFromFolderUrl')) base.kind = payload.kind;
-    if (payload.target !== undefined) base.target = payload.target || null;
-    if (payload.folderUrl !== undefined) base.folderUrl = payload.folderUrl || null;
-    if (payload.diasUteisOnly !== undefined) {
-      base.diasUteisOnly = Boolean(payload.diasUteisOnly);
-      if (base.diasUteisOnly) base.diasSemana = undefined;
-    }
-    if (payload.diasSemana !== undefined) {
-      if (Array.isArray(payload.diasSemana) && payload.diasSemana.length > 0) {
-        base.diasSemana = payload.diasSemana.filter((d): d is 0 | 1 | 2 | 3 | 4 | 5 | 6 => typeof d === 'number' && d >= 0 && d <= 6);
-        if (base.diasSemana.length > 0) base.diasUteisOnly = false;
-        else { base.diasSemana = undefined; base.diasUteisOnly = true; }
-      } else {
-        base.diasSemana = undefined;
-        base.diasUteisOnly = true;
-      }
-    }
-    if (payload.enabled !== undefined) base.enabled = Boolean(payload.enabled);
-    if (payload.notificationTeams !== undefined) base.notificationTeams = Boolean(payload.notificationTeams);
-    if (payload.horarios !== undefined) {
-      const horariosNorm = _scheduleNormalizeHorarios({ hora: base.hora, minuto: base.minuto, horarios: payload.horarios });
-      if (horariosNorm.length === 0) return { ok: false, reason: 'horarios_vazio' };
-      base.horarios = horariosNorm;
-      base.hora = horariosNorm[0].hora;
-      base.minuto = horariosNorm[0].minuto;
-    } else {
-      if (typeof payload.hora === 'number' || typeof payload.minuto === 'number') {
-        base.hora = typeof payload.hora === 'number' ? payload.hora : base.hora;
-        base.minuto = typeof payload.minuto === 'number' ? payload.minuto : base.minuto;
-        base.horarios = [{ hora: base.hora, minuto: base.minuto }];
-      }
-    }
-    if (!base.horarios || !Array.isArray(base.horarios) || base.horarios.length === 0) {
-      base.horarios = [{ hora: base.hora, minuto: base.minuto }];
-    }
-    if (!base.lastRunAtPerHorario || typeof base.lastRunAtPerHorario !== 'object') base.lastRunAtPerHorario = {};
-
-    base.updatedAtIso = new Date().toISOString();
-    base.nextRunAtIso = scheduleCalculateNextRunAt(base);
-
-    await _cfgSet(PREFIX_SCHED + id, JSON.stringify(base));
-    return { ok: true, record: base };
-  } catch (e) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e ?? 'unknown') };
-  }
-}
-
-export async function deleteAutomationSchedule(id: string): Promise<{ ok: boolean; reason?: string }> {
-  try {
-    const idTrim = String(id ?? '').trim();
-    if (!idTrim) return { ok: false, reason: 'id_invalido' };
-    if (idTrim === SCHED_DEFAULT_ID) return { ok: false, reason: 'schedule_default_nao_pode_excluir' };
-    const key = PREFIX_SCHED + idTrim;
-    const existing = await _cfgGet(key);
-    if (!existing) return { ok: false, reason: 'schedule_nao_encontrado' };
-    await _cfgSet(key, null);
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, reason: e instanceof Error ? e.message : String(e ?? 'unknown') };
-  }
-}
-
-export async function runAutomationScheduleNow(id: string, horarioKey?: string): Promise<{ ok: boolean; reason?: string; jobId?: string; status?: JobStatus; createdAtIso?: string }> {
+export async function runAutomationScheduleNow(id: string): Promise<{ ok: boolean; reason?: string; jobId?: string; status?: JobStatus; createdAtIso?: string }> {
   const cur = await getAutomationSchedule(id);
   if (!cur) return { ok: false, reason: 'schedule_nao_encontrado' };
   try {
@@ -38778,20 +35329,13 @@ export async function runAutomationScheduleNow(id: string, horarioKey?: string):
       ? { folderUrl: cur.folderUrl || '', forceKind: (cur.target as any) || 'both', forceMode: 'append' as const }
       : {};
     const submitted = submitImportJobAsync(cur.kind, opts);
-    const nowIso = new Date().toISOString();
-    cur.lastRunAtIso = nowIso;
-    if (!cur.lastRunAtPerHorario || typeof cur.lastRunAtPerHorario !== 'object') cur.lastRunAtPerHorario = {};
-    const hKey = horarioKey || (() => {
-      const hs = _scheduleNormalizeHorarios(cur);
-      return hs.length > 0 ? _scheduleHorarioKey(hs[0]) : '00:00';
-    })();
-    cur.lastRunAtPerHorario[hKey] = nowIso;
+    cur.lastRunAtIso = new Date().toISOString();
     cur.lastJobId = submitted.jobId;
     cur.lastStatus = submitted.status;
-    cur.updatedAtIso = nowIso;
+    cur.updatedAtIso = new Date().toISOString();
     cur.nextRunAtIso = scheduleCalculateNextRunAt(cur);
     await _cfgSet(PREFIX_SCHED + id, JSON.stringify(cur));
-    try { void _f3JobPatch(submitted.jobId, { optsSnapshot: { scheduleId: cur.id, scheduleTitle: cur.title, scheduleHorarioKey: hKey } }); } catch { /* ignore */ }
+    try { void _f3JobPatch(submitted.jobId, { optsSnapshot: { scheduleId: cur.id, scheduleTitle: cur.title } }); } catch { /* ignore */ }
     return { ok: true, jobId: submitted.jobId, status: submitted.status, createdAtIso: submitted.createdAtIso };
   } catch (e) {
     return { ok: false, reason: e instanceof Error ? e.message : String(e ?? 'unknown') };
@@ -38800,19 +35344,18 @@ export async function runAutomationScheduleNow(id: string, horarioKey?: string):
 
 async function _schedulerTickOnce(): Promise<void> {
   try {
-    if ((globalThis as any).__importSyncRunning === true) return;
     _schedState.tickCount += 1;
     _schedState.lastTickAtIso = new Date().toISOString();
     const cfg = await getAutomationConfig();
     if (!cfg.schedulerEnabled) return;
+    if (_hasQueuedOrRunningImportJobs()) return;
     _schedState.lastRunDueCheckAtIso = new Date().toISOString();
     const schedules = await listAutomationSchedules();
     const now = new Date();
     for (const s of schedules) {
       if (!s.enabled) continue;
-      const due = scheduleIsDueNow(s, now);
-      if (!due.ok || !due.horarioKey) continue;
-      try { void (async () => { try { console.log('[FASE3][Scheduler] Tick disparou execução automática scheduleId=' + s.id + ' title=' + s.title + ' horario=' + due.horarioKey); await runAutomationScheduleNow(s.id, due.horarioKey); } catch (e) { console.error('[FASE3][Scheduler] erro runScheduleNow id=' + s.id, e instanceof Error ? (e.stack || e.message) : String(e)); } })(); } catch { /* ignore schedule run individual errors */ }
+      if (!scheduleIsDueNow(s, now)) continue;
+      try { void (async () => { try { console.log('[FASE3][Scheduler] Tick disparou execução automática scheduleId=' + s.id + ' title=' + s.title); await runAutomationScheduleNow(s.id); } catch (e) { console.error('[FASE3][Scheduler] erro runScheduleNow id=' + s.id, e instanceof Error ? (e.stack || e.message) : String(e)); } })(); } catch { /* ignore schedule run individual errors */ }
     }
     if (_schedState.tickCount % 120 === 0) {
       void cleanupOldJobsTtl().catch((e) => { console.error('[FASE3][Scheduler] cleanupOldJobsTtl erro periódico:', e instanceof Error ? (e.stack || e.message) : String(e)); });
@@ -38950,12 +35493,6 @@ export async function bootstrapAutomationSystem(): Promise<{ ok: boolean; cleanu
     console.log('[FASE3][bootstrap] INICIANDO bootstrapAutomationSystem()...');
     await _ensureDefaultSchedules();
     _attachBootstrapListenersOnce();
-    try {
-      const p = startDailyOccurrencesPanoramaScheduler();
-      console.log('[PANORAMA][bootstrap] startDailyOccurrencesPanoramaScheduler: started=' + p.started + ' alreadyRunning=' + p.alreadyRunning + ' next=' + p.nextRunAtIso + ' intervalMs=' + p.intervalMs);
-    } catch (e) {
-      console.error('[PANORAMA][bootstrap] startDailyOccurrencesPanoramaScheduler ERRO:', e instanceof Error ? (e.stack || e.message) : String(e));
-    }
     void cleanupOldJobsTtl().then((r) => { cleanup = r; console.log('[FASE3][bootstrap][TTL] cleanupOldJobsTtl concluído: removed=' + r.removed + ' checked=' + r.checked + ' ttlDias=' + r.ttlDias); }).catch((e) => { console.error('[FASE3][bootstrap][TTL] cleanupOldJobsTtl erro:', e instanceof Error ? (e.stack || e.message) : String(e)); });
     try { const sz = ImportJobsManager.inMem.size; console.log('[FASE3][bootstrap] ImportJobsManager.inMem size inicial=' + sz); } catch { /* placeholder p/ touch ImportJobsManager no boot */ }
     console.log('[FASE3][bootstrap] CONCLUÍDO com sucesso.');
