@@ -4696,6 +4696,7 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
   //                  Atividade é OPCIONAL (ex: TRE-GO cliente 2/3 não tem)
   //   LINHA OPERAÇÃO (11 campos, COM Vencimento): <Op> <Parcela> <Mod> <VenctoOp> <TxJ> <Venc> <VOp> <VParc> <VJur> <Val> <Rend>
   //   LINHA OPERAÇÃO (10 campos, SEM Vencimento = vencimentoDefault): <Op> <Parcela> <Mod> <VenctoOp> <TxJ> <VOp> <VParc> <VJur> <Val> <Rend>
+  //   LINHA OPERAÇÃO (9 campos, NENHUMA data): <Op> <Parcela> <Mod> <TxJ> <VOp> <VParc> <VJur> <Val> <Rend>
   //   PULAR: Total Cliente/Empresa/Cooperativa/Central/Geral, headers repetidos, TOTAIS, EMP-158, -- X of Y --
   // ============================================================================
   try {
@@ -4703,11 +4704,19 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
     const cliReProbe = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*(?:[A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?\s*\t\s*)?(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/gim;
     const opReProbe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
     const opReProbe10 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
+    const opReProbe11b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
+    const opReProbe10b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
+    const opReProbe9 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
+    const opReProbe9b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/gm;
     const clienteMatches = text.match(cliReProbe) ?? [];
     const operacaoMatches11 = text.match(opReProbe11) ?? [];
     const operacaoMatches10 = text.match(opReProbe10) ?? [];
+    const operacaoMatches11b = text.match(opReProbe11b) ?? [];
+    const operacaoMatches10b = text.match(opReProbe10b) ?? [];
+    const operacaoMatches9 = text.match(opReProbe9) ?? [];
+    const operacaoMatches9b = text.match(opReProbe9b) ?? [];
     const clienteCount = clienteMatches.length;
-    const operacaoCount = operacaoMatches11.length + operacaoMatches10.length;
+    const operacaoCount = operacaoMatches11.length + operacaoMatches10.length + operacaoMatches11b.length + operacaoMatches10b.length + operacaoMatches9.length + operacaoMatches9b.length;
     const isSisbrByStructure = clienteCount >= 3 || operacaoCount >= 5;
     const sisbrHeaderLiteralMatch = sisbrHeaderLiteralRe.test(text);
     const __sisbrDebugInfo: Record<string, unknown> = {
@@ -4722,6 +4731,10 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
       operacaoCount,
       operacaoCount11: operacaoMatches11.length,
       operacaoCount10: operacaoMatches10.length,
+      operacaoCount11b: operacaoMatches11b.length,
+      operacaoCount10b: operacaoMatches10b.length,
+      operacaoCount9: operacaoMatches9.length,
+      operacaoCount9b: operacaoMatches9b.length,
       isSisbrByStructure,
       enteredSisbrPositional: false,
       empresaHeaderExtraido: '',
@@ -4911,8 +4924,16 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
       // ---------------- REGEX LINHAS ----------------
       // Op 11 campos (COM Vencimento explícito na 6ª posição):
       const opRe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
-      // Op 10 campos (SEM Vencimento → usa vencimentoDefault): Vencimento é omitido da 6ª posição
+      // Op 11b campos (COM Vencimento explícito + 6 campos monetários no final → 12 grupos):
+      const opRe11b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
+      // Op 10 campos (SEM Vencimento de parcela → usa vencimentoDefault; AINDA tem data de Vencto. Operação):
       const opRe10 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
+      // Op 10b campos (SEM Vencimento de parcela + 6 campos monetários + Vencto. Operação data → 11 grupos):
+      const opRe10b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
+      // Op 9 campos (NENHUMA data — nem Vencto. Operação nem Vencimento → ambos usam defaults): 9 grupos = OP Parc Mod TxJ VOp VParc VJur VVal VRend
+      const opRe9 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
+      // Op 9b campos (NENHUMA data + 6 campos monetários extra → 10 grupos = OP Parc Mod TxJ VOp VParc VJur VVal VRend Extra6):
+      const opRe9b = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
       // Cliente COM Atividade (PESSOA FISICA / PESSOA JURIDICA / OUTROS) entre TABS:
       const cliReComAtiv = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
       // Cliente SEM Atividade (só TAB para CPF, sem campo intermediário):
@@ -4925,6 +4946,7 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
         'EMPRESA', 'Cliente', 'Matrícula', 'CPF', 'Nome', 'Atividade', 'Telefone',
         'Operação', 'Modalidade', 'Vencto. Operação', 'Tx. Juros', 'Parcela', 'Vencimento',
         'Valor Operação', 'Valor Parcela', 'Valor Juros', 'Valorização', 'Rendas Apropriar', 'Copetencia',
+        'Valor 6 Campo Extra',
       ];
       for (const l of lines) {
         const ll = l.trim();
@@ -4978,6 +5000,34 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
             Valorização: oM11[10],
             'Rendas Apropriar': oM11[11],
             Copetencia: copetencia,
+            'Valor 6 Campo Extra': '',
+          });
+          continue;
+        }
+        // ----- Tenta linha operação 11b campos (Vencimento explícito + 6 campos monetários) -----
+        const oM11b = ll.match(opRe11b);
+        if (oM11b) {
+          resultRows.push({
+            EMPRESA: empresaHeader,
+            Cliente: currentClient?.Cliente ?? '',
+            Matrícula: currentClient?.Matrícula ?? '',
+            CPF: currentClient?.CPF ?? '',
+            Nome: currentClient?.Nome ?? '',
+            Atividade: currentClient?.Atividade ?? '',
+            Telefone: currentClient?.Telefone ?? '',
+            Operação: oM11b[1],
+            Modalidade: oM11b[3],
+            'Vencto. Operação': oM11b[4],
+            'Tx. Juros': oM11b[5],
+            Parcela: oM11b[2],
+            Vencimento: oM11b[6],
+            'Valor Operação': oM11b[7],
+            'Valor Parcela': oM11b[8],
+            'Valor Juros': oM11b[9],
+            Valorização: oM11b[10],
+            'Rendas Apropriar': oM11b[11],
+            Copetencia: copetencia,
+            'Valor 6 Campo Extra': oM11b[12],
           });
           continue;
         }
@@ -5004,6 +5054,88 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
             Valorização: oM10[9],
             'Rendas Apropriar': oM10[10],
             Copetencia: copetencia,
+            'Valor 6 Campo Extra': '',
+          });
+          continue;
+        }
+        // ----- Tenta linha operação 10b campos (SEM Vencimento + 6 campos monetários) -----
+        const oM10b = ll.match(opRe10b);
+        if (oM10b) {
+          resultRows.push({
+            EMPRESA: empresaHeader,
+            Cliente: currentClient?.Cliente ?? '',
+            Matrícula: currentClient?.Matrícula ?? '',
+            CPF: currentClient?.CPF ?? '',
+            Nome: currentClient?.Nome ?? '',
+            Atividade: currentClient?.Atividade ?? '',
+            Telefone: currentClient?.Telefone ?? '',
+            Operação: oM10b[1],
+            Modalidade: oM10b[3],
+            'Vencto. Operação': oM10b[4],
+            'Tx. Juros': oM10b[5],
+            Parcela: oM10b[2],
+            Vencimento: vencimentoDefault,
+            'Valor Operação': oM10b[6],
+            'Valor Parcela': oM10b[7],
+            'Valor Juros': oM10b[8],
+            Valorização: oM10b[9],
+            'Rendas Apropriar': oM10b[10],
+            Copetencia: copetencia,
+            'Valor 6 Campo Extra': oM10b[11],
+          });
+          continue;
+        }
+        // ----- Tenta linha operação 9 campos (NENHUMA data — Vencto. Operação e Vencimento = defaults) -----
+        const oM9 = ll.match(opRe9);
+        if (oM9) {
+          resultRows.push({
+            EMPRESA: empresaHeader,
+            Cliente: currentClient?.Cliente ?? '',
+            Matrícula: currentClient?.Matrícula ?? '',
+            CPF: currentClient?.CPF ?? '',
+            Nome: currentClient?.Nome ?? '',
+            Atividade: currentClient?.Atividade ?? '',
+            Telefone: currentClient?.Telefone ?? '',
+            Operação: oM9[1],
+            Modalidade: oM9[3],
+            'Vencto. Operação': vencimentoDefault,
+            'Tx. Juros': oM9[4],
+            Parcela: oM9[2],
+            Vencimento: vencimentoDefault,
+            'Valor Operação': oM9[5],
+            'Valor Parcela': oM9[6],
+            'Valor Juros': oM9[7],
+            Valorização: oM9[8],
+            'Rendas Apropriar': oM9[9],
+            Copetencia: copetencia,
+            'Valor 6 Campo Extra': '',
+          });
+          continue;
+        }
+        // ----- Tenta linha operação 9b campos (NENHUMA data + 6º campo monetário extra) -----
+        const oM9b = ll.match(opRe9b);
+        if (oM9b) {
+          resultRows.push({
+            EMPRESA: empresaHeader,
+            Cliente: currentClient?.Cliente ?? '',
+            Matrícula: currentClient?.Matrícula ?? '',
+            CPF: currentClient?.CPF ?? '',
+            Nome: currentClient?.Nome ?? '',
+            Atividade: currentClient?.Atividade ?? '',
+            Telefone: currentClient?.Telefone ?? '',
+            Operação: oM9b[1],
+            Modalidade: oM9b[3],
+            'Vencto. Operação': vencimentoDefault,
+            'Tx. Juros': oM9b[4],
+            Parcela: oM9b[2],
+            Vencimento: vencimentoDefault,
+            'Valor Operação': oM9b[5],
+            'Valor Parcela': oM9b[6],
+            'Valor Juros': oM9b[7],
+            Valorização: oM9b[8],
+            'Rendas Apropriar': oM9b[9],
+            Copetencia: copetencia,
+            'Valor 6 Campo Extra': oM9b[10],
           });
           continue;
         }
