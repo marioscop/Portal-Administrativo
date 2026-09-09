@@ -50,3 +50,7 @@ restaura_*.js
 # PDFs gerados em Modelos (arquivo de referência pode ficar, mas os TESTEs de comparação gerados:
 Modelos/TESTE_*.pdf
 Modelos/TESTE_V*.pdf
+Modelos/*.zip
+Modelos/*.7z
+Modelos/*.rar
+debug-*.md

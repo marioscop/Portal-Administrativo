@@ -10345,6 +10345,50 @@ function pickRecursoValorColumn(existing: string[]): string | null {
   );
 }
 
+function listRecursoValorColumns(existing: string[]): string[] {
+  const candidates = [
+    'Valor Parcela',
+    'VALOR PARCELA',
+    'VALOR PARC AVERBADA',
+    'VALOR DESC HOLERITE',
+    'VALOR PARC ENVIADA',
+    'VALOR',
+    'URV',
+    'VALOR URV',
+    'URV (ANTECIPAÇÃO)',
+  ];
+  const out: string[] = [];
+  const add = (c: string | null) => {
+    const v = String(c ?? '').trim();
+    if (!v) return;
+    if (out.includes(v)) return;
+    out.push(v);
+  };
+  const set = new Set(existing);
+  for (const c of candidates) if (set.has(c)) add(c);
+  const normalize = (value: string) =>
+    value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '');
+  const byKey = new Map<string, string>();
+  for (const raw of existing) {
+    const key = normalize(raw);
+    if (!key) continue;
+    if (!byKey.has(key)) byKey.set(key, raw);
+  }
+  for (const c of candidates) {
+    const found = byKey.get(normalize(c)) ?? null;
+    add(found);
+  }
+  for (const c of existing) {
+    const lower = String(c ?? '').toLowerCase();
+    if (lower.includes('urv') && /(valor|parcela)/i.test(String(c ?? ''))) add(c);
+  }
+  return out;
+}
+
 function pickFirstColumnContaining(
   existing: string[],
   fragments: string[],
@@ -12084,8 +12128,8 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
 
   const recursoCpfCol =
     recursoCols.find((c) => normalizeHeaderKey(c) === 'CPF') ?? null;
-  const recursoValorCol = pickRecursoValorColumn(recursoCols);
-  if (!recursoCpfCol || !recursoValorCol) {
+  const recursoValorCols = listRecursoValorColumns(recursoCols);
+  if (!recursoCpfCol || recursoValorCols.length === 0) {
     throw new Error(
       `Tabela ${recursoTable} não possui colunas obrigatórias (CPF e Valor Parcela).`,
     );
@@ -12317,17 +12361,18 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       pickFirstColumnContaining(cols, ['nome', 'cliente']) ??
       null;
     const forceValorDescHolerite = FORCE_RECURSO_COLUMN_TABLES.has(tableName);
-    let valorCol: string | null = null;
+    let valorCols: string[] = [];
     if (forceValorDescHolerite) {
-      valorCol = pickFirstExistingColumn(cols, [FORCE_RECURSO_COLUMN]);
-      if (!valorCol) {
+      const forced = pickFirstExistingColumn(cols, [FORCE_RECURSO_COLUMN]);
+      if (!forced) {
         throw new Error(
           `Tabela ${tableName} não possui a coluna obrigatória "${FORCE_RECURSO_COLUMN}". ` +
           `A conciliação deste órgão exige SOMENTE esta coluna para o card Total recurso Orgão.`,
         );
       }
+      valorCols = [forced];
     } else {
-      valorCol = pickRecursoValorColumn(cols);
+      valorCols = listRecursoValorColumns(cols);
     }
     const compCol =
       cols.find((c) =>
@@ -12350,19 +12395,20 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
           ? pickFirstExistingColumn(cols, ['Sit. Contrato', 'SIT. CONTRATO'])
           : null;
     const arquivoCol = cols.find((c) => normalizeHeaderKey(c) === 'ARQUIVO') ?? null;
-    if (!cpfCol || !valorCol) return;
+    if (!cpfCol || valorCols.length === 0) return;
 
-    const selectCols = [
+    const selectColsRaw = [
       cpfCol,
       ...(nomeCol ? [nomeCol] : []),
       ...(servidorCol ? [servidorCol] : []),
-      valorCol,
+      ...valorCols,
       ...(compCol ? [compCol] : []),
       ...(!compCol && anoCol ? [anoCol] : []),
       ...(!compCol && mesCol ? [mesCol] : []),
       ...(sitContratoCol ? [sitContratoCol] : []),
       ...(arquivoCol ? [arquivoCol] : []),
     ];
+    const selectCols = selectColsRaw.filter((c, i, arr) => arr.indexOf(c) === i);
     const rows = readTableRows(db, tableName, selectCols);
     const allowedMonthKeys = getRecursoAllowedMonthKeys(tableName);
     const allowedCompetencias = getRecursoAllowedCompetencias(tableName);
@@ -12385,7 +12431,14 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       const cpfDigits = normalizeCpfDigits(r[cpfCol]);
       if (cpfDigits.length !== 11) continue;
       if (forceValorDescHolerite) forceLinesChecked += 1;
-      const cents = parseMoneyToCents(r[valorCol]);
+      let cents: number | null = null;
+      for (const c of valorCols) {
+        const parsed = parseMoneyToCents(r[c]);
+        if (parsed !== null) {
+          cents = parsed;
+          break;
+        }
+      }
       if (cents === null) continue;
       if (forceValorDescHolerite) forceCentsSum += cents;
       const nomeFromCol =
@@ -13478,14 +13531,18 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
               justification: 'Inclusão de Servidor',
             }
           : null;
+      const key = `${v.cpfDigits}|${v.cents}`;
+      const occ = occByKey.get(key) ?? null;
+      const isQuitado =
+        Boolean(occ) && (occ!.action === 'quitado_recurso' || occ!.action.startsWith('quitado_recurso'));
       return {
         cpf: v.cpf,
-        nome: canonicalNomeByCpfAndCents.get(`${v.cpfDigits}|${v.cents}`) ?? v.nome,
+        nome: canonicalNomeByCpfAndCents.get(key) ?? v.nome,
         value: centsToPtBr(v.cents),
         sourceRecursoTable: v.sourceRecursoTable,
         status: v.pairId ? 'conciliado' : 'pendencia',
         pairId: v.pairId,
-        hideInFront: v.hideInFront,
+        hideInFront: v.hideInFront || isQuitado,
         ...(manualOccurrence
           ? {
               ocorrencia: manualOccurrence,
@@ -16226,19 +16283,20 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
       }) ??
       pickFirstColumnContaining(recursoCols, ['nome', 'cliente']) ??
       null;
-    const recursoValorCol = pickRecursoValorColumn(recursoCols);
+    const recursoValorCols = listRecursoValorColumns(recursoCols);
     const recursoCompCol =
       recursoCols.find((c) =>
         ['COMPETENCIA', 'COPETENCIA'].includes(normalizeHeaderKey(c).replace(/\s/g, '')),
       ) ?? null;
-    if (!recursoCpfCol || !recursoValorCol) continue;
+    if (!recursoCpfCol || recursoValorCols.length === 0) continue;
 
-    const recursoSelectCols = [
+    const recursoSelectColsRaw = [
       recursoCpfCol,
       ...(recursoNomeCol ? [recursoNomeCol] : []),
-      recursoValorCol,
+      ...recursoValorCols,
       ...(recursoCompCol ? [recursoCompCol] : []),
     ];
+    const recursoSelectCols = recursoSelectColsRaw.filter((c, i, arr) => arr.indexOf(c) === i);
     const recursoRows = readTableRows(db, candidateTable, recursoSelectCols);
     const desiredNomeKey = normalizeNameForMatch(nome);
     const matchRowCompetenciaOk = (r: Record<string, unknown>): boolean => {
@@ -16250,22 +16308,28 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
       return compRaw === wantedCopetenciaFull || compRaw === wantedCopetenciaShort;
     };
     const matchRowValueOk = (r: Record<string, unknown>): boolean => {
-      const raw = r[recursoValorCol];
-      const cents = parseMoneyToCents(raw);
-      if (cents !== null && cents === valueCents) return true;
-      const rawStr = String(raw ?? '').trim();
-      if (rawStr && (rawStr === String(opts.value ?? '').trim() || rawStr === centsToPtBr(valueCents))) return true;
-      if (valueCents === 0) {
+      for (const col of recursoValorCols) {
+        const raw = r[col];
+        const cents = parseMoneyToCents(raw);
+        if (cents !== null && cents === valueCents) return true;
+        const rawStr = String(raw ?? '').trim();
         if (
-          rawStr === '0' ||
-          rawStr === '0,00' ||
-          rawStr === '0.00' ||
-          rawStr === 'R$ 0,00' ||
-          rawStr === 'R$0,00' ||
-          rawStr === 'R$ 0.00' ||
-          rawStr === 'R$0.00'
-        ) {
+          rawStr &&
+          (rawStr === String(opts.value ?? '').trim() || rawStr === centsToPtBr(valueCents))
+        )
           return true;
+        if (valueCents === 0) {
+          if (
+            rawStr === '0' ||
+            rawStr === '0,00' ||
+            rawStr === '0.00' ||
+            rawStr === 'R$ 0,00' ||
+            rawStr === 'R$0,00' ||
+            rawStr === 'R$ 0.00' ||
+            rawStr === 'R$0.00'
+          ) {
+            return true;
+          }
         }
       }
       return false;
@@ -16284,7 +16348,14 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
           ? String(r[recursoNomeCol]).trim()
           : '';
       const rowNomeKey = normalizeNameForMatch(rowNomeRaw);
-      const cents = parseMoneyToCents(r[recursoValorCol]);
+      let cents: number | null = null;
+      for (const col of recursoValorCols) {
+        const parsed = parseMoneyToCents(r[col]);
+        if (parsed !== null) {
+          cents = parsed;
+          break;
+        }
+      }
       const valueOk = matchRowValueOk(r);
       const safeCents = cents === null ? valueCents : cents;
       const pushRow = (bucket: typeof matchedRecursoRows) => {
@@ -16306,9 +16377,10 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
         rowCpfDigits.length === 11 &&
         rowCpfDigits === cpfDigits &&
         valueCents === 0 &&
-        (String(r[recursoValorCol] ?? '').trim() === '' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'N/D' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'ND')
+        recursoValorCols.some((c) => {
+          const s = String(r[c] ?? '').trim().toUpperCase();
+          return s === '' || s === 'N/D' || s === 'ND';
+        })
       ) {
         pushRow(lvl2CpfLoose);
         continue;
@@ -16325,9 +16397,10 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
         valueCents === 0 &&
         (rowNomeKey.includes(desiredNomeKey) || desiredNomeKey.includes(rowNomeKey)) &&
         (valueOk ||
-          String(r[recursoValorCol] ?? '').trim() === '' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'N/D' ||
-          String(r[recursoValorCol] ?? '').trim().toUpperCase() === 'ND')
+          recursoValorCols.some((c) => {
+            const s = String(r[c] ?? '').trim().toUpperCase();
+            return s === '' || s === 'N/D' || s === 'ND';
+          }))
       ) {
         pushRow(lvl4NomeLoose);
         continue;
@@ -19468,7 +19541,7 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
           const valCents = parseMoneyToCents((row as any)[valorCol]);
           if (valCents === null) continue;
 
-          if (valCents > 0) {
+          if (valCents > 0 && valCents === valueCents) {
             let comp: string | null = null;
             if (copCol) {
               const raw =
@@ -19504,7 +19577,7 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
       const identificadores = detalhe.length ? detalhe.join(' + ') : 'Identificador';
       const compInfo = blockedReason.competencia ? ` (competência ${blockedReason.competencia})` : '';
       throw new Error(
-        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real (coluna "${blockedReason.valorColuna}") nos recursos/extratos com valor > R$ 0,00 para este servidor.\n` +
+        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real (coluna "${blockedReason.valorColuna}") nos recursos/extratos com o mesmo valor desta parcela (R$ ${valorParcela}) para este servidor.\n` +
           `- Tabela de origem: ${blockedReason.table}\n` +
           `- Coluna de valor usada como referência: ${blockedReason.valorColuna}\n` +
           `- Match por: ${identificadores}${compInfo}\n` +
@@ -39193,4 +39266,3 @@ export async function debugEnsureExtratosRelatoriosTables(): Promise<{
   })();
   return { ok: true, dbFilePath, tablesAfter, learningProfiles, allTablesContainingExtratoOrRelatorio, walCheckpointResult, lastExtratosRows, extratosColumns, adfegoEletraFound, extratosRowIdInfo };
 }
-
