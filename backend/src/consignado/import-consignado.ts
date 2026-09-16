@@ -14416,7 +14416,6 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       ...recursoRecebidoMaiorEstornoByDate.keys(),
       ...liquidacaoNormalEstornadaByDate.keys(),
       ...estornoByDate.keys(),
-      ...naoPossuiRecursoByDate.keys(),
       ...recursoJudicialEditedByDate.keys(),
       ...repactuacaoEmAndamentoByDate.keys(),
       ...recursoRecebidoMenorNoDebitByDate.keys(),
@@ -14445,7 +14444,6 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       recursoRecebidoMaiorEstornoByDate.get(date) ?? 0;
     const estornoCents = estornoByDate.get(date) ?? 0;
     const liquidacaoNormalEstornadaCents = liquidacaoNormalEstornadaByDate.get(date) ?? 0;
-    const naoPossuiRecursoCents = naoPossuiRecursoByDate.get(date) ?? 0;
     const repactuacaoCents = repactuacaoEmAndamentoByDate.get(date) ?? 0;
     const recursoJudicialEditedCents = recursoJudicialEditedByDate.get(date) ?? 0;
     const recursoJudicialOriginalCents = recursoJudicialOriginalByDate.get(date) ?? 0;
@@ -14500,19 +14498,6 @@ function computeConsolidadoPorDataForContabilidade(opts: {
         extratosCents: 0,
         saldoCents: runningSaldo,
         event: 'DIFERENÇA DE RECURSOS JUDICIAIS',
-        skipAdjustDate: true,
-      });
-    }
-
-    if (naoPossuiRecursoByDate.has(date)) {
-      runningSaldo += -naoPossuiRecursoCents;
-      out.push({
-        vencimento: date,
-        recursoCents: 0,
-        relatorioCents: naoPossuiRecursoCents,
-        extratosCents: 0,
-        saldoCents: runningSaldo,
-        event: 'NÃO POSSUI RECURSO',
         skipAdjustDate: true,
       });
     }
@@ -17207,25 +17192,88 @@ export async function alterarOrgaoRelatorioSisbr(opts: {
   const updatedRowIds: number[] = [];
   if (tableExists(db, 'conciliacao_pendencia_actions')) {
     const stmt = db.prepare(
-      `SELECT id FROM conciliacao_pendencia_actions
+      `SELECT id, previous_value, next_value, error, undone_at, meta_json FROM conciliacao_pendencia_actions
        WHERE month=?
          AND TRIM(COALESCE(orgao,''))=?
-         AND TRIM(COALESCE(cpf,''))=?
+         AND (TRIM(COALESCE(cpf,''))=? OR REPLACE(REPLACE(REPLACE(TRIM(COALESCE(cpf,'')),'.',''),'-',''),'/','')=?)
          AND TRIM(COALESCE(value,''))=?
-         AND COALESCE(error,'')=''
+         AND (COALESCE(error,'')='' OR error IS NULL)
          AND (COALESCE(undone_at,'')='' OR undone_at IS NULL)
          AND TRIM(COALESCE(action,'')) LIKE 'alterar_orgao_relatorio%'
        ORDER BY id DESC
-       LIMIT 1;`,
+       LIMIT 20;`,
     );
     try {
-      stmt.bind([wantedMonthKey, toOrgao, cpf, valorParcela] as unknown as any[]);
-      if (stmt.step()) {
-        const row = stmt.getAsObject() as { id?: unknown };
+      stmt.bind([wantedMonthKey, toOrgao, cpf, cpf, valorParcela] as unknown as any[]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as { id?: unknown; previous_value?: unknown; next_value?: unknown; error?: unknown; undone_at?: unknown; meta_json?: unknown };
         const id = Number(row.id);
-        if (Number.isFinite(id)) {
-          throw new Error('Esta linha já possui ocorrência. Desfaça a ocorrência antes de criar outra.');
+        if (!Number.isFinite(id)) continue;
+        let prevEmp = String(row.previous_value ?? '').trim();
+        let nextEmp = String(row.next_value ?? '').trim();
+        let meta: { rowIds?: unknown[]; previousEmpresa?: string; nextEmpresa?: string } | null = null;
+        try {
+          if (row.meta_json && typeof row.meta_json === 'string') meta = JSON.parse(row.meta_json) as typeof meta;
+        } catch (_) { meta = null; }
+        const rowIds = ((meta && Array.isArray(meta.rowIds) ? meta.rowIds : []) as unknown[])
+          .filter(n => Number.isFinite(Number(n))).map(Number);
+        const fromKey = normalizeRelatorioOrgaoForMatch(nextEmp || (meta && meta.nextEmpresa) || targetEmpresa);
+        let fantasma = false;
+        if (rowIds.length > 0) {
+          const idsQuoted = rowIds.map(() => '?').join(',');
+          const sqlV = `SELECT rowid, ${escapeSqlIdentifier('EMPRESA')} AS EMP, ${escapeSqlIdentifier('Copetencia')} AS COP FROM relatorio_consignado WHERE rowid IN (${idsQuoted})`;
+          const chk = db.prepare(sqlV);
+          try {
+            chk.bind(rowIds as unknown as any[]);
+            while (chk.step() && !fantasma) {
+              const rr = chk.getAsObject() as { rowid?: unknown; EMP?: unknown; COP?: unknown };
+              const empStr = String(rr.EMP ?? '').trim();
+              const empK = normalizeRelatorioOrgaoForMatch(empStr);
+              const copK = parseCopetenciaToMonthKey(String(rr.COP ?? ''));
+              if (copK && copK === wantedMonthKey && (!fromKey || !empK || empK !== fromKey)) {
+                fantasma = true;
+              }
+            }
+          } finally { chk.free(); }
         }
+        if (!fantasma && prevEmp && nextEmp) {
+          const sqlB = `SELECT rowid,
+                               TRIM(COALESCE(${escapeSqlIdentifier('Copetencia')},''))  AS COP,
+                               TRIM(COALESCE(${escapeSqlIdentifier('EMPRESA')},''))     AS EMP
+                          FROM relatorio_consignado
+                         WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')},'')),'.',''),'-',''),'/','')=?
+                           AND TRIM(COALESCE(${escapeSqlIdentifier('Valor Parcela')},''))=?`;
+          const fromNormKey = normalizeRelatorioOrgaoForMatch(prevEmp);
+          const bb = db.prepare(sqlB);
+          try {
+            bb.bind([cpf, valorParcela] as unknown as any[]);
+            while (bb.step() && !fantasma) {
+              const rr = bb.getAsObject() as { rowid?: unknown; COP?: unknown; EMP?: unknown };
+              const copK = parseCopetenciaToMonthKey(String(rr.COP ?? ''));
+              if (copK !== wantedMonthKey) continue;
+              const empStr = String(rr.EMP ?? '');
+              const empK = normalizeRelatorioOrgaoForMatch(empStr);
+              const hitExact = empStr === prevEmp;
+              const hitNorm = !!fromNormKey && !!empK && empK === fromNormKey;
+              const hitNext = (() => {
+                const nk = normalizeRelatorioOrgaoForMatch(nextEmp);
+                return !!nk && !!empK && empK === nk;
+              })();
+              if ((hitExact || hitNorm) && !hitNext) {
+                fantasma = true;
+              }
+            }
+          } finally { bb.free(); }
+        }
+        if (fantasma) {
+          const up = db.prepare(`UPDATE conciliacao_pendencia_actions SET error=?, undo_justification=COALESCE(undo_justification,'') || CASE WHEN COALESCE(undo_justification,'')='' THEN ? ELSE char(10) || ? END, status='fantasma_corrigido' WHERE id=?`);
+          try {
+            const msg = 'Ação-fantasma detectada em 16/09/2026: inserted_rows=1 mas linha(s) do Relatório SISBR permaneceram com EMPRESA original (não efetivou a troca de órgão). Permitida recriação da ocorrência.';
+            up.bind([msg, `[auto-fix 16/09] ${msg}`, `[auto-fix 16/09] ${msg}`, id] as unknown as any[]);
+          } finally { up.free(); }
+          continue;
+        }
+        throw new Error('Esta linha já possui ocorrência válida (EMPRESA no Relatório SISBR já estava trocada para o órgão de destino). Desfaça a ocorrência anterior na tela de Conciliação antes de criar outra.');
       }
     } finally {
       stmt.free();
@@ -17336,6 +17384,41 @@ export async function alterarOrgaoRelatorioSisbr(opts: {
     }
 
     db.run('COMMIT;');
+
+    if (updatedRowIds.length > 0) {
+      const idsQuoted = updatedRowIds.map(() => '?').join(',');
+      const verifySql = `SELECT rowid, TRIM(COALESCE(${escapeSqlIdentifier('EMPRESA')},'')) AS EMP, TRIM(COALESCE(${escapeSqlIdentifier('Copetencia')},'')) AS COP FROM relatorio_consignado WHERE rowid IN (${idsQuoted})`;
+      const vStmt = db.prepare(verifySql);
+      const naoAtualizadas: number[] = [];
+      try {
+        vStmt.bind(updatedRowIds as unknown as any[]);
+        while (vStmt.step()) {
+          const rr = vStmt.getAsObject() as { rowid?: unknown; EMP?: unknown; COP?: unknown };
+          const empStr = String(rr.EMP ?? '').trim();
+          const empK = normalizeRelatorioOrgaoForMatch(empStr);
+          const wantedK = normalizeRelatorioOrgaoForMatch(targetEmpresa);
+          const copK = parseCopetenciaToMonthKey(String(rr.COP ?? ''));
+          if (copK === wantedMonthKey && (!empK || !wantedK || empK !== wantedK)) {
+            naoAtualizadas.push(Number(rr.rowid));
+          }
+        }
+      } finally { vStmt.free(); }
+      if (naoAtualizadas.length > 0) {
+        const errMsg = `[Anti-Fantasma 16/09] A alteração de órgão no Relatório SISBR não foi persistida para ${naoAtualizadas.length} linha(s) apesar do inserted_rows=${updatedRowIds.length}. Linhas que faltaram trocar EMPRESA de "${fromEmpresa}" para "${targetEmpresa}": rowids=[${naoAtualizadas.join(',')}]. Por favor, tente novamente ou contate o suporte. (Nenhuma ação-fantasma foi registrada.)`;
+        try {
+          db.run('BEGIN;');
+          const fixStmt = db.prepare(`UPDATE conciliacao_pendencia_actions SET error=?, inserted_rows=?, skipped_rows=?, status='falhou_apos_commit', undo_justification=COALESCE(undo_justification,'') || CASE WHEN COALESCE(undo_justification,'')='' THEN ? ELSE char(10) || ? END WHERE id=(SELECT id FROM conciliacao_pendencia_actions WHERE month=? AND TRIM(COALESCE(orgao,''))=? AND (TRIM(COALESCE(cpf,''))=? OR REPLACE(REPLACE(REPLACE(TRIM(COALESCE(cpf,'')),'.',''),'-',''),'/','')=?) AND TRIM(COALESCE(value,''))=? AND (COALESCE(error,'')='' OR error IS NULL) ORDER BY id DESC LIMIT 1)`);
+          try {
+            fixStmt.bind([errMsg, 0, updatedRowIds.length, errMsg, errMsg, wantedMonthKey, toOrgao, cpf, cpf, valorParcela] as unknown as any[]);
+          } finally { fixStmt.free(); }
+          db.run('COMMIT;');
+          persistDatabase(db, dbFilePath);
+        } catch (_) {
+          try { db.run('ROLLBACK;'); } catch { void 0; }
+        }
+        throw new Error(errMsg);
+      }
+    }
   } catch (e) {
     try {
       db.run('ROLLBACK;');
@@ -36295,7 +36378,7 @@ function buildConciliacaoEmailHtml(opts: {
   const totalDebito = rows.reduce((acc, r) => acc + rowDebitCentsForTotals(r), 0);
   const totalCredito = rows.reduce((acc, r) => acc + (Number(r?.extratosCents ?? 0) || 0), 0);
   const saldoTotal = totalCredito - totalDebito;
-  const saldoTotalizadorGeral = saldoTotal - saldoTarifas;
+  const saldoTotalizadorGeral = saldoTotal + saldoTarifas;
 
   const consolidatedHtml =
     rows.length === 0
@@ -36409,7 +36492,7 @@ function buildConciliacaoEmailHtml(opts: {
                   <div style="font-size:12px;color:#003641;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;text-align:center">TOTALIZADOR GERAL (SALDOS)</div>
                   <div style="font-size:18px;font-weight:900;color:${saldoTotalizadorGeral < 0 ? '#b91c1c' : '#0f766e'};margin-top:8px;text-align:center">${escapeHtml(moneySigned(saldoTotalizadorGeral))}</div>
                   <div style="font-size:12px;color:#64748b;margin-top:8px;text-align:center">
-                    Coluna SALDO R$ do TOTAL (DÉBITO / CRÉDITO) − coluna SALDO R$ do TOTAL GERAL (APÓS TARIFAS)
+                    Coluna SALDO R$ do TOTAL (DÉBITO / CRÉDITO) + coluna SALDO R$ do TOTAL GERAL (APÓS TARIFAS)
                   </div>
                 </td>
               </tr>
@@ -37120,7 +37203,7 @@ async function createConciliacaoPdfBuffer(opts: {
       saldoColor: totalTarifas > 0 ? '#C00000' : '#000000',
     },
   );
-  const saldoGeralSomado = totalMainSaldo - totalTarifasSaldo;
+  const saldoGeralSomado = totalMainSaldo + totalTarifasSaldo;
   const drawOuterOnlyRow = (cells: { label: string; saldo: string }, optsRow?: { fill?: string; bold?: boolean; saldoColor?: string }) => {
     const fill = optsRow?.fill;
     const totalW = colDate + colEvent + colDebit + colCredit + colSaldo;
