@@ -3376,6 +3376,24 @@ async function readRelatorioPdfTable(
     const moneyRe = /\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}/g;
     const cpfRe = /\d{3}\.?\d{3}\.?\d{3}-?\d{2}/;
 
+    const normalizeCpfKey = (cpf: string): string => String(cpf ?? '').replace(/\D/g, '');
+    const dateToMmYyyy = (dt: string): string => {
+      const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(String(dt ?? '').trim());
+      if (!m) return '';
+      const mm = String(Number(m[2])).padStart(2, '0');
+      let yy = String(m[3]);
+      if (yy.length === 2) yy = `20${yy}`;
+      return `${mm}/${yy}`;
+    };
+    const competenciaMmYyyy = String(competencia ?? '').trim();
+    const validVencForCompetencia = (vop: string, vhj: string): boolean => {
+      if (!vhj) return false;
+      if (vhj === vop) return false;
+      return dateToMmYyyy(vhj) === competenciaMmYyyy;
+    };
+    const lastVencByCpf: Record<string, string> = {};
+    let lastGlobalVenc = '';
+
     const normalizeEmpresaInline = (raw: string) => {
       const cleaned = raw.trim().replace(/\s+/g, ' ');
       if (!cleaned) return '';
@@ -3464,7 +3482,17 @@ async function readRelatorioPdfTable(
         const operacao = tokens[0];
         const parcela = tokens[2];
         const venctoOperacao = dates[0] ?? '';
-        const vencimento = dates[1] ?? dates[0] ?? '';
+        const cpfKey = normalizeCpfKey(currentCpf);
+        let vencimento = dates[1] ?? '';
+        const rowHasExplicitVenc = validVencForCompetencia(venctoOperacao, vencimento);
+        if (!rowHasExplicitVenc) {
+          const fromPessoa = cpfKey ? lastVencByCpf[cpfKey] ?? '' : '';
+          vencimento = fromPessoa || lastGlobalVenc || venctoOperacao || '';
+        }
+        if (rowHasExplicitVenc) {
+          lastGlobalVenc = vencimento;
+          if (cpfKey) lastVencByCpf[cpfKey] = vencimento;
+        }
 
         if (moneys.length >= 6) {
           countOpWithMoney += 1;
@@ -3488,6 +3516,41 @@ async function readRelatorioPdfTable(
           });
         }
       }
+    }
+
+    {
+      const byCpfGroups = new Map<string, number[]>();
+      out.forEach((row, idx) => {
+        const cpf = normalizeCpfKey(String((row as any).CPF ?? ''));
+        if (!cpf) return;
+        if (!byCpfGroups.has(cpf)) byCpfGroups.set(cpf, []);
+        byCpfGroups.get(cpf)!.push(idx);
+      });
+      byCpfGroups.forEach((idxList) => {
+        let firstValidIdx = -1;
+        let firstValidVenc = '';
+        for (let i = 0; i < idxList.length; i += 1) {
+          const idx = idxList[i]!;
+          const row = out[idx] as any;
+          const vop = String(row['Vencto. Operação'] ?? '');
+          const vhj = String(row.Vencimento ?? '');
+          if (validVencForCompetencia(vop, vhj)) {
+            firstValidIdx = i;
+            firstValidVenc = vhj;
+            break;
+          }
+        }
+        if (firstValidIdx <= 0 || !firstValidVenc) return;
+        for (let i = 0; i < firstValidIdx; i += 1) {
+          const idx = idxList[i]!;
+          const row = out[idx] as any;
+          const vop = String(row['Vencto. Operação'] ?? '');
+          const vhj = String(row.Vencimento ?? '');
+          if (validVencForCompetencia(vop, vhj)) continue;
+          const rowCompetencia = competenciaFromDateValue(firstValidVenc) || String(row.Copetencia ?? '');
+          out[idx] = { ...row, Vencimento: firstValidVenc, ...(rowCompetencia ? { Copetencia: rowCompetencia } : {}) };
+        }
+      });
     }
     if (process.env.RELATORIO_PDF_DEBUG === '1') {
       process.stdout.write(
