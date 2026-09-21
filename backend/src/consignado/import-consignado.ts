@@ -3635,6 +3635,27 @@ async function readRelatorioPdfTable(
       })() || '';
 
     const out: Array<Record<string, unknown>> = [];
+    const normalizeCpfKeyGlobal = (cpf: string): string =>
+      String(cpf ?? '').replace(/\D/g, '');
+    const dateToMmYyyyGlobal = (dt: string): string => {
+      const m = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(String(dt ?? '').trim());
+      if (!m) return '';
+      const mm = String(Number(m[2])).padStart(2, '0');
+      let yy = String(m[3]);
+      if (yy.length === 2) yy = `20${yy}`;
+      return `${mm}/${yy}`;
+    };
+    const competenciaFromEmpresaGuessed = (datesArr: string[]): string => {
+      if (!datesArr || datesArr.length === 0) return '';
+      const counts: Record<string, number> = {};
+      for (const dt of datesArr) {
+        const mm = dateToMmYyyyGlobal(dt);
+        if (!mm) continue;
+        counts[mm] = (counts[mm] ?? 0) + 1;
+      }
+      const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+      return entries[0]?.[0] ?? '';
+    };
     for (const rowText of rowBuffers) {
       if (!cpfRe.test(rowText)) continue;
 
@@ -3664,8 +3685,6 @@ async function readRelatorioPdfTable(
       }
 
       const dates = Array.from(tail.matchAll(dateRe)).map((x) => x[0]).filter(Boolean);
-      const vencimento = dates[0] ?? '';
-
       const money = Array.from(tail.matchAll(moneyRe)).map((x) => x[0]).filter(Boolean);
       const valorOperacao = money[0] ?? '';
       const valorParcela = money.length > 0 ? money[money.length - 1] : '';
@@ -3686,7 +3705,7 @@ async function readRelatorioPdfTable(
         return namePart || before;
       })();
 
-      if (!operacao || !modalidade || !vencimento || !valorParcela) continue;
+      if (!operacao || !modalidade || !valorParcela) continue;
 
       out.push({
         ...(empresa ? { EMPRESA: empresa } : {}),
@@ -3697,11 +3716,93 @@ async function readRelatorioPdfTable(
         ...(telefone ? { Telefone: telefone } : {}),
         Operação: operacao,
         Modalidade: modalidade,
-        'Vencto. Operação': vencimento,
-        Parcela: '',
-        Vencimento: vencimento,
-        ...(valorOperacao ? { 'Valor Operação': valorOperacao } : {}),
-        ...(valorParcela ? { 'Valor Parcela': valorParcela } : {}),
+        _dates: dates,
+        _money: money,
+        'Valor Operação': valorOperacao,
+        'Valor Parcela': valorParcela,
+      });
+    }
+
+    {
+      const competenciaGuess = competenciaFromEmpresaGuessed(
+        out.flatMap((row) => (row as any)._dates as string[]),
+      );
+      const validFor = (vop: string, vhj: string): boolean => {
+        if (!vhj) return false;
+        if (vhj === vop) return false;
+        if (competenciaGuess) return dateToMmYyyyGlobal(vhj) === competenciaGuess;
+        return true;
+      };
+      const lastVencByCpf: Record<string, string> = {};
+      let lastGlobalVenc = '';
+      for (let i = 0; i < out.length; i += 1) {
+        const row = out[i] as any;
+        const datesArr: string[] = row._dates ?? [];
+        const vop = datesArr[0] ?? '';
+        const explicit = datesArr[1] ?? '';
+        const cpfKey = normalizeCpfKeyGlobal(String(row.CPF ?? ''));
+        const rowHas = validFor(vop, explicit);
+        let vencimento = '';
+        if (rowHas) {
+          vencimento = explicit;
+          lastGlobalVenc = vencimento;
+          if (cpfKey) lastVencByCpf[cpfKey] = vencimento;
+        } else {
+          const fromPessoa = cpfKey ? lastVencByCpf[cpfKey] ?? '' : '';
+          vencimento = fromPessoa || lastGlobalVenc || vop || '';
+        }
+        const rowCompetencia =
+          (vencimento && competenciaFromDateValue(vencimento)) ||
+          (vop && competenciaFromDateValue(vop)) ||
+          '';
+        out[i] = {
+          ...row,
+          ...(vop ? { 'Vencto. Operação': vop } : {}),
+          ...(rowCompetencia ? { Copetencia: rowCompetencia } : {}),
+          Vencimento: vencimento,
+          Parcela: '',
+        };
+        delete (out[i] as any)._dates;
+        delete (out[i] as any)._money;
+      }
+
+      const byCpfGroups = new Map<string, number[]>();
+      out.forEach((row, idx) => {
+        const cpf = normalizeCpfKeyGlobal(String((row as any).CPF ?? ''));
+        if (!cpf) return;
+        if (!byCpfGroups.has(cpf)) byCpfGroups.set(cpf, []);
+        byCpfGroups.get(cpf)!.push(idx);
+      });
+      byCpfGroups.forEach((idxList) => {
+        let firstValidIdx = -1;
+        let firstValidVenc = '';
+        for (let i = 0; i < idxList.length; i += 1) {
+          const idx = idxList[i]!;
+          const row = out[idx] as any;
+          const vop = String(row['Vencto. Operação'] ?? '');
+          const vhj = String(row.Vencimento ?? '');
+          if (validFor(vop, vhj) && vhj !== vop) {
+            firstValidIdx = i;
+            firstValidVenc = vhj;
+            break;
+          }
+        }
+        if (firstValidIdx <= 0 || !firstValidVenc) return;
+        for (let i = 0; i < firstValidIdx; i += 1) {
+          const idx = idxList[i]!;
+          const row = out[idx] as any;
+          const vop = String(row['Vencto. Operação'] ?? '');
+          const vhj = String(row.Vencimento ?? '');
+          if (validFor(vop, vhj) && vhj !== vop) continue;
+          const rowCompetencia =
+            (firstValidVenc && competenciaFromDateValue(firstValidVenc)) ||
+            String(row.Copetencia ?? '');
+          out[idx] = {
+            ...row,
+            Vencimento: firstValidVenc,
+            ...(rowCompetencia ? { Copetencia: rowCompetencia } : {}),
+          };
+        }
       });
     }
 
