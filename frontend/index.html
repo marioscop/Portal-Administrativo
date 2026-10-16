@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/assets/Favicon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Portal Administrativo • Sicoob Juriscred</title>
+    <!-- #region debug-point html-inject-debug-server -->
+    <script>
+      (function(){
+        try {
+          window.__TRAE_DEBUG_SESSION__ = 'juridico-dashboard-vazio';
+          var ports = [9235,9229,9230,9231,9232,9233,9234];
+          var ok = null;
+          for (var i=0;i<ports.length;i++) {
+            try {
+              var x = new XMLHttpRequest();
+              x.open('GET', 'http://127.0.0.1:'+ports[i]+'/health', false);
+              x.timeout = 350;
+              x.send(null);
+              if (x.status === 200 && x.responseText && x.responseText.indexOf('juridico-dashboard-vazio') !== -1) {
+                ok = ports[i]; break;
+              }
+            } catch (e) { /* ignore */ }
+          }
+          if (ok) window.__TRAE_DEBUG_URL__ = 'http://127.0.0.1:'+ok+'/log';
+        } catch (e) { /* ignore */ }
+      })();
+    </script>
+    <!-- #endregion -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

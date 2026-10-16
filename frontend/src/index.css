@@ -1,0 +1,39 @@
+:root {
+  --background: 0 0% 100%;
+  --foreground: 190 100% 13%;
+  --card: 0 0% 100%;
+  --card-foreground: 190 100% 13%;
+  --border: 220 14% 92%;
+  --muted: 220 14% 96%;
+  --muted-foreground: 190 20% 45%;
+  --primary: 174 100% 31%;
+  --primary-foreground: 0 0% 100%;
+  --radius: 14px;
+}
+
+:root,
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.sicoob-admin-pattern {
+  background-color: hsl(var(--background));
+  background-image:
+    linear-gradient(45deg, rgba(0, 160, 145, 0.06) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(0, 160, 145, 0.06) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(0, 160, 145, 0.06) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(0, 160, 145, 0.06) 75%);
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+  background-size: 24px 24px;
+  background-repeat: repeat;
+  background-attachment: fixed;
+}
