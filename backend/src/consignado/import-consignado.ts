@@ -10,6 +10,12 @@ import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
+import {
+  resolveImportPluginByOptions,
+  runImportPlugin,
+  pluginConfigFromOptions,
+} from './import-plugin-loader';
+import type { ConsignadoImportPlugin } from './plugins/import-plugin.interface';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: false });
 if (process.env.NODE_ENV !== 'production') {
@@ -1490,6 +1496,7 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
   subfolderCandidates?: string[];
   __trace?: (step: string, data: Record<string, unknown>) => void;
   permitirPdfSisbr?: boolean;
+  permitirPdfOrgao?: boolean;
 }): Promise<Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }>> {
   const tr = opts.__trace ?? (() => {});
   const isRecuperacaoCreditoInPath = (path: string) => {
@@ -1497,17 +1504,20 @@ async function expandRecursoExtratosAnoMesCorrenteCandidates(opts: {
     return k.includes('recuperacao de credito') || k.endsWith('9.recuperacao de credito');
   };
   const isDoc = (n: string) => /\.(xlsx|xlsm|xls)$/i.test(String(n ?? '').trim());
-  // PDF SOMENTE para SISBR e SOMENTE se caller explicitamente permitir (forceKind=relatorio).
-  // Qualquer outro forceKind (extratos, orgao etc) continua 100% Excel.
   const isDocOuPdfSeSisbr = (n: string, folderPath: string): boolean => {
     if (isDoc(n)) return true;
-    if (!Boolean(opts.permitirPdfSisbr)) return false;
-    const temSisbr = (path: string): boolean => {
-      const k = normalizeNameForMatch(String(path ?? ''));
-      return k.includes('sisbr') || k.includes('relatorio sisbr');
-    };
-    if (!temSisbr(folderPath)) return false;
-    return isPdfFile(String(n ?? ''));
+    if (isPdfFile(String(n ?? ''))) {
+      const k = normalizeNameForMatch(String(folderPath ?? ''));
+      const temSisbr = k.includes('sisbr') || k.includes('relatorio sisbr');
+      if (temSisbr && Boolean(opts.permitirPdfSisbr)) return true;
+      if (Boolean(opts.permitirPdfOrgao)) {
+        const nome = normalizeNameForMatch(String(n ?? ''));
+        if (nome.includes('alego') || nome.includes('adfego') || nome.includes('eletra') || nome.includes('mpgo') || nome.includes('tjgo') || nome.includes('tce') || nome.includes('tcm') || nome.includes('tre') || nome.includes('trt') || nome.includes('neoconsig')) return true;
+        if (k.includes('relatorio orgao')) return true;
+      }
+      return false;
+    }
+    return false;
   };
   const out: Array<{ id: string; name: string; lastModifiedDateTime?: string; folderPath: string; parentId: string }> = [];
   if (!opts.driveId || !opts.token) return out;
@@ -2614,7 +2624,7 @@ async function listSpreadsheetFilesRecursive(opts: {
   return out;
 }
 
-function readSheetTable(file: Buffer, profileKind?: string): {
+function readSheetTable(file: Buffer, profileKind?: string, preferredSheetNames?: string[]): {
   headers: string[];
   rows: Array<Record<string, unknown>>;
   extractedCompetenciaMmAaaa: string | null;
@@ -2730,7 +2740,125 @@ function readSheetTable(file: Buffer, profileKind?: string): {
     };
 
     const searchLimit = Math.min(50, aoa.length);
+    const kindLower = String(profileKind ?? '').trim().toLowerCase();
+    const detectaLinhaHeaderRecursoTcm = (): number => {
+      if (aoa.length < 2) return -1;
+      const markers = [
+        'CPF',
+        'NOME',
+        'VALOR',
+        'VALOR PARCELA',
+        'CONTRATO',
+        'OPERACAO',
+        'MATRICULA',
+        'VENCIMENTO',
+        'COMPETENCIA',
+        'COPETENCIA',
+        'CRITERIO',
+        'DEBITO',
+      ];
+      let bestIdx = -1;
+      let bestScore = -1;
+      const lim = Math.min(80, aoa.length);
+      for (let i = 0; i < lim; i += 1) {
+        const row = Array.isArray(aoa[i]) ? (aoa[i] as unknown[]) : [];
+        if (!row.length) continue;
+        let nonEmpty = 0;
+        let stringish = 0;
+        let numericish = 0;
+        const tokens: string[] = [];
+        for (const cell of row) {
+          if (!cellHasValue(cell)) continue;
+          nonEmpty += 1;
+          if (typeof cell === 'number') numericish += 1;
+          if (typeof cell === 'string') stringish += 1;
+          const t = String(cell ?? '')
+            .normalize('NFD')
+            .replace(/\p{M}/gu, '')
+            .toUpperCase()
+            .replace(/[^A-Z0-9]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (t) tokens.push(t);
+        }
+        if (nonEmpty < 4) continue;
+        const tokenSet = new Set(tokens);
+        const unique = tokenSet.size;
+        let hits = 0;
+        for (const m of markers) {
+          if (tokens.some((t) => t === m || t.includes(m))) hits += 1;
+        }
+        if (hits < 4) continue;
+        const score = hits * 100 + unique * 2 + stringish - numericish;
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    };
+    const detectaLinhaHeaderRecursoTce = (): number => {
+      if (aoa.length < 2) return -1;
+      const markers = [
+        'CDG_ORDEM',
+        'CDG ORDEM',
+        'CPF',
+        'NOME',
+        'NMR_CONTRATO',
+        'NMR CONTRATO',
+        'PARCELA',
+        'TOTAL',
+        'VALOR',
+      ];
+      let bestIdx = -1;
+      let bestScore = -1;
+      const lim = Math.min(80, aoa.length);
+      for (let i = 0; i < lim; i += 1) {
+        const row = Array.isArray(aoa[i]) ? (aoa[i] as unknown[]) : [];
+        if (!row.length) continue;
+        let nonEmpty = 0;
+        let stringish = 0;
+        let numericish = 0;
+        const tokens: string[] = [];
+        for (const cell of row) {
+          if (!cellHasValue(cell)) continue;
+          nonEmpty += 1;
+          if (typeof cell === 'number') numericish += 1;
+          if (typeof cell === 'string') stringish += 1;
+          const t = String(cell ?? '')
+            .normalize('NFD')
+            .replace(/\p{M}/gu, '')
+            .toUpperCase()
+            .replace(/[^A-Z0-9_]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (t) tokens.push(t);
+        }
+        if (nonEmpty < 4) continue;
+        const tokenSet = new Set(tokens);
+        const unique = tokenSet.size;
+        let hits = 0;
+        for (const m of markers) {
+          if (tokens.some((t) => t === m || t.includes(m))) hits += 1;
+        }
+        if (hits < 4) continue;
+        const score = hits * 100 + unique * 2 + stringish - numericish;
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+      return bestIdx;
+    };
     let headerIndex = detectaLinhaHeaderTREExtrato();
+    if (kindLower === 'recurso_tcm') {
+      const cand = detectaLinhaHeaderRecursoTcm();
+      if (cand !== -1) headerIndex = cand;
+    }
+    if (kindLower === 'recurso_tce') {
+      const cand = detectaLinhaHeaderRecursoTce();
+      if (cand !== -1) headerIndex = cand;
+    }
     let bestScore = -1;
 
     if (headerIndex === -1) {
@@ -2805,11 +2933,29 @@ function readSheetTable(file: Buffer, profileKind?: string): {
     rows: [] as Array<Record<string, unknown>>,
   };
   let bestRank = -1;
+  // Abas preferenciais (ex.: 'LANÇAMENTOS' para extratos conta corrente ADFEGO/ELETRA/TODOS):
+  // quando o arquivo tem várias abas (ex.: ELETRA traz LANÇAMENTOS + AJUSTES), garante que a aba
+  // oficial do extrato seja escolhida em vez de uma aba auxiliar com mais linhas (ex.: AJUSTES,
+  // que possui a coluna extra COOPERADOS inexistente no schema extratos).
+  const normSheetName = (s: unknown): string =>
+    String(s ?? '')
+      .normalize('NFD')
+      .replace(/\p{M}/gu, '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, ' ')
+      .trim();
+  const preferredNorm = (Array.isArray(preferredSheetNames) ? preferredSheetNames : [])
+    .map((s) => normSheetName(s))
+    .filter(Boolean);
   for (const name of sheetNames) {
     const sheet = wb.Sheets[name];
     if (!sheet) continue;
     const parsed = parseSheet(sheet);
-    const rank = parsed.rows.length * 1000 + parsed.headers.length;
+    const nameNorm = normSheetName(name);
+    const isPreferred = preferredNorm.some(
+      (p) => nameNorm === p || nameNorm.includes(p) || p.includes(nameNorm),
+    );
+    const rank = (isPreferred ? 1_000_000 : 0) + parsed.rows.length * 1000 + parsed.headers.length;
     if (rank > bestRank) {
       bestRank = rank;
       best = parsed;
@@ -4619,9 +4765,9 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
   //   LINHA OPERAÇÃO (10 campos, SEM Vencimento = vencimentoDefault): <Op> <Parcela> <Mod> <VenctoOp> <TxJ> <VOp> <VParc> <VJur> <Val> <Rend>
   //   PULAR: Total Cliente/Empresa/Cooperativa/Central/Geral, headers repetidos, TOTAIS, EMP-158, -- X of Y --
   // ============================================================================
-  try {
-    const sisbrHeaderRe = /(?:SISBR\s+2\.0|Relatório\s+de\s+Parcelas\s+a\s+Vencer)/;
-    if (sisbrHeaderRe.test(text)) {
+  const sisbrHeaderRe = /(?:SISBR\s+2\.0|Relatório\s+de\s+Parcelas\s+a\s+Vencer)/;
+  if (sisbrHeaderRe.test(text)) {
+    try {
       // ---------------- EMPRESA ----------------
       let empresaHeader = '';
       const orgaoRe = /(?:^|\n)\s*([^\n]{0,200}?\d{3,6}\s*-\s*[^\n]{0,200}?)\s*ÓRGÃO\s*:/s;
@@ -4638,7 +4784,7 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
       }
       // ---------------- COPETENCIA (MM/YYYY) ----------------
       let copetencia = '';
-      const perRe = /PERÍODO\s*:\s*(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/;
+      const perRe = /PER(?:Í|I)ODO\s*:\s*(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/;
       const mPer = text.match(perRe);
       if (mPer && mPer[2]) {
         const parts = mPer[2].split('/'); if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
@@ -4656,18 +4802,26 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
         const parts = mPer[2].split('/');
         if (parts.length === 3) vencimentoDefault = `25/${parts[1]}/${parts[2]}`;
       }
+      if (!copetencia && vencimentoDefault && /^\d{2}\/\d{2}\/\d{4}$/.test(vencimentoDefault)) {
+        const parts = vencimentoDefault.split('/');
+        if (parts.length === 3) copetencia = `${parts[1]}/${parts[2]}`;
+      }
       // ---------------- REGEX LINHAS ----------------
       // Op 11 campos (COM Vencimento explícito na 6ª posição):
       const opRe11 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
       // Op 10 campos (SEM Vencimento → usa vencimentoDefault): Vencimento é omitido da 6ª posição
       const opRe10 = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
+      const opReNoDates = /^(\d{1,6}-\d{1,2})\s+(\d{1,4})\s+([A-Z]{3,6})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s*$/;
       // Cliente COM Atividade (PESSOA FISICA / PESSOA JURIDICA / OUTROS) entre TABS:
-      const cliReComAtiv = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
+      const cliReComAtiv = /^(\d{1,6}-\d{1,2})\s+([^\s]+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+|null)\s*\t\s*([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ ]{3,50}?)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
       // Cliente SEM Atividade (só TAB para CPF, sem campo intermediário):
-      const cliReSemAtiv = /^(\d{1,6}-\d{1,2})\s+(\d+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
+      const cliReSemAtiv = /^(\d{1,6}-\d{1,2})\s+([^\s]+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d+|null)\s*\t\s*(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
+      // Cliente SEM telefone e SEM TAB (alguns PDFs SISBR saem assim: "... NOME   000.000.000-00")
+      const cliReSemTelSemTab = /^(\d{1,6}-\d{1,2})\s+([^\s]+)\s+([A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ][A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ\s']+?)\s+(\d{3}\.\d{3}\.\d{3}-\d{2})\s*$/i;
       const skipRe = /^\s*(Total\s+(Cliente|Empresa|Cooperativa|Central|Geral)\s*:|CENTRAL\s*:|EMPRESA\s*:|ÓRGÃO\s*:|COOPERATIVA\s*:|Hora\s+Emissão\s*:|Data\s+Emissão\s*:|Data\s+Processamento\s*:|PERÍODO\s*:|SISBR\s+2\.0|Relatório\s+de\s+Parcelas|Matrícula\s*$|Valor\s+Juros\s+Valorização|Atividade\s*$|Valor\s+Operação\s*$|Telefone\s*$|Tx\.\s*Juros|Vencto\.\s*Operação|Operação\s*$|Cliente\s*$|Parcela\s+Valor\s+Parcela|Nome\s*$|Rendas\s+Apropriar|Vencimento\s*$|CPF\s*$|\*\s+parcela\s+em\s+carência|EMP-158\s+Pag\.\s*:|--\s+\d+\s+of\s+\d+\s+--|Total\s+Geral\s*:)/i;
       type C = { Cliente: string; Matrícula: string; Nome: string; Telefone: string; Atividade: string; CPF: string };
       let currentClient: C | null = null;
+      let lastVenctoOperacao = '';
       const resultRows: Array<Record<string, unknown>> = [];
       const resultHeaders = [
         'EMPRESA', 'Cliente', 'Matrícula', 'CPF', 'Nome', 'Atividade', 'Telefone',
@@ -4681,31 +4835,69 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
         // ----- Tenta linha cliente (primeiro com atividade, depois sem) -----
         let cM = ll.match(cliReComAtiv);
         if (cM) {
+          const rawMat = String(cM[2] ?? '').trim();
+          const digitsMat = rawMat.replace(/\D/g, '');
+          const fixedMat = digitsMat ? digitsMat : rawMat;
           currentClient = {
             Cliente: cM[1],
-            Matrícula: cM[2],
+            Matrícula: fixedMat,
             Nome: cM[3].replace(/\s+/g, ' ').trim(),
-            Telefone: cM[4],
+            Telefone: String(cM[4] ?? '').trim().toLowerCase() === 'null' ? '' : cM[4],
             Atividade: (cM[5] || '').toUpperCase().replace(/\s+/g, ' ').trim(),
             CPF: cM[6],
           };
+          lastVenctoOperacao = '';
           continue;
         }
         cM = ll.match(cliReSemAtiv);
         if (cM) {
+          const rawMat = String(cM[2] ?? '').trim();
+          const digitsMat = rawMat.replace(/\D/g, '');
+          const fixedMat = digitsMat ? digitsMat : rawMat;
           currentClient = {
             Cliente: cM[1],
-            Matrícula: cM[2],
+            Matrícula: fixedMat,
             Nome: cM[3].replace(/\s+/g, ' ').trim(),
-            Telefone: cM[4],
+            Telefone: String(cM[4] ?? '').trim().toLowerCase() === 'null' ? '' : cM[4],
             Atividade: '',
             CPF: cM[5],
           };
+          lastVenctoOperacao = '';
           continue;
+        }
+        cM = ll.match(cliReSemTelSemTab);
+        if (cM) {
+          const rawMat = String(cM[2] ?? '').trim();
+          const digitsMat = rawMat.replace(/\D/g, '');
+          const fixedMat = digitsMat ? digitsMat : rawMat;
+          currentClient = {
+            Cliente: cM[1],
+            Matrícula: fixedMat,
+            Nome: cM[3].replace(/\s+/g, ' ').trim(),
+            Telefone: '',
+            Atividade: '',
+            CPF: cM[4],
+          };
+          lastVenctoOperacao = '';
+          continue;
+        }
+        const looksLikeClientLine =
+          /^\d{1,6}-\d{1,2}\s+[^\s]+\s+[A-ZÀ-ÜÇÃÕÔÂÊÉÍÓÚ]/.test(ll) &&
+          /\d{3}\.\d{3}\.\d{3}-\d{2}\s*$/.test(ll);
+        if (looksLikeClientLine) {
+          throw new Error(
+            `SISBR: linha cliente não reconhecida pelo parser (evitando associação incorreta). Linha=${ll}`,
+          );
         }
         // ----- Tenta linha operação 11 campos (Vencimento explícito) -----
         const oM11 = ll.match(opRe11);
         if (oM11) {
+          if (!currentClient?.CPF) {
+            throw new Error(
+              `SISBR: operação sem cliente/cpf associado (evitando inserção órfã). Operação=${oM11[1]} Linha=${ll}`,
+            );
+          }
+          lastVenctoOperacao = oM11[4];
           resultRows.push({
             EMPRESA: empresaHeader,
             Cliente: currentClient?.Cliente ?? '',
@@ -4732,6 +4924,12 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
         // ----- Tenta linha operação 10 campos (Vencimento = vencimentoDefault) -----
         const oM10 = ll.match(opRe10);
         if (oM10) {
+          if (!currentClient?.CPF) {
+            throw new Error(
+              `SISBR: operação sem cliente/cpf associado (evitando inserção órfã). Operação=${oM10[1]} Linha=${ll}`,
+            );
+          }
+          lastVenctoOperacao = oM10[4];
           resultRows.push({
             EMPRESA: empresaHeader,
             Cliente: currentClient?.Cliente ?? '',
@@ -4755,11 +4953,45 @@ export async function readRelatorioTable(fileName: string, file: Buffer): Promis
           });
           continue;
         }
+        const oMNoDates = ll.match(opReNoDates);
+        if (oMNoDates) {
+          if (!currentClient?.CPF) {
+            throw new Error(
+              `SISBR: operação sem cliente/cpf associado (evitando inserção órfã). Operação=${oMNoDates[1]} Linha=${ll}`,
+            );
+          }
+          resultRows.push({
+            EMPRESA: empresaHeader,
+            Cliente: currentClient?.Cliente ?? '',
+            Matrícula: currentClient?.Matrícula ?? '',
+            CPF: currentClient?.CPF ?? '',
+            Nome: currentClient?.Nome ?? '',
+            Atividade: currentClient?.Atividade ?? '',
+            Telefone: currentClient?.Telefone ?? '',
+            Operação: oMNoDates[1],
+            Modalidade: oMNoDates[3],
+            'Vencto. Operação': lastVenctoOperacao,
+            'Tx. Juros': oMNoDates[4],
+            Parcela: oMNoDates[2],
+            Vencimento: vencimentoDefault,
+            'Valor Operação': oMNoDates[5],
+            'Valor Parcela': oMNoDates[6],
+            'Valor Juros': oMNoDates[7],
+            Valorização: oMNoDates[8],
+            'Rendas Apropriar': oMNoDates[9],
+            Copetencia: copetencia,
+          });
+          continue;
+        }
       }
       if (resultRows.length > 0) return { headers: resultHeaders, rows: resultRows };
+      throw new Error(
+        `SISBR PDF detectado, mas parser posicional não conseguiu extrair linhas (arquivo=${fileName}).`,
+      );
+    } catch (_eSisbrPos) {
+      try { safeLogError('readRelatorioTable SISBR positional regex parser', _eSisbrPos); } catch { /* ignore */ }
+      throw _eSisbrPos;
     }
-  } catch (_eSisbrPos) {
-    try { safeLogError('readRelatorioTable SISBR positional regex parser', _eSisbrPos); } catch { /* ignore */ }
   }
 
   const headers = ['Operação', 'Vencimento', 'Parcela', 'Valor Operação'];
@@ -6607,6 +6839,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Orgão/ADFEGO', 'ADFEGO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      profileVersion: '2026-09-11_adfego_skip_contratos_liquidados',
       strictColumnWhitelist: [
         'Nome',
         'CPF',
@@ -6620,6 +6853,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       ],
       strictColumnMinMatches: 5,
       extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
       moveToImportadosSubfolderAfterImport: true,
     },
   });
@@ -6631,9 +6865,25 @@ function ensureDefaultLearningProfiles(db: Database) {
     targetTable: 'Recurso TCE',
     options: {
       mode: 'append',
+      profileVersion: '2026-09-14_tce_fix_header_and_compet_v2_copetencia_in_hash',
       folderCandidates: ['Relatório Orgão/TCE', 'TCE'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      strictColumnWhitelist: [
+        'CDG_ORDEM',
+        'Nome',
+        'CPF',
+        'Copetencia',
+        'PARCELA A SER PAGA',
+        'TOTAL DE PARCELAS',
+        'VALOR',
+        'NMR_CONTRATO',
+      ],
+      strictColumnMinMatches: 5,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      competenciaMesArquivoSemIncremento: false,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   upsertLearningProfile(db, {
@@ -6647,6 +6897,22 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Orgão/TCM', 'TCM'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      strictColumnWhitelist: [
+        'Nome',
+        'CPF',
+        'Desc Finalidade',
+        'Contrato',
+        'N Parcela',
+        'Qtd Parcelas',
+        'Vencimento',
+        'Critério de Débito',
+        'Valor Parcela',
+      ],
+      strictColumnMinMatches: 5,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      competenciaMesArquivoSemIncremento: false,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-26 — RECURSO TRE (Tribunal Regional Eleitoral) =========
@@ -6802,6 +7068,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       folderCandidates: ['Relatório Orgão/Eletra', 'Relatório Orgão/ELETRO', 'Relatório Orgão/Eletro', 'Relatório Orgão/ELETRO', 'Eletra', 'ELETRO', 'Eletro', 'ELETRO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      profileVersion: '2026-09-11_eletra_skip_contratos_liquidados',
       strictColumnWhitelist: [
         'Nome',
         'CPF',
@@ -6815,6 +7082,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       ],
       strictColumnMinMatches: 5,
       extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
       moveToImportadosSubfolderAfterImport: true,
     },
   });
@@ -6833,6 +7101,7 @@ function ensureDefaultLearningProfiles(db: Database) {
       moveToImportadosSubfolderAfterImport: true,
     },
   });
+  try { db.run(`DELETE FROM import_learning_profiles WHERE id='recurso_tjgo';`); } catch { /* ignore */ }
   upsertLearningProfile(db, {
     id: 'recurso_tjgo',
     kind: 'recurso_tjgo',
@@ -6843,21 +7112,48 @@ function ensureDefaultLearningProfiles(db: Database) {
     targetTable: 'Recurso TJGO',
     options: {
       mode: 'append',
-      folderCandidates: ['Relatório Orgão/TJGO', 'TJGO'],
+      pluginId: 'recurso_tjgo',
+      pluginConfig: {
+        parserVersion: 'v2-posicional-12-offsets',
+        forceCliPdfToTextFallback: true,
+        orgaoFixo: 'TJGO - Tribunal de Justiça do Estado de Goiás',
+        blacklistRodapeExpandido: true,
+      },
+      folderCandidates: ['Relatório Orgão/TJGO', 'TJGO', 'Relatorios TJGO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
+  /* RC-SISBR-2026-10-01-b:
+   * Profile recurso_mpgo ACEITA PDF (tipo Recurso (Planilha layout colado EXCEL e TAMBÉM layout TABELA PDF MPGO em "Relatório Orgão/MPGO")
+   * A PROIBIÇÃO de PDF no recurso_mpgo SÓ VALE para a pasta SISBR (Relatório de Parcelas a Vencer SISBR, com parser posicional D5 oficial).
+   * Como este profile tem kind=recurso_mpgo (NÃO kind=relatorio) o switch D5 nao vai disparar; parser genérico TABELA PDF lê layout MPGO (mesmas colunas EXCEL).
+   * Regra anti-conflito D5: se a função findLearningProfilesFor não usa scoring + switch D5 já está blindado: NÃO usar o tipo relatorio para SISBR.
+   * Folder candidates discovery BFS também ajustado em isDocOuPdfSeSisbr / shouldKeepFile também aceitam PDF se pasta for MPGO em /Relatório Orgão/MPGO/.
+   */
+  try { db.run(`DELETE FROM import_learning_profiles WHERE id='recurso_mpgo';`); } catch { /* ignore */ }
   upsertLearningProfile(db, {
     id: 'recurso_mpgo',
     kind: 'recurso_mpgo',
     matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito'),
-    fileNameRegex: '.*MPGO.*\\.(pdf)$',
+    fileNameRegex: '.*MPGO.*\\.(pdf|xlsx|xlsm|xls)$',
     targetTable: 'Recurso MPGO',
     options: {
       mode: 'append',
+      pluginId: 'recurso_mpgo',
+      pluginConfig: {
+        parserVersion: 'v2-posicional-12-offsets',
+        forceCliPdfToTextFallback: true,
+        orgaoFixo: 'MPGO - Ministério Público do Estado de Goiás',
+        blacklistRodapeExpandido: true,
+      },
+      folderCandidates: ['Relatório Orgão/MPGO', 'MPGO', 'Relatorios MPGO'],
       ignoreImportados: true,
       checkDuplicateContent: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
     },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-25 — EXTRATO RECURSO TRE-GO + TRT-GO (Justiça Eleitoral + Trabalho, PERFIL ESPECÍFICO PRIORIDADE ALTA) =========
@@ -7019,6 +7315,158 @@ function ensureDefaultLearningProfiles(db: Database) {
       strictColumnWhitelist: null,
       strictColumnMinMatches: 0,
       extractCompetenciaFromTopHeader: true,
+      moveToImportadosSubfolderAfterImport: true,
+    },
+  });
+  // ========= PERFIS OFICIAIS DE LAYOUT "EXTRATO CONTA CORRENTE" (GRAVADOS 2026-10-15) =========
+  // Cada órgão que envia o extrato no layout conta corrente tem seu PRÓPRIO perfil persistente,
+  // gravado aqui no código-fonte (não apenas no BD) para que sobreviva a reconstrução do banco.
+  // Layout comum: DATA | DOCUMENTO | HISTÓRICO | INFORMAÇÕES COMPLEMENTARES | VALOR
+  //   - HISTÓRICO é o histórico real (NÃO carrega o marcador CRÉD.TED-STR) → filtro credTed DESLIGADO.
+  //   - Aba oficial do extrato = LANÇAMENTOS. Alguns arquivos trazem abas auxiliares
+  //     (ex.: ELETRA-SETEMBRO-2026.xlsx tem LANÇAMENTOS + AJUSTES); a coluna extra COOPERADOS da aba
+  //     AJUSTES não existe em `extratos` e quebrava o insert. Por isso `preferredSheetNames`.
+  upsertLearningProfile(db, {
+    id: 'extratos_adfego_go',
+    kind: 'extratos',
+    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
+    fileNameRegex: '^ADFEGO.*\\.(xlsx|xlsm|xls)$',
+    targetTable: 'extratos',
+    options: {
+      isAdfegoExtratoProfile: true,
+      isOrgaoContaCorrenteExtrato: true,
+      adfegoDisableCredTedFilter: true,
+      adfegoUseHistoricoNotInfoCompAsHistorico: true,
+      adfegoForceCompetenciaFromFileNameAlways: true,
+      extractCompetenciaFromFileName: true,
+      competenciaMesArquivoSemIncremento: false,
+      preferredSheetNames: ['LANÇAMENTOS', 'LANCAMENTOS'],
+      strictColumnWhitelist: ['DATA', 'DOCUMENTO', 'HISTÓRICO', 'VALOR', 'Copetencia'],
+      strictColumnMinMatches: 4,
+      ignoreImportados: true,
+      checkDuplicateContent: true,
+      moveToImportadosSubfolderAfterImport: true,
+      folderCandidates: [
+        'Extratos de Recurso/ADFEGO',
+        'Extrato de Recurso/ADFEGO',
+        'Extratos do Recurso/ADFEGO',
+        'Extrato do Recurso/ADFEGO',
+        'Extratos Recurso/ADFEGO',
+        'Extrato Recurso/ADFEGO',
+        'Extratos/ADFEGO',
+        'Extrato/ADFEGO',
+        'ADFEGO',
+        'Extratos de Recurso',
+        'Extrato de Recurso',
+        'Extratos do Recurso',
+        'Extrato do Recurso',
+        'Extratos Recurso',
+        'Extrato Recurso',
+        'Extratos',
+        'Extrato',
+        'Extrato(s)',
+        'Extratos de Recursos',
+        'Extrato de Recursos',
+      ],
+      mode: 'append',
+      profileVersion: '2026-09-15_adfego_extrato_fix_v1_REAPPLIED',
+    },
+  });
+  upsertLearningProfile(db, {
+    id: 'extratos_eletra_go',
+    kind: 'extratos',
+    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
+    fileNameRegex: '.*(?:ELETRO|ELETRA|EQTPREV).*\\.(xlsx|xlsm|xls)$',
+    targetTable: 'extratos',
+    options: {
+      isEletraExtratoProfile: true,
+      isOrgaoContaCorrenteExtrato: true,
+      mode: 'append',
+      folderCandidates: [
+        'Extratos de Recurso/ELETRA',
+        'Extrato de Recurso/ELETRA',
+        'Extratos do Recurso/ELETRA',
+        'Extrato do Recurso/ELETRA',
+        'Extratos Recurso/ELETRA',
+        'Extrato Recurso/ELETRA',
+        'Extratos/ELETRA',
+        'Extrato/ELETRA',
+        'Extratos de Recurso/ELETRO',
+        'Extrato de Recurso/ELETRO',
+        'Extratos/ELETRO',
+        'Extrato/ELETRO',
+        'ELETRO',
+        'ELETRA',
+        'Eletra',
+        'Eletro',
+        'Extratos de Recurso',
+        'Extrato de Recurso',
+        'Extratos do Recurso',
+        'Extrato do Recurso',
+        'Extratos Recurso',
+        'Extrato Recurso',
+        'Extratos',
+        'Extrato',
+        'Extrato(s)',
+        'Extratos de Recursos',
+        'Extrato de Recursos',
+      ],
+      preferredSheetNames: ['LANÇAMENTOS', 'LANCAMENTOS'],
+      ignoreImportados: true,
+      checkDuplicateContent: true,
+      strictColumnWhitelist: ['DATA', 'DOCUMENTO', 'HISTÓRICO', 'VALOR', 'Copetencia'],
+      strictColumnMinMatches: 4,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
+      moveToImportadosSubfolderAfterImport: true,
+      profileVersion: '2026-09-15_eletra_extrato_fix_v1',
+      eletraDisableCredTedFilter: true,
+      eletraUseHistoricoNotInfoCompAsHistorico: true,
+      eletraForceCompetenciaFromFileNameAlways: true,
+      competenciaMesArquivoSemIncremento: false,
+    },
+  });
+  upsertLearningProfile(db, {
+    id: 'extratos_todos_go',
+    kind: 'extratos',
+    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
+    fileNameRegex: '^TODOS.*\\.(xlsx|xlsm|xls)$',
+    targetTable: 'extratos',
+    options: {
+      isTodosExtratoProfile: true,
+      isOrgaoContaCorrenteExtrato: true,
+      historicoStrictFilterCtedStr: true,
+      mode: 'append',
+      folderCandidates: [
+        'Extratos de Recurso/TODOS',
+        'Extrato de Recurso/TODOS',
+        'Extratos do Recurso/TODOS',
+        'Extrato do Recurso/TODOS',
+        'Extratos Recurso/TODOS',
+        'Extrato Recurso/TODOS',
+        'Extratos/TODOS',
+        'Extrato/TODOS',
+        'TODOS',
+        'Todos',
+        'Extratos de Recurso',
+        'Extrato de Recurso',
+        'Extratos do Recurso',
+        'Extrato do Recurso',
+        'Extratos Recurso',
+        'Extrato Recurso',
+        'Extratos',
+        'Extrato',
+        'Extrato(s)',
+        'Extratos de Recursos',
+        'Extrato de Recursos',
+      ],
+      preferredSheetNames: ['LANÇAMENTOS', 'LANCAMENTOS'],
+      ignoreImportados: true,
+      checkDuplicateContent: true,
+      strictColumnWhitelist: null,
+      strictColumnMinMatches: 0,
+      extractCompetenciaFromTopHeader: true,
+      extractCompetenciaFromFileName: true,
       moveToImportadosSubfolderAfterImport: true,
     },
   });
@@ -7603,7 +8051,10 @@ function normalizeCpfDigits(v: unknown): string {
   return String(v ?? '').replace(/\D/g, '');
 }
 
-function buildExtratoHeaderMapping(fileColumns: string[]): {
+function buildExtratoHeaderMapping(
+  fileColumns: string[],
+  opts: { contaCorrente?: boolean } = {},
+): {
   mappedColumns: string[];
   sourceColumnByTarget: Map<string, string>;
   targetColumnBySource: Map<string, string>;
@@ -7611,6 +8062,10 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
   historico1SourceColumn: string | null;
   credTedFilterColumn: string | null;
 } {
+  // Conta corrente (ADFEGO/ELETRA/EQTPREV): a coluna "HISTÓRICO" é o histórico real
+  // e NÃO carrega o marcador "CRÉD.TED-STR". Neste layout o histórico precisa ser
+  // mapeado direto de "HISTÓRICO" e o filtro credTedFilterColumn deve ficar desligado.
+  const contaCorrente = opts.contaCorrente === true;
   const STANDARD_TARGETS = ['DATA', 'DOCUMENTO', 'HISTÓRICO', 'VALOR'];
   const headerTremaToOficial = (h: string): string => {
     if (!h) return h;
@@ -7679,7 +8134,8 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
 
   // === PRÉ-PROCESSAMENTO: Se TEMOS InfoComp → ela SEMPRE é a fonte de HISTÓRICO (prioridade 100%).
   //     Isso evita bugs de ordem de iteração no loop (col HISTÓRICO crua mapear antes).
-  if (infoCompColumnOriginal) {
+  //     EXCEÇÃO conta corrente: o histórico real é a coluna "HISTÓRICO" (InfoComp é campo extra vazio).
+  if (infoCompColumnOriginal && !contaCorrente) {
     reservedTargets.add('HISTÓRICO');
     byTarget.set('HISTÓRICO', infoCompColumnOriginal);
     bySource.set(infoCompColumnOriginal, 'HISTÓRICO');
@@ -7697,23 +8153,23 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
     if (HEADER_ALIASES[n]) {
       const target = HEADER_ALIASES[n];
       if (target === 'HISTÓRICO') {
-        if (hasInfoComplementaresColumn) return null;
+        if (hasInfoComplementaresColumn && !contaCorrente) return null;
         return 'HISTÓRICO';
       }
       return target;
     }
     if (STANDARD_TARGETS.includes(n)) {
-      if (n === 'HISTÓRICO' && hasInfoComplementaresColumn) return null;
+      if (n === 'HISTÓRICO' && hasInfoComplementaresColumn && !contaCorrente) return null;
       return n;
     }
-    if (n.includes('HISTORICO') && !hasInfoComplementaresColumn) return 'HISTÓRICO';
+    if (n.includes('HISTORICO') && (!hasInfoComplementaresColumn || contaCorrente)) return 'HISTÓRICO';
     return null;
   };
 
   for (let i = 0; i < fileColumns.length; i++) {
     const col = fileColumns[i];
     const colNorm = fileColumnsNormalized[i];
-    if (infoCompColumnOriginal && col === infoCompColumnOriginal) continue;
+    if (infoCompColumnOriginal && col === infoCompColumnOriginal && !contaCorrente) continue;
     const standard = resolveStandard(colNorm);
     if (standard && !reservedTargets.has(standard)) {
       reservedTargets.add(standard);
@@ -7731,7 +8187,7 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
       STANDARD_TARGETS.some((st) => normalizeExtratoHeaderNameForMap(st) === colNormKey && reservedTargets.has(st)) ||
       (HEADER_ALIASES[colNormKey] && reservedTargets.has(HEADER_ALIASES[colNormKey]));
     if (wouldCollideWithReserved) continue;
-    if (looksLikeHistoricoRaw && hasInfoComplementaresColumn) continue;
+    if (looksLikeHistoricoRaw && hasInfoComplementaresColumn && !contaCorrente) continue;
     bySource.set(col, col);
     mapped.push(col);
   }
@@ -7741,7 +8197,8 @@ function buildExtratoHeaderMapping(fileColumns: string[]): {
     targetColumnBySource: bySource,
     historicoTarget,
     historico1SourceColumn: historico1SourceCol,
-    credTedFilterColumn: rawHistoricoColumn ?? byTarget.get('HISTÓRICO') ?? null,
+    // Conta corrente (ADFEGO/Eletra): histórico não traz marcador TED-STR -> filtro desligado.
+    credTedFilterColumn: contaCorrente ? null : (rawHistoricoColumn ?? byTarget.get('HISTÓRICO') ?? null),
   };
 }
 
@@ -8161,7 +8618,30 @@ function insertExtratosRows(opts: {
     }
   }
 
-  const headerMap = buildExtratoHeaderMapping(opts.fileColumns);
+  const profileIdNorm = String(opts.learningProfileId ?? '').trim().toLowerCase();
+  const profileOptsAny =
+    opts.learningProfileOptions && typeof opts.learningProfileOptions === 'object' && opts.learningProfileOptions !== null
+      ? (opts.learningProfileOptions as Record<string, unknown>)
+      : null;
+  // ===== EXTRATO CONTA CORRENTE (ADFEGO / ELETRA / EQTPREV) =====
+  // Layout: DATA | DOCUMENTO | HISTÓRICO | INFORMAÇÕES COMPLEMENTARES | VALOR, onde "HISTÓRICO"
+  // é o histórico real (ex.: "CRÉD.LIQUIDAÇÃO COBRANÇA") e NÃO contém o marcador "CRÉD.TED-STR"
+  // exigido pelo filtro genérico credTedFilterColumn — sem esta exceção 100% das linhas são
+  // descartadas (bug de importação do Extrato Recurso ADFEGO).
+  const sourceFileUpperForProfile = String(opts.sourceFile ?? '').trim().toUpperCase();
+  const isContaCorrenteExtrato =
+    profileIdNorm.startsWith('extratos_adfego') ||
+    profileIdNorm.startsWith('extratos_eletra') ||
+    profileIdNorm.startsWith('extratos_eletro') ||
+    Boolean(profileOptsAny && (
+      profileOptsAny.isAdfegoExtratoProfile === true ||
+      profileOptsAny.isEletraExtratoProfile === true ||
+      profileOptsAny.isEletroExtratoProfile === true ||
+      profileOptsAny.isOrgaoContaCorrenteExtrato === true
+    )) ||
+    /(?:^|\/)ADFEGO.*\.(XLSX|XLSM|XLS)$/.test(sourceFileUpperForProfile) ||
+    /(?:ELETRO|ELETRA|EQTPREV).*-[A-Z]+-\d{4}\.XLSX?$/.test(sourceFileUpperForProfile);
+  const headerMap = buildExtratoHeaderMapping(opts.fileColumns, { contaCorrente: isContaCorrenteExtrato });
   const mappedColumns = headerMap.mappedColumns.slice();
 
   // ===== REGRA CUSTOM TRE-GO (DRY): 3 sinais de match (nome arquivo / InfoComp linha 1 / órgão UI) =====
@@ -8170,7 +8650,6 @@ function insertExtratosRows(opts: {
     .forEach((c) => ensureExtratosColumn(opts.db, c));
 
   const SAMPLE_ROWS = opts.rows.length > 20 ? opts.rows.slice(0, 20) : opts.rows.slice();
-  const profileIdNorm = String(opts.learningProfileId ?? '').trim().toLowerCase();
   const profileOptionsIsTre = Boolean(
     opts.learningProfileOptions &&
       typeof opts.learningProfileOptions === 'object' &&
@@ -8285,7 +8764,12 @@ function insertExtratosRows(opts: {
     opts.fileColumns.find((c) => normalizeHeaderKey(c) === 'DT') ??
     (headerMap.sourceColumnByTarget.get('DATA') ?? null);
   const historicoSource = headerMap.sourceColumnByTarget.get('HISTÓRICO') ?? null;
-  const credTedFilterColumn = (headerMap as unknown as { credTedFilterColumn?: string | null }).credTedFilterColumn ?? historicoSource;
+  // Conta corrente (ADFEGO/ELETRA/EQTPREV): o layout não traz o marcador CRÉD.TED-STR no
+  // histórico, então o filtro abaixo deve ficar DESLIGADO (null). Não usar `??` aqui, pois
+  // `null ?? historicoSource` reativaria o filtro e descartaria 100% das linhas.
+  const credTedFilterColumn = isContaCorrenteExtrato
+    ? null
+    : ((headerMap as unknown as { credTedFilterColumn?: string | null }).credTedFilterColumn ?? historicoSource);
 
   const EXTRATOS_COMPETENCIA_SAME_MONTH_HISTORICOS = [
     'TRIBUNAL REGIONAL ELEITORAL DE GOIAS',
@@ -9317,11 +9801,11 @@ function pickFirstExistingColumn(
 function pickRecursoValorColumn(existing: string[]): string | null {
   return (
     pickFirstExistingColumn(existing, [
+      'VALOR DESC HOLERITE',
       'Valor Parcela',
       'VALOR PARCELA',
       'VALOR',
       'VALOR PARC AVERBADA',
-      'VALOR DESC HOLERITE',
       'VALOR PARC ENVIADA',
       'URV',
       'VALOR URV',
@@ -9351,10 +9835,10 @@ function pickRecursoValorColumn(existing: string[]): string | null {
 
 function listRecursoValorColumns(existing: string[]): string[] {
   const candidates = [
+    'VALOR DESC HOLERITE',
     'Valor Parcela',
     'VALOR PARCELA',
     'VALOR PARC AVERBADA',
-    'VALOR DESC HOLERITE',
     'VALOR PARC ENVIADA',
     'VALOR',
     'URV',
@@ -10435,8 +10919,8 @@ export async function conciliarExtratoRelatorioDetalhe(opts: {
     if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
 
     const orgaoMatchKey =
-      (extratoOrgaoCol ? normalizeExtratosOrgaoForMatch(r[extratoOrgaoCol]) : null) ??
-      (extratoHist2 ? normalizeExtratosOrgaoForMatch(r[extratoHist2]) : null) ??
+      (extratoOrgaoCol ? normalizeExtratosOrgaoForMatch(r[extratoOrgaoCol]) : null) ||
+      (extratoHist2 ? normalizeExtratosOrgaoForMatch(r[extratoHist2]) : null) ||
       (extratoHist1 ? normalizeExtratosOrgaoForMatch(r[extratoHist1]) : null);
     if (orgaoFilterActive && extratoOrgaoCol) {
       if (!orgaoMatchKey) continue;
@@ -11097,6 +11581,13 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       'Numero Contrato',
       'Número do Contrato',
     ]) ?? pickFirstColumnContaining(relCols, ['operacao', 'operação', 'contrat']);
+  const relParcelaCol = pickFirstExistingColumn(relCols, [
+    'Parcela',
+    'PARCELA',
+    'N Parcela',
+    'N Parcela_1',
+    'N Parcela_2',
+  ]);
   const relValueCol = pickFirstExistingColumn(relCols, [
     'Valor Parcela',
     'VALOR PARCELA',
@@ -11214,8 +11705,8 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     debugConsolidacao.totalMonthRows += 1;
 
     const orgaoMatchKey =
-      (extratoOrgaoCol ? normalizeExtratosOrgaoForMatch(r[extratoOrgaoCol]) : null) ??
-      (extratoHist2 ? normalizeExtratosOrgaoForMatch(r[extratoHist2]) : null) ??
+      (extratoOrgaoCol ? normalizeExtratosOrgaoForMatch(r[extratoOrgaoCol]) : null) ||
+      (extratoHist2 ? normalizeExtratosOrgaoForMatch(r[extratoHist2]) : null) ||
       (extratoHist1 ? normalizeExtratosOrgaoForMatch(r[extratoHist1]) : null);
     const rawOrgao =
       (extratoOrgaoCol && typeof r[extratoOrgaoCol] === 'string'
@@ -11226,7 +11717,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
         ? String(r[extratoHist2]).trim()
         : '') || '';
     const historicoMatchKey =
-      (extratoHist2 ? normalizeExtratosHistoricoForMatch(r[extratoHist2]) : null) ??
+      (extratoHist2 ? normalizeExtratosHistoricoForMatch(r[extratoHist2]) : null) ||
       (extratoHist1 ? normalizeExtratosHistoricoForMatch(r[extratoHist1]) : null);
     const consolidatedByOrgaoKey = Boolean(orgaoMatchKey && consolidacaoKeys.has(orgaoMatchKey));
     const consolidatedByHistorico1 = Boolean(
@@ -11461,6 +11952,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     relCpfCol,
     ...(relNomeCol ? [relNomeCol] : []),
     ...(relContratoCol ? [relContratoCol] : []),
+    ...(relParcelaCol ? [relParcelaCol] : []),
     relValueCol,
     ...(relCopCol ? [relCopCol] : []),
     ...(relDateCol ? [relDateCol] : []),
@@ -11480,6 +11972,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     empresa: string | null;
     pairId: string | null;
   }> = [];
+  const relDedupeKeys = new Set<string>();
   const relColsSql = relSelectCols
     .filter(Boolean)
     .map((c) => `${escapeSqlIdentifier(c)} as ${escapeSqlIdentifier(c)}`)
@@ -11559,6 +12052,25 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
     if (orgaoFilterActive && relEmpresaCol) {
       if (!mapped) continue;
     }
+
+    const parcela =
+      relParcelaCol && typeof (r as any)[relParcelaCol] === 'string'
+        ? String((r as any)[relParcelaCol]).trim() || null
+        : relParcelaCol && typeof (r as any)[relParcelaCol] === 'number'
+          ? String((r as any)[relParcelaCol]).trim() || null
+          : null;
+    const dedupeKey = [
+      rowMonthKey,
+      cpfDigits,
+      contrato ?? '',
+      parcela ?? '',
+      vencimento ?? '',
+      String(cents),
+      empresa ?? '',
+      modalidade ?? '',
+    ].join('|');
+    if (relDedupeKeys.has(dedupeKey)) continue;
+    relDedupeKeys.add(dedupeKey);
 
     relItems.push({
       rowId,
@@ -11791,14 +12303,33 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       recursoRecebidoMaiorAdjustmentsByKey.set(key, list);
     }
   }
+  const recursoTotalBeforeAdjustments = recursoItems.reduce((acc, v) => acc + v.cents, 0);
+  let totalAdjustedCents = 0;
+  let totalAdjustedCount = 0;
   for (const item of recursoItems) {
     const adjustmentKey = `${item.cpfDigits}|${item.cents}`;
     const adjustments = recursoRecebidoMaiorAdjustmentsByKey.get(adjustmentKey);
     if (!adjustments || adjustments.length === 0) continue;
     const latestAdjustment = adjustments.shift();
     if (!latestAdjustment) continue;
+    const delta = latestAdjustment.targetCents - item.cents;
+    if (delta >= 0) continue;
     item.cents = latestAdjustment.targetCents;
+    totalAdjustedCents += delta;
+    totalAdjustedCount++;
   }
+  const recursoTotalImmediatelyAfterAdjustments = recursoItems.reduce((acc, v) => acc + v.cents, 0);
+  let recursoTotalUsedForFrontend = recursoTotalImmediatelyAfterAdjustments;
+  if (totalAdjustedCents < 0) {
+    const candidate = recursoTotalImmediatelyAfterAdjustments - totalAdjustedCents;
+    if (candidate > 0) {
+      const absDiff = Math.abs(candidate - recursoTotalBeforeAdjustments);
+      if (absDiff <= 50) {
+        recursoTotalUsedForFrontend = candidate;
+      }
+    }
+  }
+  void recursoTotalBeforeAdjustments;
 
   const relByCpfAndCents = new Map<string, number[]>();
   for (let i = 0; i < relItems.length; i++) {
@@ -11944,7 +12475,11 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
       .filter((x) => x.recursoCents !== 0 || x.relatorioCents !== 0 || x.extratosCents !== 0);
   })();
 
-  const recursoTotal = recursoItems.reduce((acc, v) => acc + v.cents, 0);
+    const recursoTotalAfterPairing = recursoItems.reduce((acc, v) => acc + v.cents, 0);
+  const recursoTotal =
+    typeof recursoTotalUsedForFrontend !== 'undefined' && totalAdjustedCents < 0
+      ? recursoTotalUsedForFrontend
+      : recursoTotalAfterPairing;
   const relatorioTotal = relItems.reduce((acc, v) => acc + v.cents, 0);
   const conciliadoTotal = recursoItems
     .filter((v) => Boolean(v.pairId))
@@ -12497,14 +13032,17 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
               justification: 'Inclusão de Servidor',
             }
           : null;
+      const key = `${v.cpfDigits}|${v.cents}`;
+      const occ = occByKey.get(key) ?? null;
+      const isQuitado = Boolean(occ) && (occ!.action === 'quitado_recurso' || occ!.action.startsWith('quitado_recurso'));
       return {
         cpf: v.cpf,
-        nome: canonicalNomeByCpfAndCents.get(`${v.cpfDigits}|${v.cents}`) ?? v.nome,
+        nome: canonicalNomeByCpfAndCents.get(key) ?? v.nome,
         value: centsToPtBr(v.cents),
         sourceRecursoTable: v.sourceRecursoTable,
         status: v.pairId ? 'conciliado' : 'pendencia',
         pairId: v.pairId,
-        hideInFront: v.hideInFront,
+        hideInFront: v.hideInFront || isQuitado,
         ...(manualOccurrence
           ? {
               ocorrencia: manualOccurrence,
@@ -12522,6 +13060,7 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
 
   const relatorio = relItems
     .map((v) => ({
+      rowId: typeof (v as any).rowId === 'number' ? (v as any).rowId : null,
       cpf: v.cpf,
       nome: canonicalNomeByCpfAndCents.get(`${v.cpfDigits}|${v.cents}`) ?? v.nome,
       contrato: v.contrato,
@@ -13142,6 +13681,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
   const liquidacaoNormalEstornadaByDate = new Map<string, number>();
   const estornoByDate = new Map<string, number>();
   const recursoRecebidoMaiorEstornoByDate = new Map<string, number>();
+  const recursoRecebidoMaiorDebitoDeductionByDate = new Map<string, number>();
   const globalQuitadoBusinessKeys = new Map<string, number>();
   const globalAntecipadoBusinessKeys = new Map<string, number>();
   const naoPossuiRecursoByDate = new Map<string, number>();
@@ -13150,12 +13690,32 @@ function computeConsolidadoPorDataForContabilidade(opts: {
   const recursoJudicialOriginalByDate = new Map<string, number>();
   const recursoJudicialDiffByDate = new Map<string, number>();
   const relatorioOccurrenceIds = new Set<number>();
+  const linkedRecursoRecebidoMaiorByCpf = new Map<string, number>();
   for (const r of relatorio) {
     const occs = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
     for (const occ of occs) {
       const id = Number(occ?.id);
       if (Number.isFinite(id) && id > 0) relatorioOccurrenceIds.add(id);
     }
+    const cpfKey = normalizeCpfDigits(r?.cpf);
+    let hasRecursoRecebidoMaior = false;
+    for (const occ of occs) {
+      const action = typeof occ?.action === 'string' ? occ.action.trim() : '';
+      const isRm =
+        action === 'recurso_recebido_a_maior_relatorio_sisbr' ||
+        action.startsWith('recurso_recebido_a_maior');
+      if (!isRm) continue;
+      const devolucaoCents = parseMoneyToCents(occ?.devolucaoValue);
+      if (devolucaoCents === null || devolucaoCents <= 0) continue;
+      hasRecursoRecebidoMaior = true;
+      if (cpfKey) {
+        linkedRecursoRecebidoMaiorByCpf.set(
+          cpfKey,
+          (linkedRecursoRecebidoMaiorByCpf.get(cpfKey) ?? 0) + devolucaoCents,
+        );
+      }
+    }
+    void hasRecursoRecebidoMaior;
   }
   for (const o of ocorrencias) {
     const action = typeof o?.action === 'string' ? o.action.trim() : '';
@@ -13216,6 +13776,19 @@ function computeConsolidadoPorDataForContabilidade(opts: {
           devolucaoDate,
           (recursoRecebidoMaiorEstornoByDate.get(devolucaoDate) ?? 0) + devolucaoCents,
         );
+        const cpfKey = normalizeCpfDigits(o?.cpf);
+        if (cpfKey && !linkedRecursoRecebidoMaiorByCpf.has(cpfKey)) {
+          const liquidationDate =
+            typeof o?.liquidationDate === 'string' ? o.liquidationDate.trim() : '';
+          const deductDate =
+            liquidationDate && /^\d{2}\/\d{2}\/\d{4}$/.test(liquidationDate)
+              ? liquidationDate
+              : devolucaoDate;
+          recursoRecebidoMaiorDebitoDeductionByDate.set(
+            deductDate,
+            (recursoRecebidoMaiorDebitoDeductionByDate.get(deductDate) ?? 0) + devolucaoCents,
+          );
+        }
       }
     }
 
@@ -13319,7 +13892,29 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     }
     const effDate = (liquidationDate || baseVenc || '').trim();
     if (!effDate) continue;
+    const cpfKey = normalizeCpfDigits(r?.cpf);
+    const recursoRecebidoMaiorDeductCents = cpfKey ? linkedRecursoRecebidoMaiorByCpf.get(cpfKey) ?? 0 : 0;
+    const occs = Array.isArray(r?.ocorrencias) ? r.ocorrencias : r?.ocorrencia ? [r.ocorrencia] : [];
+    let inlineMaiorCents = 0;
+    for (const occ of occs) {
+      const action = typeof occ?.action === 'string' ? occ.action.trim() : '';
+      const isRm =
+        action === 'recurso_recebido_a_maior_relatorio_sisbr' ||
+        action.startsWith('recurso_recebido_a_maior');
+      if (!isRm) continue;
+      const devCents = parseMoneyToCents(occ?.devolucaoValue);
+      if (devCents === null || devCents <= 0) continue;
+      inlineMaiorCents += devCents;
+    }
+    const maiorTotalCents = Math.max(recursoRecebidoMaiorDeductCents, inlineMaiorCents);
     const recursoJudicialValores = pickRecursoJudicialValores(r);
+    if (maiorTotalCents > 0 && !recursoJudicialValores) {
+      const deducao = Math.min(cents, maiorTotalCents);
+      recursoRecebidoMaiorDebitoDeductionByDate.set(
+        effDate,
+        (recursoRecebidoMaiorDebitoDeductionByDate.get(effDate) ?? 0) + deducao,
+      );
+    }
     if (recursoJudicialValores) {
       recursoJudicialEditedByDate.set(
         effDate,
@@ -13347,14 +13942,14 @@ function computeConsolidadoPorDataForContabilidade(opts: {
           .replace(/[\u0300-\u036f]/g, '')
           .replace(/[-\s]+/g, '_');
         if (status === 'concluido' || status === 'concluida') return false;
-        const occs = Array.isArray(r?.ocorrencias)
+        const occsInner = Array.isArray(r?.ocorrencias)
           ? r.ocorrencias
           : r?.ocorrencia
             ? [r.ocorrencia]
             : [];
-        const hasLiquidacao = occs.some((o: any) => {
-          const action = typeof o?.action === 'string' ? o.action.trim() : '';
-          return action.startsWith('liquidacao');
+        const hasLiquidacao = occsInner.some((o: any) => {
+          const actionInner = typeof o?.action === 'string' ? o.action.trim() : '';
+          return actionInner.startsWith('liquidacao');
         });
         return !hasLiquidacao;
       })();
@@ -13379,9 +13974,9 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       ...antecipadoDevolvidoByDate.keys(),
       ...devolucaoParcialAverbacaoValorByDate.keys(),
       ...recursoRecebidoMaiorEstornoByDate.keys(),
+      ...recursoRecebidoMaiorDebitoDeductionByDate.keys(),
       ...liquidacaoNormalEstornadaByDate.keys(),
       ...estornoByDate.keys(),
-      ...naoPossuiRecursoByDate.keys(),
       ...recursoJudicialEditedByDate.keys(),
       ...repactuacaoEmAndamentoByDate.keys(),
       ...recursoRecebidoMenorNoDebitByDate.keys(),
@@ -13398,6 +13993,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     saldoCents: number;
     event?: string;
     skipAdjustDate?: boolean;
+    recursoRecebidoMaiorDeductCents?: number;
   }> = [];
   for (const date of dates) {
     const recursoCents = recursoByDate.get(date) ?? 0;
@@ -13408,16 +14004,23 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       devolucaoParcialAverbacaoValorByDate.get(date) ?? 0;
     const recursoRecebidoMaiorEstornoCents =
       recursoRecebidoMaiorEstornoByDate.get(date) ?? 0;
+    const recursoRecebidoMaiorDeductCents =
+      recursoRecebidoMaiorDebitoDeductionByDate.get(date) ?? 0;
     const estornoCents = estornoByDate.get(date) ?? 0;
     const liquidacaoNormalEstornadaCents = liquidacaoNormalEstornadaByDate.get(date) ?? 0;
-    const naoPossuiRecursoCents = naoPossuiRecursoByDate.get(date) ?? 0;
     const repactuacaoCents = repactuacaoEmAndamentoByDate.get(date) ?? 0;
     const recursoJudicialEditedCents = recursoJudicialEditedByDate.get(date) ?? 0;
     const recursoJudicialOriginalCents = recursoJudicialOriginalByDate.get(date) ?? 0;
     const recursoJudicialDiffCents = recursoJudicialDiffByDate.get(date) ?? 0;
     const recursoRecebidoMenorNoDebitCents = recursoRecebidoMenorNoDebitByDate.get(date) ?? 0;
     const recursoRecebidoMenorDebitCents = recursoRecebidoMenorDebitByDate.get(date) ?? 0;
-    const relatorioCents = relatorioCentsRaw - repactuacaoCents;
+    const relatorioCents = Math.max(
+      0,
+      relatorioCentsRaw -
+        repactuacaoCents -
+        recursoRecebidoMaiorDeductCents -
+        devolucaoParcialAverbacaoValorCents,
+    );
 
     if (relatorioCents !== 0 || extratosCents !== 0) {
       runningSaldo += extratosCents - relatorioCents;
@@ -13427,6 +14030,7 @@ function computeConsolidadoPorDataForContabilidade(opts: {
         relatorioCents,
         extratosCents,
         saldoCents: runningSaldo,
+        recursoRecebidoMaiorDeductCents: recursoRecebidoMaiorDeductCents > 0 ? recursoRecebidoMaiorDeductCents : undefined,
       });
     }
 
@@ -13469,19 +14073,6 @@ function computeConsolidadoPorDataForContabilidade(opts: {
       });
     }
 
-    if (naoPossuiRecursoCents !== 0) {
-      runningSaldo += -naoPossuiRecursoCents;
-      out.push({
-        vencimento: date,
-        recursoCents: 0,
-        relatorioCents: naoPossuiRecursoCents,
-        extratosCents: 0,
-        saldoCents: runningSaldo,
-        event: 'NÃO POSSUI RECURSO',
-        skipAdjustDate: true,
-      });
-    }
-
     if (quitadoCents !== 0) {
       runningSaldo += -quitadoCents;
       out.push({
@@ -13496,27 +14087,27 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     }
 
     if (devolucaoParcialAverbacaoValorCents !== 0) {
-      runningSaldo += devolucaoParcialAverbacaoValorCents;
+      runningSaldo += -devolucaoParcialAverbacaoValorCents;
       out.push({
         vencimento: date,
-        recursoCents: 0,
+        recursoCents: devolucaoParcialAverbacaoValorCents,
         relatorioCents: 0,
-        extratosCents: devolucaoParcialAverbacaoValorCents,
+        extratosCents: 0,
         saldoCents: runningSaldo,
         event: 'VALOR DEVOLVIDO (AVERBAÇÃO)',
         skipAdjustDate: true,
       });
     }
 
-    if (recursoRecebidoMaiorEstornoCents !== 0) {
-      runningSaldo += recursoRecebidoMaiorEstornoCents;
+    if (recursoRecebidoMaiorDeductCents !== 0) {
+      runningSaldo += recursoRecebidoMaiorDeductCents - recursoRecebidoMaiorEstornoCents;
       out.push({
         vencimento: date,
         recursoCents: 0,
-        relatorioCents: 0,
-        extratosCents: recursoRecebidoMaiorEstornoCents,
+        relatorioCents: recursoRecebidoMaiorDeductCents,
+        extratosCents: 0,
         saldoCents: runningSaldo,
-        event: 'RECURSO RECEBIDO A MAIOR (ESTORNO NA CONTA)',
+        event: 'RECURSO RECEBIDO A MAIOR (VALOR DEVOLVIDO - DEDUÇÃO FOLHA)',
         skipAdjustDate: true,
       });
     }
@@ -16207,6 +16798,125 @@ export async function alterarOrgaoRelatorioSisbr(opts: {
   };
 }
 
+export async function atualizarVencimentoRelatorioSisbr(opts: {
+  month: string;
+  orgao: string;
+  rowId: number;
+  vencimento: string;
+}) {
+  const { year, month } = parseMonthInput(opts.month);
+  const wantedMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+  const orgaoRaw = String(opts.orgao ?? '').trim();
+  if (!orgaoRaw) throw new Error('Informe o órgão.');
+  const orgaoKey = normalizeExtratosOrgaoForMatch(orgaoRaw);
+  if (!orgaoKey) throw new Error('Órgão inválido.');
+
+  const rowId = Number(opts.rowId);
+  if (!Number.isFinite(rowId) || rowId <= 0) throw new Error('Linha do relatório inválida.');
+
+  const vencimento = String(opts.vencimento ?? '').trim();
+  if (!vencimento) throw new Error('Informe o vencimento.');
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(vencimento);
+  if (!m) throw new Error('Vencimento inválido. Use DD/MM/AAAA.');
+  const dd = Number(m[1]);
+  const mm = Number(m[2]);
+  const yyyy = Number(m[3]);
+  const d = new Date(yyyy, mm - 1, dd);
+  if (
+    !Number.isFinite(dd) ||
+    !Number.isFinite(mm) ||
+    !Number.isFinite(yyyy) ||
+    mm < 1 ||
+    mm > 12 ||
+    dd < 1 ||
+    dd > 31 ||
+    d.getFullYear() !== yyyy ||
+    d.getMonth() !== mm - 1 ||
+    d.getDate() !== dd
+  ) {
+    throw new Error('Vencimento inválido.');
+  }
+
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  assertConciliacaoAberta(db, { monthKey: wantedMonthKey, orgaoRaw });
+
+  if (!tableExists(db, 'relatorio_consignado')) {
+    throw new Error('Tabela relatorio_consignado não encontrada.');
+  }
+
+  const relCols = getTableColumns(db, 'relatorio_consignado');
+  const relCpfCol =
+    pickFirstExistingColumn(relCols, ['CPF', 'Cpf']) ??
+    pickFirstColumnContaining(relCols, ['cpf']);
+  const relValueCol = pickFirstExistingColumn(relCols, ['Valor Parcela', 'VALOR PARCELA']);
+  const relDateCol =
+    pickFirstExistingColumn(relCols, ['Vencimento', 'Vencto. Operação', 'Vencto. Operacao']) ??
+    pickFirstColumnContaining(relCols, ['vencto', 'vencim']);
+  const relCopCol = pickFirstExistingColumn(relCols, ['Copetencia', 'Competencia', 'COMPETENCIA']);
+  const relEmpresaCol = pickFirstExistingColumn(relCols, ['EMPRESA', 'Empresa', 'ÓRGÃO', 'ORGAO', 'Órgão', 'Orgao']);
+
+  if (!relDateCol) throw new Error('Coluna de vencimento não encontrada no Relatório SISBR.');
+
+  const curStmt = db.prepare(
+    `SELECT rowid as __rowid
+          ${relDateCol ? `, ${escapeSqlIdentifier(relDateCol)} as __venc` : ''}
+          ${relCopCol ? `, ${escapeSqlIdentifier(relCopCol)} as __cop` : ''}
+          ${relEmpresaCol ? `, ${escapeSqlIdentifier(relEmpresaCol)} as __emp` : ''}
+          ${relCpfCol ? `, ${escapeSqlIdentifier(relCpfCol)} as __cpf` : ''}
+          ${relValueCol ? `, ${escapeSqlIdentifier(relValueCol)} as __val` : ''}
+       FROM relatorio_consignado
+      WHERE rowid = ?
+      LIMIT 1;`,
+  );
+  let current: Record<string, unknown> | null = null;
+  try {
+    curStmt.bind([rowId]);
+    if (curStmt.step()) current = curStmt.getAsObject() as Record<string, unknown>;
+  } finally {
+    curStmt.free();
+  }
+  if (!current) throw new Error('Linha do Relatório SISBR não encontrada.');
+
+  const currentMonthKey =
+    relCopCol && typeof (current as any).__cop === 'string'
+      ? parseCopetenciaToMonthKey((current as any).__cop)
+      : null;
+  if (currentMonthKey && currentMonthKey !== wantedMonthKey) {
+    throw new Error('Linha não pertence à competência selecionada.');
+  }
+
+  if (relEmpresaCol) {
+    const empKey = normalizeRelatorioOrgaoForMatch((current as any).__emp);
+    const wantedEmpresa = resolveRelatorioEmpresaFromExtratosOrgao(db, orgaoRaw);
+    const wantedEmpresaKey = normalizeRelatorioOrgaoForMatch(wantedEmpresa);
+    if (empKey && wantedEmpresaKey && empKey !== wantedEmpresaKey) {
+      throw new Error('Linha não pertence ao órgão selecionado.');
+    }
+  }
+
+  const lockedInfo = getConciliacaoFechamentoInfo(db, { monthKey: wantedMonthKey, orgaoRaw });
+  const currentVencLabel = normalizeVencimentoLabel((current as any).__venc);
+  if (lockedInfo.isClosed || lockedInfo.closedVencimentos.includes(currentVencLabel)) {
+    throw new Error('Conciliação fechada para alteração desse vencimento.');
+  }
+
+  const updStmt = db.prepare(
+    `UPDATE relatorio_consignado
+        SET ${escapeSqlIdentifier(relDateCol)} = ?
+      WHERE rowid = ?;`,
+  );
+  try {
+    updStmt.run([vencimento, rowId]);
+  } finally {
+    updStmt.free();
+  }
+
+  persistDatabase(db, dbFilePath);
+  return { ok: true, month: wantedMonthKey, orgao: orgaoRaw, rowId, vencimento, dbFilePath };
+}
+
 export async function recursoJudicialValorAMenorRelatorioSisbr(opts: {
   month: string;
   orgao: string;
@@ -17462,11 +18172,22 @@ export async function liquidacaoForaDoVencimentoRelatorioSisbr(opts: {
   }
 
   const matchedRowIds: number[] = [];
+  const rowCandidatesByCpf: Array<{
+    rowid: number;
+    valorCents: number;
+    empresa: string;
+    vencimento: string;
+    modalidade: string;
+  }> = [];
+
   const select = db.prepare(
     `SELECT rowid as __rowid,
             ${escapeSqlIdentifier('EMPRESA')} as EMPRESA,
             ${escapeSqlIdentifier('Copetencia')} as Copetencia,
-            ${escapeSqlIdentifier('Valor Parcela')} as ValorParcela
+            ${escapeSqlIdentifier('Valor Parcela')} as ValorParcela,
+            ${escapeSqlIdentifier('Vencimento')} as Vencimento,
+            ${escapeSqlIdentifier('VENCIMENTO PARCELA')} as VencimentoParcela,
+            ${escapeSqlIdentifier('Modalidade')} as Modalidade
      FROM relatorio_consignado
      WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.',''), '-',''), '/','') = ?;`,
   );
@@ -17480,40 +18201,104 @@ export async function liquidacaoForaDoVencimentoRelatorioSisbr(opts: {
       const rowMonthKey = parseCopetenciaToMonthKey(cop);
       if (!rowMonthKey || rowMonthKey !== wantedMonthKey) continue;
       const cents = parseMoneyToCents((row as any).ValorParcela);
-      if (cents === null || cents !== valueCents) continue;
+      if (cents === null) continue;
+      const emp = typeof row.EMPRESA === 'string' ? row.EMPRESA.trim() : '';
+      const venc =
+        String((row as any).Vencimento ?? '').trim() ||
+        String((row as any).VencimentoParcela ?? '').trim() ||
+        '';
+      const modalidade = String((row as any).Modalidade ?? '').trim();
+      rowCandidatesByCpf.push({ rowid, valorCents: cents, empresa: emp, vencimento: venc, modalidade });
       if (fromEmpresaKey) {
-        const emp = typeof row.EMPRESA === 'string' ? row.EMPRESA.trim() : '';
         const empKey = normalizeRelatorioOrgaoForMatch(emp);
-        if (!empKey || empKey !== fromEmpresaKey) continue;
+        if (!empKey || !orgaoKeysLooselyMatch(empKey, fromEmpresaKey)) continue;
       }
-      matchedRowIds.push(rowid);
+      if (cents === valueCents) {
+        matchedRowIds.push(rowid);
+      }
     }
   } finally {
     select.free();
   }
 
-  if (matchedRowIds.length === 0) {
-    throw new Error('Nenhum registro do Relatório SISBR encontrado para registrar a ocorrência.');
+  if (matchedRowIds.length === 0 && rowCandidatesByCpf.length > 0) {
+    const prevOccStmt = db.prepare(
+      `SELECT meta_json, action, value, id
+       FROM conciliacao_pendencia_actions
+       WHERE month=?
+         AND REPLACE(REPLACE(REPLACE(TRIM(COALESCE(cpf,'')),'.',''),'-',''),'/','')=?
+         AND COALESCE(error,'')=''
+         AND (COALESCE(undone_at,'')='' OR undone_at IS NULL)
+         AND TRIM(COALESCE(action,'')) IN (
+           'recurso_recebido_a_menor_relatorio_sisbr',
+           'recurso_judicial_valor_a_menor_relatorio_sisbr',
+           'liquidacao_fora_vencimento_relatorio_sisbr',
+           'estorno_valores_relatorio_sisbr'
+         )
+       ORDER BY id DESC
+       LIMIT 30;`,
+    );
+    try {
+      prevOccStmt.bind([wantedMonthKey, cpfDigits] as unknown as any[]);
+      const priorRowIds = new Set<number>();
+      while (prevOccStmt.step()) {
+        const row = prevOccStmt.getAsObject() as Record<string, unknown>;
+        const meta = typeof row.meta_json === 'string' ? row.meta_json.trim() : '';
+        if (!meta) continue;
+        let parsed: any = null;
+        try {
+          parsed = JSON.parse(meta);
+        } catch {
+          parsed = null;
+        }
+        const ids = Array.isArray(parsed?.rowIds) ? (parsed.rowIds as unknown[]) : [];
+        for (const raw of ids) {
+          const n = Number(raw);
+          if (Number.isFinite(n) && n > 0) priorRowIds.add(n);
+        }
+      }
+      if (priorRowIds.size > 0) {
+        for (const cand of rowCandidatesByCpf) {
+          if (!priorRowIds.has(cand.rowid)) continue;
+          if (fromEmpresaKey) {
+            const empKey = normalizeRelatorioOrgaoForMatch(cand.empresa);
+            if (!empKey || !orgaoKeysLooselyMatch(empKey, fromEmpresaKey)) continue;
+          }
+          matchedRowIds.push(cand.rowid);
+        }
+      }
+    } finally {
+      prevOccStmt.free();
+    }
   }
 
-  const conciliacao = (await conciliarRecursoOrgaoRelatorio({
-    month: wantedMonthKey,
-    orgao,
-  })) as any;
-  const relatorio = Array.isArray(conciliacao?.relatorio) ? conciliacao.relatorio : [];
-  const hasConciliado = relatorio.some((r: any) => {
-    const rCpfDigits = String(r?.cpf ?? '').replace(/\D/g, '');
-    if (rCpfDigits !== cpfDigits) return false;
-    const rCents = parseMoneyToCents(r?.value);
-    if (rCents === null || rCents !== valueCents) return false;
-    if (fromEmpresaKey) {
-      const empKey = normalizeRelatorioOrgaoForMatch(r?.empresa);
-      if (!empKey || empKey !== fromEmpresaKey) return false;
+  if (matchedRowIds.length === 0 && rowCandidatesByCpf.length > 0) {
+    const diffBudgetCents = Math.max(200, Math.floor(Math.abs(valueCents) * 0.02));
+    let best: { rowid: number; diff: number } | null = null;
+    for (const cand of rowCandidatesByCpf) {
+      if (fromEmpresaKey) {
+        const empKey = normalizeRelatorioOrgaoForMatch(cand.empresa);
+        if (!empKey || !orgaoKeysLooselyMatch(empKey, fromEmpresaKey)) continue;
+      }
+      const diff = Math.abs(cand.valorCents - valueCents);
+      if (diff > diffBudgetCents) continue;
+      if (!best || diff < best.diff) best = { rowid: cand.rowid, diff };
     }
-    return Boolean(typeof r?.pairId === 'string' && r.pairId.trim());
-  });
-  if (!hasConciliado) {
-    throw new Error('Para registrar Liquidação Fora do Vencimento, o registro deve estar conciliado.');
+    if (best) matchedRowIds.push(best.rowid);
+  }
+
+  if (matchedRowIds.length === 0 && rowCandidatesByCpf.length === 1) {
+    const cand = rowCandidatesByCpf[0];
+    if (
+      !fromEmpresaKey ||
+      orgaoKeysLooselyMatch(normalizeRelatorioOrgaoForMatch(cand.empresa), fromEmpresaKey)
+    ) {
+      matchedRowIds.push(cand.rowid);
+    }
+  }
+
+  if (matchedRowIds.length === 0) {
+    throw new Error('Nenhum registro do Relatório SISBR encontrado para registrar a ocorrência.');
   }
 
   const sortDatePtBr = (a: string, b: string) => {
@@ -17526,8 +18311,8 @@ export async function liquidacaoForaDoVencimentoRelatorioSisbr(opts: {
   };
   const vencimentos = Array.from(
     new Set<string>(
-      relatorio
-        .map((r: any) => normalizeVencimentoLabel(r?.vencimento))
+      rowCandidatesByCpf
+        .map((c) => normalizeVencimentoLabel(c.vencimento))
         .filter((v: string) => Boolean(v && v !== '-')),
     ),
   ).sort(sortDatePtBr);
@@ -18272,8 +19057,42 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
         pickFirstExistingColumn(cols, ['NOME', 'Nome']) ??
         pickFirstColumnContaining(cols, ['nome']);
       const valorCol =
-        pickFirstExistingColumn(cols, ['VALOR', 'Valor']) ??
-        pickFirstColumnContaining(cols, ['valor']);
+        pickFirstExistingColumn(cols, [
+          'VALOR DESC HOLERITE',
+          'Valor Desc Holerite',
+          'DESC HOLERITE',
+          'Desc Holerite',
+          'VALOR HOLERITE',
+          'Valor Holerite',
+          'DESCONTO HOLERITE',
+          'VALOR DESCONTADO',
+          'Valor Descontado',
+          'DEBITO',
+          'DÉBITO',
+          'CREDITO',
+          'CRÉDITO',
+          'VALOR',
+          'Valor',
+        ]) ??
+        pickFirstColumnContaining(
+          cols,
+          [
+            'holerite',
+            'desc_holerite',
+            'desconto',
+            'descontado',
+            'recebido',
+            'recebimento',
+            'debito',
+            'débito',
+            'credito',
+            'crédito',
+            'valor parcela',
+            'valor_lib',
+            'valor liberado',
+            'valor',
+          ],
+        );
       const copCol =
         pickFirstExistingColumn(cols, [
           'Copetencia',
@@ -18284,10 +19103,31 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
 
       if (!valorCol || (!cpfCol && !nomeCol)) continue;
 
+      const isHoleriteLike = (colName: string) => {
+        const n = String(colName ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        return (
+          n.includes('holerite') ||
+          n.includes('desc_') ||
+          n.includes('desconto') ||
+          n.includes('descontado') ||
+          n.includes('recebido') ||
+          n.includes('recebimento') ||
+          n.includes('debito') ||
+          n.includes('credito') ||
+          n.includes('valor parcela') ||
+          n.includes('valor liberado')
+        )
+      }
+
+      const extraRecebimentoCols: string[] = cols.filter(
+        (c) => c !== valorCol && isHoleriteLike(c),
+      )
+
       const safeCols: string[] = [];
       if (cpfCol) safeCols.push(cpfCol);
       if (nomeCol) safeCols.push(nomeCol);
       if (valorCol) safeCols.push(valorCol);
+      for (const c of extraRecebimentoCols) safeCols.push(c);
       if (copCol) safeCols.push(copCol);
       if (safeCols.length === 0) continue;
       const selectCols = safeCols.map(escapeSqlIdentifier).join(', ');
@@ -18326,9 +19166,18 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
           }
 
           const valCents = parseMoneyToCents((row as any)[valorCol]);
-          if (valCents === null) continue;
+          const extraSum = extraRecebimentoCols.reduce<number>((acc, c) => {
+            const parsed = parseMoneyToCents((row as any)[c]);
+            if (parsed === null) return acc;
+            return acc + parsed;
+          }, 0);
 
-          if (valCents > 0) {
+          const recebimentoRealCents =
+            (isHoleriteLike(valorCol) && (valCents !== null && valCents > 0))
+              ? valCents + extraSum
+              : Math.max(valCents ?? 0, extraSum);
+
+          if (recebimentoRealCents > 0 && recebimentoRealCents === valueCents) {
             let comp: string | null = null;
             if (copCol) {
               const raw =
@@ -18337,7 +19186,7 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
             }
             blockedReason = {
               table: tableName,
-              valueCents: valCents,
+              valueCents: recebimentoRealCents,
               foundCpf: cpfMatch,
               foundNome: nomeMatchRow,
               competencia: comp,
@@ -18363,7 +19212,7 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
       const identificadores = detalhe.length ? detalhe.join(' + ') : 'Identificador';
       const compInfo = blockedReason.competencia ? ` (competência ${blockedReason.competencia})` : '';
       throw new Error(
-        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real nos recursos/extratos com valor > R$ 0,00 para este servidor.\n` +
+        `Não é permitido criar a ação "Não Possui Recurso". Existe um lançamento financeiro real nos recursos/extratos com o mesmo valor desta parcela (R$ ${valorParcela}) para este servidor.\n` +
           `- Tabela de origem: ${blockedReason.table}\n` +
           `- Match por: ${identificadores}${compInfo}\n` +
           `- CPF: ${cpfFmt} / Nome: ${nome}\n` +
@@ -18407,7 +19256,7 @@ export async function naoPossuiRecursoRelatorioSisbr(opts: {
   const selectRel = db.prepare(
     `SELECT rowid as __rowid, ${relatorioColsSql}
      FROM relatorio_consignado
-     WHERE TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')) = ?;`,
+     WHERE REPLACE(REPLACE(REPLACE(TRIM(COALESCE(${escapeSqlIdentifier('CPF')}, '')), '.', ''), '-', ''), ' ', '') = ?;`,
   );
   try {
     selectRel.bind([cpf] as unknown as any[]);
@@ -21469,8 +22318,8 @@ export async function exportConcilicacaoTemporarioXlsx(opts?: {
       Nome: r.Nome,
       CPF: r.CPF,
       Orgao: r.Orgao,
-      ValorRelatorio: r.ValorRelatorio,
-      ValorExtrato: r.ValorExtrato,
+      ValorRelatorio: parseBrNumber(r.ValorRelatorio),
+      ValorExtrato: parseBrNumber(r.ValorExtrato),
       Status: r.Status,
     });
 
@@ -21480,8 +22329,8 @@ export async function exportConcilicacaoTemporarioXlsx(opts?: {
 
     const vr = row.getCell(4);
     const ve = row.getCell(5);
-    vr.numFmt = '#,##0.00';
-    ve.numFmt = '#,##0.00';
+    setExcelNumberCell(vr, r.ValorRelatorio, { currency: true, decimals: 2 });
+    setExcelNumberCell(ve, r.ValorExtrato, { currency: true, decimals: 2 });
 
     const statusCell = row.getCell(6);
     const statusLower = String(r.Status || '').toLowerCase();
@@ -21510,8 +22359,8 @@ export async function exportConcilicacaoTemporarioXlsx(opts?: {
       r.Nome,
       r.CPF,
       r.Orgao,
-      r.ValorRelatorio ?? null,
-      r.ValorExtrato ?? null,
+      parseBrNumber(r.ValorRelatorio) || null,
+      parseBrNumber(r.ValorExtrato) || null,
       r.Status,
     ]),
   });
@@ -21873,7 +22722,8 @@ export async function exportConcilicacaoRecursoVsRelatorioXlsx(opts: {
     const recursoCents = Number(r?.recursoCents ?? 0) || 0;
     if (
       overrideEvent === 'DEVOLUÇÃO (QUITADO)' ||
-      overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)'
+      overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)' ||
+      overrideEvent === 'VALOR DEVOLVIDO (AVERBAÇÃO)'
     ) {
       return recursoCents;
     }
@@ -22327,8 +23177,18 @@ export async function exportConcilicacaoRecursoVsRelatorioXlsx(opts: {
     const rec = recursoRowsOrdered[i] ?? null;
     if (rec) {
       setBodyCell(excelRow.getCell(leftStartCol + 0), String(rec.nome ?? ''));
-      setBodyCell(excelRow.getCell(leftStartCol + 1), String(rec.cpf ?? ''));
-      setBodyCell(excelRow.getCell(leftStartCol + 2), String(rec.value ?? ''), { right: true });
+      const cpfCellLeft = excelRow.getCell(leftStartCol + 1);
+      cpfCellLeft.value = String(rec.cpf ?? '');
+      cpfCellLeft.numFmt = '@';
+      setBodyCell(cpfCellLeft, String(rec.cpf ?? ''));
+      const valorLeft = excelRow.getCell(leftStartCol + 2);
+      setExcelNumberCell(valorLeft, rec.value ?? 0, { currency: true, decimals: 2 });
+      valorLeft.border = {
+        top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      } as any;
       const statusText = String(rec.status ?? '') === 'conciliado' ? 'Conciliado' : 'Não conciliado';
       setBodyCell(excelRow.getCell(leftStartCol + 3), statusText, { bold: true });
       setBodyCell(excelRow.getCell(leftStartCol + 4), String(rec.pairId ?? ''));
@@ -22337,7 +23197,7 @@ export async function exportConcilicacaoRecursoVsRelatorioXlsx(opts: {
         bold: true,
         color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
       } as any;
-      excelRow.getCell(leftStartCol + 2).font = {
+      valorLeft.font = {
         bold: true,
         color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
       } as any;
@@ -22354,8 +23214,18 @@ export async function exportConcilicacaoRecursoVsRelatorioXlsx(opts: {
         })(),
       ];
       setBodyCell(excelRow.getCell(rightStartCol + 0), String(rel.nome ?? ''));
-      setBodyCell(excelRow.getCell(rightStartCol + 1), String(rel.cpf ?? ''));
-      setBodyCell(excelRow.getCell(rightStartCol + 2), String(rel.value ?? ''), { right: true });
+      const cpfCellRight = excelRow.getCell(rightStartCol + 1);
+      cpfCellRight.value = String(rel.cpf ?? '');
+      cpfCellRight.numFmt = '@';
+      setBodyCell(cpfCellRight, String(rel.cpf ?? ''));
+      const valorRight = excelRow.getCell(rightStartCol + 2);
+      setExcelNumberCell(valorRight, rel.value ?? 0, { currency: true, decimals: 2 });
+      valorRight.border = {
+        top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+      } as any;
       setBodyCell(excelRow.getCell(rightStartCol + 3), obsParts.join('\n'));
       setBodyCell(excelRow.getCell(rightStartCol + 4), String(rel.vencimento ?? ''));
       setBodyCell(excelRow.getCell(rightStartCol + 5), pickLiquidationDateFromRelRow(rel));
@@ -22367,7 +23237,7 @@ export async function exportConcilicacaoRecursoVsRelatorioXlsx(opts: {
         bold: true,
         color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
       } as any;
-      excelRow.getCell(rightStartCol + 2).font = {
+      valorRight.font = {
         bold: true,
         color: { argb: isOk ? 'FF16A34A' : 'FFDC2626' },
       } as any;
@@ -22477,7 +23347,7 @@ function buildConciliacaoPorDataRows(opts: {
     const event = typeof row?.event === 'string' ? String(row.event).trim() : '';
     const relatorioCents = Number(row?.relatorioCents ?? 0) || 0;
     const recursoCents = Number(row?.recursoCents ?? 0) || 0;
-    if (event === 'DEVOLUÇÃO (QUITADO)' || event === 'DEVOLUÇÃO (ANTECIPADO)') {
+    if (event === 'DEVOLUÇÃO (QUITADO)' || event === 'DEVOLUÇÃO (ANTECIPADO)' || event === 'VALOR DEVOLVIDO (AVERBAÇÃO)') {
       return recursoCents;
     }
     return relatorioCents !== 0 ? relatorioCents : recursoCents;
@@ -22755,13 +23625,13 @@ async function createConciliacaoPorDataPdfBuffer(opts: {
     return {
       ...row,
       tarifaCents,
-      totalDebitCents: row.totalDebitCents + tarifaCents,
-      saldoCents: row.saldoCents + tarifaCents,
+      totalDebitCents: row.totalDebitCents,
+      saldoCents: row.saldoCents - tarifaCents,
     };
   });
   const pivotTotals = {
     debitCents: pivotRowsWithTarifas.reduce((sum, row) => sum + row.totalDebitCents, 0),
-    creditCents: pivotRowsWithTarifas.reduce((sum, row) => sum + row.orgaoReceivedCents, 0),
+    creditCents: pivotRowsWithTarifas.reduce((sum, row) => sum + row.orgaoReceivedCents + (row.tarifaCents ?? 0), 0),
     saldoFinalCents: 0,
   };
   pivotTotals.saldoFinalCents = pivotTotals.creditCents - pivotTotals.debitCents;
@@ -23285,11 +24155,6 @@ export async function exportRelatoriosValoresListaXlsx(opts: {
     String(value ?? '')
       .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ')
       .trim();
-  const withCurrency = (value: unknown) => {
-    const text = sanitizeTextLocal(value);
-    if (!text) return 'R$ 0,00';
-    return text.startsWith('R$') ? text : `R$ ${text}`;
-  };
 
   const rows = relatorioByVencimento.map((row: any) => {
     const ocorrencia = row?.ocorrencia ?? null;
@@ -23297,7 +24162,7 @@ export async function exportRelatoriosValoresListaXlsx(opts: {
       origem: 'Relatório SISBR',
       cpf: sanitizeTextLocal(row?.cpf) || '-',
       nome: sanitizeTextLocal(row?.nome) || '-',
-      valor: withCurrency(row?.value ?? '0,00'),
+      valorRaw: row?.value ?? '0,00',
       vencimento: sanitizeTextLocal(getLinkedRelatorioVencimentoLabel(row)) || '-',
       status: row?.status === 'conciliado' ? 'Conciliado' : 'Pendente',
       ocorrencia: ocorrencia
@@ -23393,7 +24258,7 @@ export async function exportRelatoriosValoresListaXlsx(opts: {
       row.origem,
       row.cpf,
       row.nome,
-      row.valor,
+      null,
       row.vencimento,
       row.status,
       row.ocorrencia,
@@ -23412,6 +24277,7 @@ export async function exportRelatoriosValoresListaXlsx(opts: {
         right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
       };
     }
+    setExcelNumberCell(excelRow.getCell(4), row.valorRaw, { currency: true, decimals: 2 });
   });
 
   sheet.autoFilter = {
@@ -23583,12 +24449,7 @@ export async function exportConcilicacaoOcorrenciasXlsx(opts: {
     excelRow.getCell(cpfCol).value = sanitizeTextLocal(it.cpf);
     excelRow.getCell(cpfCol).numFmt = '@';
     excelRow.getCell(nomeCol).value = sanitizeTextLocal(it.nome);
-    const valorCents = parseMoneyToCents(it.valor);
-    if (valorCents === null) excelRow.getCell(valorCol).value = sanitizeTextLocal(it.valor);
-    else {
-      excelRow.getCell(valorCol).value = valorCents / 100;
-      excelRow.getCell(valorCol).numFmt = '#,##0.00';
-    }
+    setExcelNumberCell(excelRow.getCell(valorCol), it.valor, { currency: true, decimals: 2 });
     excelRow.getCell(statusCol).value = sanitizeTextLocal(it.status || '-');
     excelRow.getCell(gerenteCol).value = sanitizeTextLocal(it.gerenteEmail);
     const extraInfoParts: string[] = [];
@@ -24225,13 +25086,13 @@ export async function exportConcilicacaoPorDataXlsx(opts: {
     return {
       ...row,
       tarifaCents,
-      totalDebitCents: row.totalDebitCents + tarifaCents,
-      saldoCents: row.saldoCents + tarifaCents,
+      totalDebitCents: row.totalDebitCents,
+      saldoCents: row.saldoCents - tarifaCents,
     };
   });
   const pivotTotals = {
     debitCents: pivotRowsWithTarifas.reduce((sum, row) => sum + row.totalDebitCents, 0),
-    creditCents: pivotRowsWithTarifas.reduce((sum, row) => sum + row.orgaoReceivedCents, 0),
+    creditCents: pivotRowsWithTarifas.reduce((sum, row) => sum + row.orgaoReceivedCents + (row.tarifaCents ?? 0), 0),
     saldoFinalCents: 0,
   };
   pivotTotals.saldoFinalCents = pivotTotals.creditCents - pivotTotals.debitCents;
@@ -24319,7 +25180,7 @@ export async function exportConcilicacaoPorDataXlsx(opts: {
     sheet.getCell(addr).font = { bold: true };
   }
   for (const addr of ['B7', 'B8', 'B9', 'B10']) {
-    sheet.getCell(addr).numFmt = signedCurrencyNumFmt;
+    setExcelNumberCell(sheet.getCell(addr), sheet.getCell(addr).value, { currency: true, decimals: 2 });
   }
   sheet.getCell('B7').font = { bold: true, color: { argb: 'FFB45309' } };
   sheet.getCell('B8').font = { bold: true, color: { argb: 'FFC00000' } };
@@ -24372,13 +25233,11 @@ export async function exportConcilicacaoPorDataXlsx(opts: {
       row.liquidationDate,
       row.orgaoReceivedDate || '-',
       row.orgao,
-      row.orgaoReceivedCents / 100,
-      ...orderedEventColumns.map((column) =>
-        column.side === 'debit' ? -((row.values[column.key] ?? 0) / 100) : (row.values[column.key] ?? 0) / 100,
-      ),
-      row.tarifaCents / 100,
-      -(row.totalDebitCents / 100),
-      row.saldoCents / 100,
+      null,
+      ...orderedEventColumns.map((_column) => null),
+      null,
+      null,
+      null,
     ];
     for (let col = 1; col <= totalColumns; col += 1) {
       const cell = excelRow.getCell(col);
@@ -24393,20 +25252,30 @@ export async function exportConcilicacaoPorDataXlsx(opts: {
         bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
         right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
       };
-      if (col >= 4) cell.numFmt = signedCurrencyNumFmt;
     }
+    setExcelNumberCell(excelRow.getCell(4), row.orgaoReceivedCents / 100, { currency: true, decimals: 2 });
     orderedEventColumns.forEach((column, columnIndex) => {
-      if (column.side !== 'debit') return;
-      const value = row.values[column.key] ?? 0;
-      if (!value) return;
-      excelRow.getCell(5 + columnIndex).font = { color: { argb: 'FFC00000' } };
+      const rawValue =
+        column.side === 'debit'
+          ? -((row.values[column.key] ?? 0) / 100)
+          : (row.values[column.key] ?? 0) / 100;
+      const cell = excelRow.getCell(5 + columnIndex);
+      setExcelNumberCell(cell, rawValue, { currency: true, decimals: 2 });
+      if (column.side === 'debit') {
+        const value = row.values[column.key] ?? 0;
+        if (value) cell.font = { color: { argb: 'FFC00000' } };
+      }
     });
     const tarifaCell = excelRow.getCell(5 + orderedEventColumns.length);
+    setExcelNumberCell(tarifaCell, row.tarifaCents / 100, { currency: true, decimals: 2 });
     if (row.tarifaCents) {
-      tarifaCell.font = { bold: true, color: { argb: 'FFB45309' } };
+      tarifaCell.font = { bold: true, color: { argb: 'FF166534' } };
     }
-    excelRow.getCell(totalColumns - 1).font = { bold: true, color: { argb: 'FFC00000' } };
+    const totalDebitCell = excelRow.getCell(totalColumns - 1);
+    setExcelNumberCell(totalDebitCell, -(row.totalDebitCents / 100), { currency: true, decimals: 2 });
+    totalDebitCell.font = { bold: true, color: { argb: 'FFC00000' } };
     const saldoCell = excelRow.getCell(totalColumns);
+    setExcelNumberCell(saldoCell, row.saldoCents / 100, { currency: true, decimals: 2 });
     if (row.saldoCents < 0) {
       saldoCell.font = { bold: true, color: { argb: 'FFC00000' } };
     } else if (row.saldoCents === 0) {
@@ -24422,15 +25291,11 @@ export async function exportConcilicacaoPorDataXlsx(opts: {
     '-',
     '-',
     'Totais',
-    pivotTotals.creditCents / 100,
-    ...orderedEventColumns.map((column) =>
-      column.side === 'debit'
-        ? -((eventColumnTotals[column.key] ?? 0) / 100)
-        : (eventColumnTotals[column.key] ?? 0) / 100,
-    ),
-    totalTarifasCents / 100,
-    -(pivotTotals.debitCents / 100),
-    totalSaldoDevedorCents / 100,
+    null,
+    ...orderedEventColumns.map((_column) => null),
+    null,
+    null,
+    null,
   ];
   for (let col = 1; col <= totalColumns; col += 1) {
     const cell = totalsRow.getCell(col);
@@ -24453,20 +25318,33 @@ export async function exportConcilicacaoPorDataXlsx(opts: {
       bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
       right: { style: 'thin', color: { argb: 'FFCBD5E1' } },
     };
-    if (col >= 4) cell.numFmt = signedCurrencyNumFmt;
   }
+  setExcelNumberCell(totalsRow.getCell(4), pivotTotals.creditCents / 100, { currency: true, decimals: 2 });
   orderedEventColumns.forEach((column, columnIndex) => {
-    if (column.side !== 'debit') return;
-    const value = eventColumnTotals[column.key] ?? 0;
-    if (!value) return;
-    totalsRow.getCell(5 + columnIndex).font = { bold: true, color: { argb: 'FFC00000' } };
+    const rawValue =
+      column.side === 'debit'
+        ? -((eventColumnTotals[column.key] ?? 0) / 100)
+        : (eventColumnTotals[column.key] ?? 0) / 100;
+    const cell = totalsRow.getCell(5 + columnIndex);
+    setExcelNumberCell(cell, rawValue, { currency: true, decimals: 2 });
+    if (column.side === 'debit') {
+      const value = eventColumnTotals[column.key] ?? 0;
+      if (value) cell.font = { bold: true, color: { argb: 'FFC00000' } };
+    }
   });
+  const totalTarifaCell = totalsRow.getCell(5 + orderedEventColumns.length);
+  setExcelNumberCell(totalTarifaCell, totalTarifasCents / 100, { currency: true, decimals: 2 });
   if (totalTarifasCents) {
-    totalsRow.getCell(5 + orderedEventColumns.length).font = {
+    totalTarifaCell.font = {
       bold: true,
-      color: { argb: 'FFB45309' },
+      color: { argb: 'FF166534' },
     };
   }
+  const totalDebitFinalCell = totalsRow.getCell(totalColumns - 1);
+  setExcelNumberCell(totalDebitFinalCell, -(pivotTotals.debitCents / 100), { currency: true, decimals: 2 });
+  const totalSaldoFinalCell = totalsRow.getCell(totalColumns);
+  setExcelNumberCell(totalSaldoFinalCell, totalSaldoDevedorCents / 100, { currency: true, decimals: 2 });
+  if (totalSaldoDevedorCents < 0) totalSaldoFinalCell.font = { bold: true, color: { argb: 'FFC00000' } };
 
   sheet.autoFilter = {
     from: { row: headerRowIndex, column: 1 },
@@ -24822,7 +25700,7 @@ export async function getConciliacaoPorDataPreview(opts: {
     rows,
     totals: {
       ...totals,
-      saldoFinalCents: totals.creditCents - (totals.debitCents + tarifaTotals.tarifaCents),
+      saldoFinalCents: (totals.creditCents + tarifaTotals.tarifaCents) - totals.debitCents,
       tarifaCents: tarifaTotals.tarifaCents,
     },
   };
@@ -24973,23 +25851,66 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
 
+  const canonicalOrgaoKey = (value: string): string | null => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const base =
+      normalizeExtratosOrgaoForMatch(raw) ??
+      normalizeRelatorioOrgaoForMatch(raw) ??
+      raw;
+    return String(base ?? '')
+      .replace(/^RECURSO\s+/i, '')
+      .replace(/^48933\s*-\s*/i, '')
+      .replace(/^\d+\s*-\s*/, '')
+      .replace(/^DELEGACIA[- ]GERAL\s+DA\s+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+  };
+
   const targetOrgaos = (() => {
     if (!tableExists(db, 'orgao_depara')) return [] as string[];
-    return readTableRows(db, 'orgao_depara', ['extratos_value'])
-      .map((row) =>
-        typeof row.extratos_value === 'string' ? row.extratos_value.trim() : '',
-      )
-      .filter(Boolean)
-      .filter((value, index, arr) => arr.indexOf(value) === index)
-      .filter((value) => {
-        try {
-          resolveRecursoTableForOrgao(db, value);
-          return true;
-        } catch {
-          return false;
-        }
-      })
-      .sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    const rows = readTableRows(db, 'orgao_depara', ['extratos_value']);
+    const byCanonical = new Map<string, string[]>();
+    for (const row of rows) {
+      const value = typeof row.extratos_value === 'string' ? row.extratos_value.trim() : '';
+      if (!value) continue;
+      try {
+        resolveRecursoTableForOrgao(db, value);
+      } catch {
+        continue;
+      }
+      const c = canonicalOrgaoKey(value);
+      if (!c) continue;
+      const bucket = byCanonical.get(c) ?? [];
+      bucket.push(value);
+      byCanonical.set(c, bucket);
+    }
+    const picked: string[] = [];
+    for (const [, values] of byCanonical) {
+      const uniq = values.filter((v, i, a) => a.indexOf(v) === i);
+      const scored = uniq.map((v) => {
+        const raw = String(v ?? '').trim();
+        const noAccents = raw
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toUpperCase();
+        let score = 0;
+        score += raw.length * -2;
+        if (/^DELEGACIA[- ]GERAL/i.test(raw)) score -= 50;
+        if (/^RECURSO\s+DELEGACIA/i.test(raw)) score -= 70;
+        if (/^\d+\s*-/.test(raw)) score -= 30;
+        if (/^RECURSO\s/i.test(raw)) score -= 25;
+        if (noAccents === 'POLICIA CIVIL') score += 200;
+        if (noAccents === 'POLICIA MILITAR') score += 180;
+        if (/^[A-Z]/i.test(raw) && !/^RECURSO/i.test(raw)) score += 15;
+        return { v, score };
+      });
+      scored.sort((a, b) => b.score - a.score);
+      const candidate = scored[0]?.v ?? uniq[0];
+      if (candidate) picked.push(candidate);
+    }
+    return picked.sort((a, b) => a.localeCompare(b, 'pt-BR'));
   })();
 
   const sortDatePtBr = (a: string, b: string) => {
@@ -25007,6 +25928,7 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
     vencimento: string;
     status: 'aberta' | 'fechada';
     contabilidadeValidated: boolean;
+    contabilidadeRejected: boolean;
     recursoRecebidoCents: number;
     liquidadoCents: number;
     saldoCents: number;
@@ -25062,11 +25984,18 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
           ?.status === 'approved') ||
           (validationMap.get(buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, '-'))
             ?.status === 'approved'));
+      const contabilidadeRejected =
+        closedInfo?.isClosed &&
+        ((validationMap.get(buildConciliacaoPorDataValidationCompositeKey(monthKey, globalOrgao, '-'))
+          ?.status === 'rejected') ||
+          (validationMap.get(buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, '-'))
+            ?.status === 'rejected'));
       items.push({
         orgao,
         vencimento: '-',
         status: closedInfo?.isClosed ? 'fechada' : 'aberta',
         contabilidadeValidated,
+        contabilidadeRejected,
         recursoRecebidoCents,
         liquidadoCents,
         saldoCents,
@@ -25084,6 +26013,14 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
           (validationMap.get(
             buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, vencimento),
           )?.status === 'approved'));
+      const contabilidadeRejected =
+        (closedInfo?.isClosed || closedVencimentos.includes(vencimento)) &&
+        ((validationMap.get(
+          buildConciliacaoPorDataValidationCompositeKey(monthKey, globalOrgao, vencimento),
+        )?.status === 'rejected') ||
+          (validationMap.get(
+            buildConciliacaoPorDataValidationCompositeKey(monthKey, orgao, vencimento),
+          )?.status === 'rejected'));
       items.push({
         orgao,
         vencimento,
@@ -25092,6 +26029,7 @@ export async function listHomeConciliacaoStatuses(opts: { month: string }) {
             ? 'fechada'
             : 'aberta',
         contabilidadeValidated,
+        contabilidadeRejected,
         recursoRecebidoCents,
         liquidadoCents,
         saldoCents,
@@ -25475,6 +26413,33 @@ function normalizeEmails(emails: string[]): string[] {
     .filter((e, i, arr) => arr.indexOf(e) === i);
 }
 
+export class ConsignadoForbiddenError extends Error {
+  constructor(message = 'Ação permitida apenas para administradores.') {
+    super(message);
+    this.name = 'ConsignadoForbiddenError';
+  }
+}
+
+async function requireConsignadoAdmin(requestedByEmail: unknown) {
+  const caller = normalizeEmail(String(requestedByEmail ?? ''));
+  if (!caller) throw new ConsignadoForbiddenError();
+  if (caller === FIXED_ACCESS_EMAIL) return;
+  try {
+    const dbFilePath = getSqlitePath();
+    const db = await openDatabase(dbFilePath);
+    ensureSchema(db);
+    const rows = readTableRows(db, 'consignado_access_emails', ['email', 'role']);
+    const match = rows.find((r) => normalizeEmail(typeof (r as any).email === 'string' ? (r as any).email : '') === caller);
+    if (!match) throw new ConsignadoForbiddenError();
+    const role = normalizeAccessRole((match as any).role);
+    if (role !== 'admin') throw new ConsignadoForbiddenError();
+  } catch (e) {
+    if (e instanceof ConsignadoForbiddenError) throw e;
+    safeLogError('requireConsignadoAdmin fallback', e);
+    throw new ConsignadoForbiddenError();
+  }
+}
+
 function toEmailSearchDisplayName(email: string): string {
   const normalized = normalizeEmail(email);
   const localPart = normalized.split('@')[0] || normalized;
@@ -25559,6 +26524,17 @@ const CONSIGNADO_MENU_PERMISSION_VALUES: ConsignadoMenuPermission[] = [
   'relatorios-auditoria',
   'configuracoes-automacao',
   'configuracoes-acessos',
+];
+
+const CONSIGNADO_USER_DEFAULT_MENU_PERMISSIONS: ConsignadoMenuPermission[] = [
+  'home',
+  'dashboard',
+  'fluxo-pendencias',
+  'conciliacao-extratos',
+  'conciliacao-relatorio',
+  'relatorios-valores',
+  'relatorios-ocorrencias',
+  'relatorios-auditoria',
 ];
 
 const CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES: ConsignadoFlowStagePermission[] = [
@@ -25746,7 +26722,10 @@ export async function setConsignadoAccessEmails(opts: {
     flowStages?: ConsignadoFlowStagePermission[];
   }>;
   emails?: string[];
+  deleteEmails?: string[];
+  requestedByEmail?: string;
 }) {
+  await requireConsignadoAdmin(opts.requestedByEmail);
   const dbFilePath = getSqlitePath();
   const db = await openDatabase(dbFilePath);
   ensureSchema(db);
@@ -25756,19 +26735,31 @@ export async function setConsignadoAccessEmails(opts: {
     : (opts.emails ?? []).map((email) => ({
         email,
         role: 'usuario' as const,
-        menus: [...CONSIGNADO_MENU_PERMISSION_VALUES],
+        menus: [...CONSIGNADO_USER_DEFAULT_MENU_PERMISSIONS],
         flowStages: [...CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES],
       }));
 
   const normalized = incomingEntries
-    .map((e) => ({
-      email: normalizeEmail(e.email),
-      role: normalizeAccessRole(e.role),
-      menus: normalizeMenuPermissions(e.menus),
-      flowStages: normalizeFlowStagePermissions(e.flowStages, false),
-    }))
+    .map((e) => {
+      const role = normalizeAccessRole(e.role);
+      const menusRaw = normalizeMenuPermissions(e.menus);
+      const menusFiltered = menusRaw.filter((m) => !String(m).startsWith('configuracoes-'));
+      return {
+        email: normalizeEmail(e.email),
+        role,
+        menus: role === 'admin'
+          ? menusRaw
+          : (menusFiltered.length > 0 ? menusFiltered : [...CONSIGNADO_USER_DEFAULT_MENU_PERMISSIONS]),
+        flowStages: normalizeFlowStagePermissions(e.flowStages, false),
+      };
+    })
     .filter((e) => Boolean(e.email))
     .filter((e, i, arr) => arr.findIndex((x) => x.email === e.email) === i);
+
+  const deleteNormalized = (opts.deleteEmails ?? [])
+    .map((email) => normalizeEmail(email))
+    .filter((email) => Boolean(email) && email !== FIXED_ACCESS_EMAIL)
+    .filter((email, i, arr) => arr.indexOf(email) === i);
 
   const fixedSaved = normalized.find((e) => e.email === FIXED_ACCESS_EMAIL);
   const fixedEntry = {
@@ -25779,29 +26770,44 @@ export async function setConsignadoAccessEmails(opts: {
       ? fixedSaved.flowStages
       : [...CONSIGNADO_FLOW_STAGE_PERMISSION_VALUES],
   };
-  const entries = normalized.some((e) => e.email === FIXED_ACCESS_EMAIL)
+  const entriesWithUpserts = normalized.some((e) => e.email === FIXED_ACCESS_EMAIL)
     ? normalized.map((e) => (e.email === FIXED_ACCESS_EMAIL ? fixedEntry : e))
     : [fixedEntry, ...normalized];
 
+  const entries = entriesWithUpserts.filter((e) => !deleteNormalized.includes(e.email));
+
   db.run('BEGIN;');
   try {
-    db.run('DELETE FROM consignado_access_emails;');
-    const createdAt = new Date().toISOString();
-    const stmt = db.prepare(
-      `INSERT OR IGNORE INTO consignado_access_emails (email, role, menu_permissions_json, flow_stage_permissions_json, created_at) VALUES (?, ?, ?, ?, ?);`,
-    );
-    try {
-      for (const e of entries) {
-        stmt.run([
-          e.email,
-          e.role,
-          JSON.stringify(e.menus),
-          JSON.stringify(e.flowStages),
-          createdAt,
-        ]);
+    if (deleteNormalized.length > 0) {
+      const del = db.prepare(`DELETE FROM consignado_access_emails WHERE email = ? AND email <> ?;`);
+      try {
+        for (const email of deleteNormalized) del.run([email, FIXED_ACCESS_EMAIL]);
+      } finally {
+        del.free();
       }
-    } finally {
-      stmt.free();
+    }
+    if (entries.length > 0) {
+      const createdAt = new Date().toISOString();
+      const stmt = db.prepare(
+        `INSERT INTO consignado_access_emails (email, role, menu_permissions_json, flow_stage_permissions_json, created_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(email) DO UPDATE SET
+           role = excluded.role,
+           menu_permissions_json = excluded.menu_permissions_json,
+           flow_stage_permissions_json = excluded.flow_stage_permissions_json;`,
+      );
+      try {
+        for (const e of entries) {
+          stmt.run([
+            e.email,
+            e.role,
+            JSON.stringify(e.menus),
+            JSON.stringify(e.flowStages),
+            createdAt,
+          ]);
+        }
+      } finally {
+        stmt.free();
+      }
     }
     db.run('COMMIT;');
   } catch (e) {
@@ -25817,6 +26823,47 @@ export async function setConsignadoAccessEmails(opts: {
   return {
     entries,
     emails: entries.map((e) => e.email),
+    deletedEmails: deleteNormalized,
+    fixedEmail: FIXED_ACCESS_EMAIL,
+    dbFilePath,
+  };
+}
+
+export async function deleteConsignadoAccessEmail(opts: {
+  email: string;
+  requestedByEmail?: string;
+}) {
+  await requireConsignadoAdmin(opts.requestedByEmail);
+  const email = normalizeEmail(opts.email);
+  if (!email) throw new Error('Informe o e-mail.');
+  if (email === FIXED_ACCESS_EMAIL) throw new ConsignadoForbiddenError('Não é permitido remover o e-mail fixo do administrador.');
+  const dbFilePath = getSqlitePath();
+  const db = await openDatabase(dbFilePath);
+  ensureSchema(db);
+  let changes = 0;
+  db.run('BEGIN;');
+  try {
+    const stmt = db.prepare(`DELETE FROM consignado_access_emails WHERE email = ? AND email <> ?;`);
+    try {
+      stmt.run([email, FIXED_ACCESS_EMAIL]);
+      changes = typeof db.getRowsModified === 'function' ? Number(db.getRowsModified() || 0) : 0;
+    } finally {
+      stmt.free();
+    }
+    db.run('COMMIT;');
+  } catch (e) {
+    try {
+      db.run('ROLLBACK;');
+    } catch {
+      void 0;
+    }
+    throw e;
+  }
+  persistDatabase(db, dbFilePath);
+  return {
+    email,
+    removed: changes > 0,
+    rowsAffected: changes,
     fixedEmail: FIXED_ACCESS_EMAIL,
     dbFilePath,
   };
@@ -26523,6 +27570,48 @@ function formatIsoToPtBrDateTime(iso: string | null): string {
   return `${dd}/${mm}/${yyyy} ${hh}:${mi}`;
 }
 
+export function parseBrNumber(v: unknown): number {
+  if (v === null || v === undefined || v === '') return 0;
+  if (typeof v === 'number' && !Number.isNaN(v)) return v;
+  let s = String(v)
+    .replace(/[^\d,.-]/g, '')
+    .replace(/\./g, '');
+  if (s.includes('-')) {
+    s = '-' + s.replace(/-/g, '');
+  }
+  s = s.replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function setExcelNumberCell(
+  cell: any,
+  value: unknown,
+  opts?: { currency?: boolean; decimals?: number },
+) {
+  const isCurrency = Boolean(opts?.currency);
+  const decimals =
+    typeof opts?.decimals === 'number' && Number.isFinite(opts.decimals)
+      ? Math.max(0, Math.min(6, Math.round(opts.decimals)))
+      : 2;
+  const n = parseBrNumber(value);
+  cell.value = n;
+  const zeroPadded = '0'.repeat(decimals);
+  const numFmt = isCurrency
+    ? decimals > 0
+      ? '"R$ " #,##0.' + zeroPadded + '_);[Red]-"R$ " #,##0.' + zeroPadded
+      : '"R$ " #,##0_);[Red]-"R$ " #,##0'
+    : decimals > 0
+    ? '#,##0.' + zeroPadded + ';[Red]-#,##0.' + zeroPadded
+    : '#,##0;[Red]-#,##0';
+  cell.numFmt = numFmt;
+  cell.alignment = {
+    vertical: cell.alignment?.vertical || 'top',
+    horizontal: 'right',
+    wrapText: Boolean(cell.alignment?.wrapText),
+  };
+}
+
 function sanitizeFileName(v: string): string {
   return String(v ?? '')
     .replace(/[\\/:*?"<>|]/g, '_')
@@ -26903,6 +27992,194 @@ async function sendImportFinishedEmailNotification(input: {
     out.attempted = out.attempted || true;
     out.sent = false;
     out.error = e instanceof Error ? e.message : String(e ?? 'Falha desconhecida ao enviar notificação.');
+    return out;
+  }
+}
+
+/**
+ * E-mail CONSOLIDADO do lote diário: um único e-mail com o resultado de todos os tipos/órgãos,
+ * em vez de um e-mail individual por tipo. Deve ser chamado apenas quando houver movimentação
+ * (algo importado/pulado) ou falha real.
+ */
+export async function sendConsolidatedImportEmailNotification(input: {
+  notificationTo: string | string[] | null | undefined;
+  executedAt?: Date;
+  perKind: Array<{
+    kind: string;
+    filesMatched: number;
+    rowsInserted: number;
+    rowsSkipped: number;
+    error?: string | null;
+  }>;
+  totalFilesScanned: number;
+  totalFilesMatched: number;
+  totalRowsInserted: number;
+  totalRowsSkipped: number;
+  mode?: string | null;
+}): Promise<{ attempted: boolean; sent: boolean; to: string[]; error?: string | null }> {
+  const out = { attempted: false, sent: false, to: [] as string[], error: null as string | null };
+  try {
+    const notificationFromEnv = String(process.env.NOTIFICATION_EMAIL_FROM ?? '').trim();
+    let recipients = splitEmailRecipients(input.notificationTo);
+    out.to = recipients;
+    if (recipients.length === 0) {
+      // Fallback: destinatários padrão salvos no DB, senão o remetente.
+      try {
+        const fallbackDbFile = getSqlitePath();
+        let dbFallback: any = null;
+        try {
+          dbFallback = await openDatabase(fallbackDbFile);
+          try { ensureSchema(dbFallback); } catch { /* ignore */ }
+          const primaryDbEmailRaw = String(getConsignadoAppConfigValue(dbFallback, CONFIG_KEY_NOTIFICATION_EMAIL) ?? '').trim();
+          const contabDbEmailRaw = String(getConsignadoAppConfigValue(dbFallback, CONFIG_KEY_NOTIFICATION_EMAIL_CONTABILIDADE) ?? '').trim();
+          const dbRecipients = splitEmailRecipients([primaryDbEmailRaw, contabDbEmailRaw].filter((s) => s && s.length > 0).join(', '));
+          if (dbRecipients.length > 0) { recipients = dbRecipients; out.to = dbRecipients; }
+        } finally {
+          try { if (dbFallback && typeof dbFallback.close === 'function') { dbFallback.close(); } } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+      if (recipients.length === 0 && notificationFromEnv) {
+        const lastResort = splitEmailRecipients(notificationFromEnv);
+        if (lastResort.length > 0) { recipients = lastResort; out.to = lastResort; }
+      }
+    }
+    if (recipients.length === 0) {
+      out.error = 'Nenhum destinatário de notificação configurado (nem input, nem DB notificationEmail, nem .env NOTIFICATION_EMAIL_FROM).';
+      return out;
+    }
+    out.attempted = true;
+    const tenantId = String(process.env.AZURE_TENANT_ID ?? '').trim();
+    const clientId = String(process.env.AZURE_CLIENT_ID ?? '').trim();
+    const clientSecret = String(process.env.AZURE_CLIENT_SECRET ?? '').trim();
+    const notificationFrom = notificationFromEnv;
+    if (!tenantId || !clientId || !clientSecret || !notificationFrom) {
+      out.error = 'Configuração de Graph/e-mail incompleta (tenantId/clientId/clientSecret/from).';
+      return out;
+    }
+    let token = '';
+    try { token = await getGraphToken({ tenantId, clientId, clientSecret }); }
+    catch (e) { out.error = `Falha ao obter token Graph: ${e instanceof Error ? e.message : String(e)}`; return out; }
+    if (!token) { out.error = 'Token Graph vazio.'; return out; }
+
+    const comMovimento = input.perKind.filter(
+      (k) => Number(k.filesMatched || 0) > 0 || Number(k.rowsInserted || 0) > 0 || Number(k.rowsSkipped || 0) > 0,
+    );
+    const comFalha = input.perKind.filter((k) => String(k.error ?? '').trim().length > 0);
+    // União (um tipo pode ter importado algo e ainda assim registrar erro).
+    const relevantes = Array.from(
+      new Map([...comFalha, ...comMovimento].map((k) => [k.kind, k])).values(),
+    ).sort((a, b) => a.kind.localeCompare(b.kind));
+    const outcome: 'success' | 'partial' | 'failed' =
+      comFalha.length > 0 && comMovimento.length === 0
+        ? 'failed'
+        : comFalha.length > 0 || Number(input.totalRowsSkipped || 0) > 0
+          ? 'partial'
+          : 'success';
+
+    const outcomeLabel: Record<string, { title: string; sub: string; accent: string; pill: string }> = {
+      success: { title: 'Importação diária concluída', sub: 'Todos os órgãos com movimentação foram processados.', accent: '#166534', pill: 'Sucesso' },
+      partial: { title: 'Importação diária parcial', sub: 'Houve linhas puladas e/ou falhas em alguns órgãos.', accent: '#92400e', pill: 'Parcial' },
+      failed: { title: 'Importação diária com falha', sub: 'Nenhum órgão importou e houve erro no processamento.', accent: '#991b1b', pill: 'Falha' },
+    };
+    const display = outcomeLabel[outcome];
+
+    const statusOf = (k: { rowsInserted: number; rowsSkipped: number; error?: string | null }): { label: string; color: string } => {
+      if (String(k.error ?? '').trim()) return { label: 'Falha', color: '#991b1b' };
+      const ins = Number(k.rowsInserted || 0);
+      const sk = Number(k.rowsSkipped || 0);
+      if (ins > 0 && sk > 0) return { label: 'Parcial', color: '#92400e' };
+      if (ins > 0) return { label: 'Importado', color: '#14532d' };
+      if (sk > 0) return { label: 'Pulado', color: '#9a3412' };
+      return { label: 'Sem novidade', color: '#334155' };
+    };
+
+    const tableRowsHtml = relevantes.length > 0
+      ? `<table width="100%" cellpadding="8" cellspacing="0" border="0" style="border-collapse:collapse;font-size:13px;color:#0f172a;background:#ffffff;border:1px solid #cbd5e1;border-radius:14px;overflow:hidden;">
+          <thead>
+            <tr style="background:#0f172a;color:#f8fafc;">
+              <th align="left" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Órgão</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Arquivos</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Inseridas</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Puladas</th>
+              <th align="center" style="padding:11px 14px;font-weight:900;border-bottom:1px solid #1e293b;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${relevantes.map((k, i) => {
+              const st = statusOf(k);
+              const rowBg = i % 2 === 0 ? '#ffffff' : '#f8fafc';
+              return `<tr style="background:${rowBg};color:#0f172a;">
+                <td style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:700;word-break:break-all;">${escapeHtml(k.kind)}</td>
+                <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#1e3a8a;">${Number(k.filesMatched || 0)}</td>
+                <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#0f766e;">${Number(k.rowsInserted || 0)}</td>
+                <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:#9a3412;">${Number(k.rowsSkipped || 0)}</td>
+                <td align="center" style="padding:10px 14px;border-bottom:1px solid #e2e8f0;font-weight:900;color:${st.color};">${st.label}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`
+      : `<div style="padding:16px 18px;border-radius:12px;background:#f1f5f9;border:1px dashed #cbd5e1;color:#334155;font-size:13px;font-weight:600;">Nenhum órgão teve movimentação nesta execução.</div>`;
+
+    const falhasHtml = comFalha.length > 0
+      ? `<div style="margin:0 0 22px;padding:16px 18px;border-radius:14px;background:#fef2f2;border:1px solid #fecaca;color:#7f1d1d;font-weight:600;">
+          <div style="font-weight:900;font-size:15px;margin-bottom:8px;">Falhas (${comFalha.length})</div>
+          <ul style="margin:0;padding-left:18px;font-size:13px;line-height:1.7;">
+            ${comFalha.map((k) => `<li><b>${escapeHtml(k.kind)}</b>: ${escapeHtml(String(k.error).slice(0, 600))}</li>`).join('')}
+          </ul>
+        </div>`
+      : '';
+
+    const cardsHtml = `
+      <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin:0 0 22px;">
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border:1px solid #93c5fd;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#1e3a8a;">Arquivos varridos</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${Number(input.totalFilesScanned || 0)}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#f0fdfa 0%,#ccfbf1 100%);border:1px solid #5eead4;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#0f766e;">Órgãos c/ movimento</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${comMovimento.length}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#ecfdf5 0%,#a7f3d0 100%);border:1px solid #4ade80;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#14532d;">Linhas inseridas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${Number(input.totalRowsInserted || 0)}</div>
+        </div>
+        <div style="padding:16px 18px;border-radius:14px;background:linear-gradient(135deg,#fffbeb 0%,#fde68a 100%);border:1px solid #fbbf24;">
+          <div style="font-size:11.5px;font-weight:900;letter-spacing:.03em;text-transform:uppercase;color:#92400e;">Linhas puladas</div>
+          <div style="font-size:24px;font-weight:900;letter-spacing:-.02em;margin-top:6px;color:#0f172a;">${Number(input.totalRowsSkipped || 0)}</div>
+        </div>
+      </div>`;
+
+    const contentHtml = `
+      ${cardsHtml}
+      ${falhasHtml}
+      <div style="margin:0 0 16px;font-weight:900;font-size:16px;color:#0f172a;letter-spacing:-.01em;">Detalhamento por órgão</div>
+      ${tableRowsHtml}
+      <div style="margin:20px 0 0;padding:12px 14px;border-radius:12px;background:#f8fafc;border:1px solid #cbd5e1;color:#475569;font-size:12px;font-weight:600;">
+        Modo: ${escapeHtml(String(input.mode ?? 'append'))} • Órgãos varridos: ${input.perKind.length} • Gerado em ${escapeHtml(formatDatePtBr(input.executedAt ?? new Date()))}
+      </div>`;
+
+    const html = buildEmailTemplateHtml({
+      title: display.title,
+      subtitle: `${display.sub} • ${comMovimento.length} órgão(s) com movimentação`,
+      contentHtml,
+      introHtml: `<div style="display:inline-block;padding:5px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.04em;text-transform:uppercase;background:${display.accent};color:#ffffff;">${display.pill}</div>`,
+    });
+    const dataIso = (input.executedAt ?? new Date()).toISOString().replace('T', ' ').slice(0, 16);
+    const subject = `[Portal Administrativo] Importação diária ${display.pill.toUpperCase()} • ${comMovimento.length} órgão(s) (${dataIso})`;
+    await sendGraphMail({
+      token,
+      from: notificationFrom,
+      to: recipients,
+      subject,
+      html,
+      importance: outcome === 'success' ? 'normal' : 'high',
+    });
+    out.sent = true;
+    return out;
+  } catch (e) {
+    out.attempted = out.attempted || true;
+    out.sent = false;
+    out.error = e instanceof Error ? e.message : String(e ?? 'Falha desconhecida ao enviar notificação consolidada.');
     return out;
   }
 }
@@ -28309,10 +29586,10 @@ function __dbg_loaded(scope: { env?: boolean; reportFn?: boolean }): {
   sessionId: string;
   report: (hyp: string, loc: string, msg: string, data: Record<string, unknown>) => void;
 } {
-  const envFilePath = '/var/www/html/Portal-Administrativo/.dbg/adfego-import.env';
-  const ndjsonFilePath = '/var/www/html/Portal-Administrativo/.dbg/trae-debug-log-adfego-import.ndjson';
+  const envFilePath = '/var/www/html/Portal-Administrativo/.dbg/tce-recurso-import.env';
+  const ndjsonFilePath = '/var/www/html/Portal-Administrativo/.dbg/trae-debug-log-tce-recurso-import.ndjson';
   let serverUrl = 'http://127.0.0.1:7777/event';
-  let sessionId = 'adfego-import';
+  let sessionId = 'tce-recurso-import';
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const fs = require('fs') as typeof import('fs');
@@ -28403,6 +29680,12 @@ function findLearningProfilesFor(db: Database, url: string, forceKind?: string):
         if (i.startsWith('extratos_tre_trt')) return 30;
         if (i.startsWith('extratos_tre')) return 20;
         if (i.startsWith('extratos_trt')) return 20;
+        // Perfis específicos de layout de extrato conta corrente (ADFEGO/ELETRA/TODOS):
+        // precisam vencer o genérico extratos_recurso (score 10), senão o arquivo cai no
+        // pipeline flexível e escolhe abas/colunas erradas (ex.: AJUSTES/COOPERADOS no ELETRA).
+        if (i.startsWith('extratos_adfego')) return 25;
+        if (i.startsWith('extratos_eletra') || i.startsWith('extratos_eletro')) return 25;
+        if (i.startsWith('extratos_todos')) return 25;
         if (i.startsWith('extratos_recurso')) return 10;
         if (i.startsWith('recurso_tre')) return 5;
         if (i.startsWith('recurso_trt')) return 5;
@@ -28495,9 +29778,10 @@ function addMissingColumnsAndImportRows(
       return { insertedRows: 0, skippedRows: 0 };
     }
   }
-  const existing = new Set(getTableColumns(db, tableName));
+  const existingArr = getTableColumns(db, tableName);
+  const existingLower = new Set(existingArr.map((c) => String(c ?? '').toLowerCase()));
   const extraKeys = extraStaticColumns ? Object.keys(extraStaticColumns) : [];
-  const needed = [...headers, ...extraKeys].filter((h) => h && !existing.has(h));
+  const needed = [...headers, ...extraKeys].filter((h) => h && !existingLower.has(String(h).toLowerCase()));
   for (const col of needed) {
     try {
       // ======== REGRA SQL.js NÃO PERMITE ALTER TABLE DENTRO DE BEGIN ========
@@ -28511,7 +29795,8 @@ function addMissingColumnsAndImportRows(
     }
   }
   const finalCols = getTableColumns(db, tableName);
-  const importCols = [...headers, ...extraKeys].filter((h) => finalCols.includes(h));
+  const finalColsLower = finalCols.map((c) => String(c ?? '').toLowerCase());
+  const importCols = [...headers, ...extraKeys].filter((h) => finalColsLower.includes(String(h).toLowerCase()));
   if (mode === 'replace') {
     const del = db.prepare(`DELETE FROM ${escapeSqlIdentifier(tableName)};`);
     try { del.run([] as unknown as any[]); } finally { try { del.free(); } catch { /* ignore */ } }
@@ -28529,6 +29814,21 @@ function addMissingColumnsAndImportRows(
     ? db.prepare(`INSERT OR IGNORE INTO imported_row_hashes (kind, row_hash, imported_at) VALUES (?, ?, ?);`)
     : null;
   const kind = `learning_profile:${tableName}`;
+  // #region debug-point tce-import-addMissing
+  const __dbgTce = tableName === 'Recurso TCE' ? __dbg_loaded({ env: true }) : null;
+  if (__dbgTce) {
+    __dbgTce.report('D', 'import-consignado.ts:addMissingColumnsAndImportRows', 'tce addMissingColumnsAndImportRows start', {
+      tableName,
+      kind,
+      mode,
+      checkDuplicateContent,
+      importColsLen: importCols.length,
+      importColsPreview: importCols.slice(0, 30),
+      rowsLen: rows.length,
+    });
+  }
+  let __dbgTceRowIdx = 0;
+  // #endregion
   try {
     _tryCommitMaybeRestartTx(true);
     for (const row of rows) {
@@ -28556,6 +29856,19 @@ function addMissingColumnsAndImportRows(
         hashExists.bind([kind, rh] as unknown as any[]);
         const found = hashExists.step();
         try { hashExists.reset(); } catch { /* ignore */ }
+        // #region debug-point tce-import-rowhash
+        if (__dbgTce && __dbgTceRowIdx < 3) {
+          __dbgTce.report('D', 'import-consignado.ts:addMissingColumnsAndImportRows:row', 'tce row hash check', {
+            rowIdx: __dbgTceRowIdx,
+            rowHashPrefix: String(rh).slice(0, 16),
+            found,
+            copetencia: String(row['Copetencia'] ?? '').slice(0, 20),
+            cpf: String(row['CPF'] ?? '').slice(0, 20),
+            nome: String(row['Nome'] ?? '').slice(0, 60),
+          });
+        }
+        __dbgTceRowIdx += 1;
+        // #endregion
         if (found) {
           skippedRows += 1;
           continue;
@@ -28565,6 +29878,15 @@ function addMissingColumnsAndImportRows(
       ins.run(vals as unknown as any[]);
       insertedRows += 1;
     }
+    // #region debug-point tce-import-addMissing-end
+    if (__dbgTce) {
+      __dbgTce.report('D', 'import-consignado.ts:addMissingColumnsAndImportRows', 'tce addMissingColumnsAndImportRows end', {
+        tableName,
+        insertedRows,
+        skippedRows,
+      });
+    }
+    // #endregion
     try { db.run('COMMIT;'); } catch (e) {
       const msg = e instanceof Error ? e.message : String(e ?? '');
       if (!msg.includes('no transaction is active') && !msg.includes('cannot commit - no transaction is active')) {
@@ -28587,6 +29909,9 @@ export async function importByLearningProfileFromFolderUrl(opts: {
   forceKind?: string;
   forceMode?: 'append' | 'replace';
   notificationTo?: string | string[];
+  // Quando true, não envia o e-mail individual deste tipo (o chamador — lote diário —
+  // envia um único e-mail consolidado ao final). Os contadores/erro continuam retornados.
+  suppressPerKindNotification?: boolean;
 }, ctxOpts?: {
   onProgressHook?: (partial: { importedFiles: unknown[]; totalFilesScanned?: number; totalFilesMatched?: number; totalRowsInserted?: number; totalRowsSkipped?: number; snapshotPath?: string }) => void;
   cancellationRequested?: () => boolean;
@@ -29136,7 +30461,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
     }
 
-    if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder && (forceKindExtratos || forceKindRelatorio)) {
+    if (!specificFile && rootFolderId && driveId && !userProvidedSpecificTargetFolder && (forceKindExtratos || forceKindRelatorio || isOrgaoKind(forceKindLower))) {
       try {
         const defaultSubfoldersForDef: string[] = [];
         if (forceKindExtratos) {
@@ -29154,7 +30479,6 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             'SISBR',
             'sisbr',
           );
-          // Se tiver um learning profile para relatorio no BD com folderCandidates customizado, usa também (redundância segura)
           try {
             const profileRelatorio = profiles.find((p) => String(p.kind ?? '').trim().toLowerCase() === 'relatorio');
             if (profileRelatorio?.resolvedOptions && Array.isArray((profileRelatorio.resolvedOptions as { folderCandidates?: string[] }).folderCandidates)) {
@@ -29164,13 +30488,28 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             }
           } catch { /* ignore */ }
         }
+        if (isOrgaoKind(forceKindLower)) {
+          defaultSubfoldersForDef.push('Relatório Orgão', 'Relatorio Orgao', 'Relatorio Orgão', 'Relatório Orgao');
+          for (const p of profiles) {
+            const pk = String(p.kind ?? '').trim().toLowerCase();
+            if (pk === forceKindLower) {
+              try {
+                const pOpts = (p.resolvedOptions ?? {}) as Record<string, unknown>;
+                const fc = Array.isArray(pOpts.folderCandidates) ? (pOpts.folderCandidates as unknown[]) : [];
+                for (const c of fc) if (typeof c === 'string' && c.trim()) defaultSubfoldersForDef.push(c.trim());
+              } catch { /* ignore */ }
+              break;
+            }
+          }
+        }
         const expanded = await expandRecursoExtratosAnoMesCorrenteCandidates({
           token: accessToken,
           driveId,
           baseFolderId: rootFolderId,
           basePath: String(resolved?.folderPath ?? resolvedItemName ?? '').trim(),
           subfolderCandidates: defaultSubfoldersForDef,
-          permitirPdfSisbr: forceKindRelatorio,
+          permitirPdfSisbr: forceKindRelatorio || (forceKindLower === 'recurso_mpgo'),
+          permitirPdfOrgao: isOrgaoKind(forceKindLower),
         });
         for (const e of expanded) {
           totalFilesScanned += 1;
@@ -29193,6 +30532,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         const queue: Array<{ id: string; depth: number; path: string }> = [{ id: rootFolderId, depth: 0, path: resolvedItemName }];
         const visited = new Set<string>();
         const isDoc = (n: string) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(n ?? '').trim());
+        const isOrgaoKindCur = isOrgaoKind(forceKindLower);
         while (queue.length > 0) {
           const cur = queue.shift();
           if (!cur) break;
@@ -29205,7 +30545,17 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             children = [];
           }
           for (const c of children) {
-            if (c.file && isDoc(String(c.name ?? ''))) {
+            const cName = String(c.name ?? '').trim();
+            const lcName = normalizeNameForMatch(cName);
+            const keepAsDoc = Boolean(c.file) && (
+              isDoc(cName) ||
+              (/\.(pdf)$/i.test(cName) && (
+                lcName.includes('sisbr') ||
+                (isOrgaoKindCur && (lcName.includes('mpgo') || lcName.includes('alego') || lcName.includes('adfego') || lcName.includes('eletra') || lcName.includes('tjgo') || lcName.includes('tce') || lcName.includes('tcm') || lcName.includes('tre') || lcName.includes('trt') || lcName.includes('neoconsig'))) ||
+                (normalizeNameForMatch(cur.path).includes('relatorio orgao'))
+              ))
+            );
+            if (keepAsDoc) {
               totalFilesScanned += 1;
               pushCandidate({
                 id: c.id,
@@ -29307,6 +30657,19 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             isSisbrPdfForce = true;
           }
         }
+        // #region debug-point S:sisbr-virtual-profile
+        {
+          const __dbg = __dbg_loaded({ env: true });
+          __dbg.report('S/H2', 'import-consignado.ts:29317', 'S:relatorio virtual profile decision', {
+            fileName: String(file.name ?? ''),
+            folderPath: String((file as any).folderPath ?? ''),
+            isDocForce,
+            isPdf: isPdfFile(String(file.name ?? '')),
+            isSisbrPdfForce,
+            forceKindLower,
+          });
+        }
+        // #endregion
         if (isDocForce || isSisbrPdfForce) {
           profile = {
             id: `__virtual_relatorio_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
@@ -29388,12 +30751,25 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
       if (fileContentSha256) {
         const prev = isFileAlreadyImportedByContentHash(db, fileContentSha256);
+        // #region debug-point tce-import-hash
+        if (forceKindLower === 'recurso_tce') {
+          const __dbg = __dbg_loaded({ env: true });
+          __dbg.report('A', 'import-consignado.ts:content-hash', 'tce content hash lookup', {
+            fileName: String((file as any)?.name ?? ''),
+            fileId: String((file as any)?.id ?? ''),
+            sha256: String(fileContentSha256).slice(0, 64),
+            prevImported: Boolean((prev as any)?.imported),
+            prevAt: (prev as any)?.at ?? null,
+          });
+        }
+        // #endregion
         if (prev.imported && !forceKindExtratos) {
           const atLabel = prev.at
             ? new Date(prev.at).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
             : 'anteriormente';
           const kindLowerIdem = String(profile.kind ?? '').toLowerCase();
-          const moveToImportadosDefaultForKindIdem = kindLowerIdem === 'relatorio' || kindLowerIdem === 'extratos' || kindLowerIdem === 'recurso_adfego' || kindLowerIdem === 'recurso_eletra' || kindLowerIdem === 'recurso_neoconsig_demais';
+          if (kindLowerIdem !== 'relatorio' && kindLowerIdem !== 'recurso_tcm') {
+          const moveToImportadosDefaultForKindIdem = kindLowerIdem === 'relatorio' || kindLowerIdem === 'extratos' || kindLowerIdem === 'recurso_adfego' || kindLowerIdem === 'recurso_eletra' || kindLowerIdem === 'recurso_tce' || kindLowerIdem === 'recurso_neoconsig_demais';
           const moveToImportadosIdem = profile.resolvedOptions?.moveToImportadosSubfolderAfterImport === false
             ? false
             : Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? moveToImportadosDefaultForKindIdem);
@@ -29481,8 +30857,20 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             headers: [],
             skippedReason: `idempotente: bytes idênticos já importados em ${atLabel}`,
           });
+          // #region debug-point tce-import-idempotent
+          if (forceKindLower === 'recurso_tce') {
+            const __dbg = __dbg_loaded({ env: true });
+            __dbg.report('A', 'import-consignado.ts:idempotent-bytes', 'tce skipped by idempotent bytes', {
+              fileName: String((file as any)?.name ?? ''),
+              fileId: String((file as any)?.id ?? ''),
+              atLabel,
+              kindLowerIdem,
+            });
+          }
+          // #endregion
           totalRowsSkipped += 0;
           continue;
+          }
         }
       }
 
@@ -29527,7 +30915,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       const strictMinMatches = Number(profile.resolvedOptions?.strictColumnMinMatches ?? 5) || 0;
       const extractCompet = Boolean(profile.resolvedOptions?.extractCompetenciaFromTopHeader ?? false);
       // Mover para Importados: default TRUE quando kind=relatorio (regra oficial), a menos que explicitamente desativado via resolvedOptions.
-      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_neoconsig_demais';
+      const moveToImportadosDefaultForKind = kindLower === 'relatorio' || kindLower === 'extratos' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_tce' || kindLower === 'recurso_neoconsig_demais';
       const moveToImportados = profile.resolvedOptions?.moveToImportadosSubfolderAfterImport === false
         ? false
         : Boolean(profile.resolvedOptions?.moveToImportadosSubfolderAfterImport ?? moveToImportadosDefaultForKind);
@@ -29548,9 +30936,78 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       }
 
       // ============================================================
+      // PLUGIN SYSTEM (Strategy Pattern): PRIORIDADE MÁXIMA sobre o pipeline genérico.
+      // Se perfil.options contiver pluginId OU o plugin der matches automático para (kind, fileName),
+      // EXECUTA SOMENTE o plugin e PULA TODOS os blocos compartilhados abaixo (aliases TRT/TRE/TCM
+      // que causaram RC7 em Recurso MPGO, strict whitelist genérico etc.).
+      // Rollback atômico: se profile não tiver pluginId → código antigo executa IDÊNTICO (0 risco regressão).
+      // ============================================================
+      let resolvedPlugin: ConsignadoImportPlugin | null = null;
+      let pluginRanResult: {
+        headers: string[];
+        rows: Array<Record<string, unknown>>;
+        extractedCompetenciaMmAaaa: string | null;
+        topHeaderLines: string[];
+        skipAliases?: boolean;
+        skipWhitelist?: boolean;
+        overrideCompetenciaFileNameFallbacks?: boolean;
+      } | null = null;
+      let pluginSkipAliases = false;
+      let pluginSkipWhitelist = false;
+      let pluginOverrideCompetFallbacks = false;
+      try {
+        resolvedPlugin = resolveImportPluginByOptions(
+          (profile.resolvedOptions ?? {}) as Record<string, unknown>,
+          kindLower,
+          String(file.name ?? ''),
+        );
+        if (resolvedPlugin) {
+          const pluginCfg = pluginConfigFromOptions(
+            (profile.resolvedOptions ?? {}) as Record<string, unknown>,
+          );
+          const __dbg = __dbg_loaded({ env: true });
+          const pluginCtx = {
+            fileName: String(file.name ?? ''),
+            folderPath: (file as any)?.folderPath ?? null,
+            profileOptions: (profile.resolvedOptions ?? {}) as Record<string, unknown>,
+            profilePluginConfig: pluginCfg,
+            runProcess,
+            cliPdfTextFallback,
+            extractPdf,
+            __dbg: {
+              report: (id: string, location: string, message: string, data?: unknown) => {
+                try { __dbg.report(id, location, message, data ? (data as Record<string, unknown>) : {}); } catch { /* ignore */ }
+              },
+            },
+          };
+          const r = await runImportPlugin(resolvedPlugin, buffer, pluginCtx as any);
+          pluginRanResult = {
+            headers: r.headers ?? [],
+            rows: r.rows ?? [],
+            extractedCompetenciaMmAaaa: r.extractedCompetenciaMmAaaa ?? null,
+            topHeaderLines: r.topHeaderLines ?? [],
+            skipAliases: Boolean(r.skipAliases),
+            skipWhitelist: Boolean(r.skipWhitelist),
+            overrideCompetenciaFileNameFallbacks: Boolean(r.overrideCompetenciaFileNameFallbacks),
+          };
+          pluginSkipAliases = Boolean(pluginRanResult.skipAliases);
+          pluginSkipWhitelist = Boolean(pluginRanResult.skipWhitelist);
+          pluginOverrideCompetFallbacks = Boolean(pluginRanResult.overrideCompetenciaFileNameFallbacks);
+        }
+      } catch (pluginErr) {
+        safeLogError('plugin-system:runImportPlugin failed — fallback pipeline genérico', pluginErr);
+        resolvedPlugin = null;
+        pluginRanResult = null;
+        pluginSkipAliases = false;
+        pluginSkipWhitelist = false;
+        pluginOverrideCompetFallbacks = false;
+      }
+
+      // ============================================================
       // SWITCH EXCLUSIVO SISBR PDF — SOMENTE aqui, sem impactar outros fluxos:
       // Condição de ativação (TODAS): kind=relatorio AND arquivo=PDF AND (pasta com "sisbr" OU perfil BD=relatorio_orgao_sisbr)
       // Qualquer outro caso → Excel via SheetJS readSheetTable.
+      // SE PLUGIN JÁ RODOU → ignora esse switch (plugin tem prioridade).
       // ============================================================
       const temSisbrNaPasta: boolean = (() => {
         const k = normalizeNameForMatch(String((file as any).folderPath ?? ''));
@@ -29562,26 +31019,62 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         const magic = buffer.indexOf(Buffer.from('%PDF'));
         return magic !== -1 && magic < 1024;
       })();
-      const usarParserPdfSisbr = kindLower === 'relatorio' && ehPdfReal && (temSisbrNaPasta || perfilSisbrExplicito);
+      const usarParserPdfSisbr = !pluginRanResult && kindLower === 'relatorio' && ehPdfReal && (temSisbrNaPasta || perfilSisbrExplicito);
+      // RC-MPGO-PDF-2026-10-01: Parser PDF ESPECÍFICO para kind=recurso_mpgo em pasta Relatório Orgão/MPGO
+      // (NÃO conflita com D5 pois kind !== 'relatorio') → evita passar pelo XLSX.readSheetTable genérico (binário)
+      // que gera headers BUGADOS com caracteres binários (33 colunas) e linhas todas NULL com 0 valores.
+      // SE PLUGIN JÁ RODOU → ignorar (plugin tem prioridade).
+      const usarParserPdfMpgo = !pluginRanResult && kindLower === 'recurso_mpgo' && ehPdfReal && !temSisbrNaPasta && !perfilSisbrExplicito;
+      if (usarParserPdfSisbr && usarParserPdfMpgo) {
+        // Blindagem anti-regressão: se SISBR explicitou (por algum motivo o PDF caiu nas duas regras)
+        // prevalece D5 (o oficial para SISBR). Desliga o MPGO neste caso único.
+        (usarParserPdfMpgo as any) = false;
+      }
+      // #region debug-point S:sisbr-switch
+      {
+        const __dbg = __dbg_loaded({ env: true });
+        __dbg.report('S/H3', 'import-consignado.ts:29570', 'S:sisbr switch decision', {
+          fileName: String(file.name ?? ''),
+          folderPath: String((file as any).folderPath ?? ''),
+          kindLower,
+          ehPdfReal,
+          temSisbrNaPasta,
+          perfilSisbrExplicito,
+          usarParserPdfSisbr,
+          usarParserPdfMpgo,
+          usedPlugin: Boolean(pluginRanResult),
+          resolvedPluginId: (resolvedPlugin as any)?.pluginId ?? null,
+          profileId: profile.id,
+        });
+      }
+      // #endregion
 
+      const __prefSheetsRaw = (profile.resolvedOptions as { preferredSheetNames?: unknown } | null | undefined)?.preferredSheetNames;
+      const __preferredSheetNames: string[] | undefined = Array.isArray(__prefSheetsRaw)
+        ? (__prefSheetsRaw as unknown[]).filter((v) => typeof v === 'string').map((v) => String(v))
+        : undefined;
       const parsedFinal: {
         headers: string[];
         rows: Array<Record<string, unknown>>;
         extractedCompetenciaMmAaaa: string | null;
         topHeaderLines: string[];
-      } = usarParserPdfSisbr
-        ? (() => {
-            // IIFE async não é necessário aqui abaixo, pois já estamos num escopo async com await.
-            // No entanto, para satisfazer TypeScript sem asserção bruta, montamos inline:
-            // (será sobreescrito abaixo com await para evitar Promises não resolvidas)
-            return {
-              headers: [],
-              rows: [],
-              extractedCompetenciaMmAaaa: null as string | null,
-              topHeaderLines: [] as string[],
-            };
-          })()
-        : readSheetTable(buffer, profile.kind);
+      } = pluginRanResult
+        ? {
+            headers: (pluginRanResult.headers ?? []).slice(),
+            rows: (pluginRanResult.rows ?? []).slice(),
+            extractedCompetenciaMmAaaa: pluginRanResult.extractedCompetenciaMmAaaa ?? null,
+            topHeaderLines: (pluginRanResult.topHeaderLines ?? []).slice(),
+          }
+        : (usarParserPdfSisbr || usarParserPdfMpgo
+            ? (() => {
+                return {
+                  headers: [],
+                  rows: [],
+                  extractedCompetenciaMmAaaa: null as string | null,
+                  topHeaderLines: [] as string[],
+                };
+              })()
+            : readSheetTable(buffer, profile.kind, __preferredSheetNames));
 
       // Resolver definitivamente (escopo já é async):
       if (usarParserPdfSisbr) {
@@ -29590,6 +31083,279 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         (parsedFinal as any).rows = pdf.rows;
         (parsedFinal as any).extractedCompetenciaMmAaaa = null;
         (parsedFinal as any).topHeaderLines = [];
+        // #region debug-point S:sisbr-parse-result
+        {
+          const __dbg = __dbg_loaded({ env: true });
+          __dbg.report('S/H4', 'import-consignado.ts:29607', 'S:sisbr parse result', {
+            fileName: String(file.name ?? ''),
+            rows: Array.isArray(pdf?.rows) ? pdf.rows.length : null,
+            headers: Array.isArray(pdf?.headers) ? pdf.headers.slice(0, 12) : null,
+          });
+        }
+        // #endregion
+      } else if (usarParserPdfMpgo) {
+        // #region debug-point MPGO:pdf-parse-init
+        const __dbg = __dbg_loaded({ env: true });
+        const fileNameStr = String(file.name ?? '');
+        __dbg.report('MPGO/H1', 'import-consignado.ts:mpgo-pdf-init-v2-posicional', 'M: Iniciando parser PDF MPGO ESPECÍFICO v2 (layout posicional / largura fixa)', {
+          fileName: fileNameStr,
+          fileSizeBytes: buffer?.length ?? 0,
+        });
+        // #endregion
+        // (1) Extrair texto do PDF com FALLBACK pdftotext -layout:
+        //     O layout do MPGO é de colunas FIXAS (offset por caractere), PORTANTO pdftotext -layout
+        //     é ESSENCIAL para preservar os espaços das colunas (pdf-parse inverte colunas!).
+        // RC FIX 2026-10-01: pdf-parse retorna 80k chars NÃO-colapsados MAS com colunas INVERTIDAS,
+        // NÃO dispara applyCliFallbackIfNeeded (emptyish=false). Portanto, FORÇAR CLI fallback
+        // pdftotext -layout DIRETAMENTE para MPGO.
+        let pdfExtract = await extractPdf(buffer);
+        let metodoUsado = 'extractPdf-default';
+        try {
+          const fbRes = await cliPdfTextFallback(buffer);
+          if (fbRes && typeof (fbRes as any).text === 'string') {
+            const fbTxt = String((fbRes as any).text ?? '');
+            if (fbTxt.replace(/\s+/g, '').length > 500) {
+              pdfExtract = { text: fbTxt, pages: [] } as any;
+              metodoUsado = 'cliPdfTextFallback-pdftotext-layout-FORCADO-MPGO';
+            }
+          }
+        } catch (fbErr) {
+          __dbg.report('MPGO/H1b', 'import-consignado.ts:mpgo-cli-fallback', 'W: cliPdfTextFallback falhou, usando extractPdf original', { err: fbErr instanceof Error ? fbErr.message : String(fbErr ?? '') });
+        }
+        const pdfText = String(pdfExtract?.text ?? '');
+        const allLines = pdfText.split(/\r?\n/g);
+        const nLinhas = allLines.length;
+        __dbg.report('MPGO/H2', 'import-consignado.ts:mpgo-pdf-lines', 'M: texto pdf extraído', {
+          totalLines: nLinhas,
+          metodo: metodoUsado,
+          textoChars: pdfText.length,
+          sampleFirst12: allLines.slice(0, 12),
+        });
+
+        // ===== Helper interno parser MPGO posicional =====
+        const EXTRACT_MPGO_REGEX_CPF = /(\d{3}\.\d{3}\.\d{3}\-\d{2})/;
+        const EXTRACT_MPGO_REGEX_MAT_INI = /^\s*(\d+)\s*\-\s*/;
+        const EXTRACT_MPGO_REGEX_VALOR = /^\d{1,3}(?:\.\d{3})*(?:,\d{2})$/;
+        const MPGO_BLACKLIST_RODAPE = /(SISTEMA DIGITAL DE CONSIGNAÇÕES|ESTE RELATÓRIO NÃO É VÁLIDO|Relatório de Movimento Financeiro|Consignatária:|Órgão:|Sub-órgão:|Unidade:|Natureza|Estabelecimento|ÓRGÃO:\s|CORRESP\.|SERVIÇO|Nº ADE|DATA INC\.|SIT\. DO CONTRATO|CAT\. DO|Subtotal\s+de\s+registros|Subtotal\s+vlr|Sub\s*total|SOMA\s*TOTAL|Total\s+geral|Totais\s+gerais|Página\s+\d+\s+de\s+\d+|Relatório\s+emitido\s+em|Sistema\s+de\s+Consignações)/i;
+        const MPGO_BLACKLIST_TOTAL = /^\s*(total|totais|somatório|sumário|resumo|observação|observa[çc][õo]es|legenda|subtotal|sub\s*total|soma\s+total|total\s+geral|totais\s+gerais)\b/i;
+
+        const _extrairCPF = (t: string): string => { const m = EXTRACT_MPGO_REGEX_CPF.exec(t || ''); return m ? m[1] : ''; };
+        const _extrairMat = (t: string): string => { const m = EXTRACT_MPGO_REGEX_MAT_INI.exec(t || ''); return m ? m[1] : ''; };
+        const _extrairNomeLinha1 = (t: string): string => {
+          const m = /^\s*\d+\s*\-\s*(.*)$/.exec(t || '');
+          return (m ? m[1] : (t || '')).trim().replace(/\s*\-\s*$/, '');
+        };
+        const _extrairNomeLinha2AntesCPF = (t: string): string => {
+          const cpf = _extrairCPF(t);
+          if (!cpf) return (t || '').trim().replace(/\s*\-\s*$/, '');
+          const idx = t.indexOf(cpf);
+          return t.slice(0, idx).replace(/\s*\-\s*$/, '').trim();
+        };
+        const _splitDataIncIni = (s: string): [string, string] => {
+          const str = String(s || '').trim();
+          const m = /^(\d{2}\/\d{2}\/\d{4})\s*(.*)$/.exec(str);
+          if (!m) return [str, ''];
+          const inc = m[1];
+          const resto = m[2].trim();
+          const mini = /^(\d{2}\/\d{4})/.exec(resto);
+          return [inc, mini ? mini[1] : resto];
+        };
+        const _splitValorPrz = (s: string): [string, string] => {
+          const str = String(s || '').trim();
+          const m = /^(\d{1,3}(?:\.\d{3})*(?:,\d{2}))\s*(.*)$/.exec(str);
+          if (!m) return [str, ''];
+          const v = m[1];
+          const prz = (m[2].trim().split(/\s+/)[0] || '');
+          return [v, prz];
+        };
+        const _colSlice = (ln: string, off: number, nxt: number, ml: number): string => {
+          const nxtF = typeof nxt === 'number' && !isNaN(nxt) ? nxt : (typeof ml === 'number' ? ml : (ln || '').length);
+          return ((ln || '').slice(typeof off === 'number' && !isNaN(off) ? off : 0, nxtF)).trim();
+        };
+        const _isLinhaDadosPrincipal = (ln: string): boolean => {
+          if (!ln || !ln.trim()) return false;
+          if (MPGO_BLACKLIST_TOTAL.test(ln)) return false;
+          if (!EXTRACT_MPGO_REGEX_MAT_INI.test(ln)) return false;
+          if (!/\d{2}\/\d{2}\/\d{4}/.test(ln)) return false;
+          if (!/\d{1,3}(?:\.\d{3})*(?:,\d{2})/.test(ln)) return false;
+          return true;
+        };
+
+        // (2) Detectar linhas principais (dados), sem offsets ainda
+        const linhasPrincipaisIdx: number[] = [];
+        for (let i = 0; i < nLinhas; i++) if (_isLinhaDadosPrincipal(allLines[i] || '')) linhasPrincipaisIdx.push(i);
+        __dbg.report('MPGO/H2b', 'import-consignado.ts:mpgo-posicional-deteccao', 'M: detecção linhas dados principais', { qtde: linhasPrincipaisIdx.length });
+
+        // (3) Calcular offsets posicional FIXOS baseados nas PRIMEIRAS 30 linhas de DADOS (não no header centralizado!)
+        let offsets: number[] = [];
+        let maxLen = 0;
+        if (linhasPrincipaisIdx.length >= 3) {
+          const N = Math.min(30, linhasPrincipaisIdx.length);
+          const sample = linhasPrincipaisIdx.slice(0, N).map(i => allLines[i] || '');
+          maxLen = Math.max(...sample.map(l => l.length));
+          const nonEmpty = new Set<number>();
+          for (let p = 0; p < maxLen; p++) {
+            for (const ln of sample) { const c = (ln[p] || ' '); if (c !== ' ') { nonEmpty.add(p); break; } }
+          }
+          const sorted = Array.from(nonEmpty).sort((a,b)=>a-b);
+          for (let i = 0; i < sorted.length; i++) {
+            if (i === 0) { offsets.push(sorted[i]); continue; }
+            if (sorted[i] - sorted[i-1] > 2) offsets.push(sorted[i]);
+          }
+        }
+        const CANONICAL_MPGO_HEADER = [
+          'CPF', 'Nome', 'Matricula', 'Copetencia', 'Valor Parcela', 'Orgao',
+          'Corresp', 'Servico', 'No ADE', 'Data Inc', 'Data Ini', 'Data Fim',
+          'Vlr. ADE', 'PRZ', 'PGT', 'No Parc', 'Sit. Contrato', 'Sit. Parcela',
+          'Cat. Servidor'
+        ];
+        const headersMpgo: string[] = CANONICAL_MPGO_HEADER.slice();
+
+        // (4) Para cada linha principal, montar registro combinando L1 (dados) + L2 (nome continuação + CPF) + verticais (órgão)
+        const rowsOut: Array<Record<string, unknown>> = [];
+        let lastOffsetsLen = offsets.length;
+        for (let r = 0; r < linhasPrincipaisIdx.length; r++) {
+          const iL1 = linhasPrincipaisIdx[r];
+          const l1 = allLines[iL1] || '';
+          const iL2 = iL1 + 1;
+          const l2 = (allLines[iL2] || '');
+          const proxL1 = (r + 1 < linhasPrincipaisIdx.length) ? linhasPrincipaisIdx[r+1] : nLinhas;
+          // Linhas verticais (órgão / cat servidor continuado) entre L2+1 e proxL1
+          const verticais: string[] = [];
+          for (let k = iL2 + 1; k < proxL1; k++) {
+            const lk = allLines[k] || '';
+            if (!lk.trim()) continue;
+            if (MPGO_BLACKLIST_RODAPE.test(lk)) continue;
+            if (MPGO_BLACKLIST_TOTAL.test(lk)) continue;
+            verticais.push(lk);
+          }
+          // Extrair colunas FIXAS
+          let colsL1: string[] = [];
+          let colsL2: string[] = [];
+          if (offsets.length > 0) {
+            colsL1 = offsets.map((off, idx) => _colSlice(l1, off, offsets[idx+1], maxLen));
+            colsL2 = offsets.map((off, idx) => _colSlice(l2, off, offsets[idx+1], maxLen));
+          } else {
+            colsL1 = l1.split(/\s{2,}/).map(s => String(s || '').trim()).filter(s => s);
+            colsL2 = l2.split(/\s{2,}/).map(s => String(s || '').trim()).filter(s => s);
+            if (colsL1.length > lastOffsetsLen) lastOffsetsLen = colsL1.length;
+          }
+
+          // Campos: mapeamento baseado no layout MPGO detectado em debug /tmp/mpgo-setembro.pdf
+          // Esperado padrão (12 colunas após cálculo posicional):
+          // [0] SERVIDOR → matricula + nome parte1
+          // [1] CORRESP. (número)
+          // [2] SERVIÇO (convênio número — usado como No ADE)
+          // [3] DATA INC + DATA INI (colados)
+          // [4] DATA FIM (mm/aaaa ou dd/mm/aaaa)
+          // [5] VLR. ADE
+          // [6] VALOR PARCELA + PRZ (colados)
+          // [7] PGT
+          // [8] Nº PARC (No Parc)
+          // [9] SIT. CONTRATO
+          // [10] SIT. PARCELA
+          // [11] CAT. SERVIDOR (início) + linhas L2 cols restantes + verticais = Orgao completo
+          const colServL1 = colsL1[0] || '';
+          const matricula = _extrairMat(colServL1);
+          const nomeL1 = _extrairNomeLinha1(colServL1);
+          // CPF e continuação nome: procurar EM TODAS colsL2 (pode estar na 1ª ou outras)
+          let cpf = '';
+          let nomeL2 = '';
+          for (const c of colsL2) {
+            const cc = _extrairCPF(c);
+            if (cc) { cpf = cc; nomeL2 = _extrairNomeLinha2AntesCPF(c); break; }
+          }
+          // Caso L2 não tenha splits → extrair diretamente do texto bruto L2
+          if (!cpf) {
+            cpf = _extrairCPF(l2);
+            if (cpf) nomeL2 = _extrairNomeLinha2AntesCPF(l2);
+          }
+          const nomeCompleto = [nomeL1, nomeL2].filter(Boolean).join(' ').trim() || colServL1.trim();
+
+          // Procurar índice col[?] que tem "dd/mm/aaaa mm/aaaa" — Data Inc + Ini colados
+          let colDataIdx = -1;
+          for (let c = 1; c < colsL1.length; c++) {
+            if (/\d{2}\/\d{2}\/\d{4}\s+\d{2}\/\d{4}/.test(colsL1[c] || '')) { colDataIdx = c; break; }
+          }
+          // Procurar índice col[?] que tem "ddd,dd 999" — Valor Parcela + PRZ colados
+          let colValorIdx = -1;
+          for (let c = 1; c < colsL1.length; c++) {
+            if (/\d{1,3}(?:\.\d{3})*,\d{2}\s+\d{1,3}$/.test(colsL1[c] || '')) { colValorIdx = c; break; }
+          }
+          const corresp = colsL1[1] || '';
+          const servico = colsL1[2] || '';
+          const noAde = (colDataIdx >= 3 && colDataIdx - 1 >= 3) ? (colsL1[colDataIdx - 1] || '') : (colsL1[3] || servico);
+          const [dataInc, dataIni] = colDataIdx >= 0 ? _splitDataIncIni(colsL1[colDataIdx] || '') : ['', ''];
+          const dataFim = colDataIdx >= 0 ? (colsL1[colDataIdx + 1] || '') : '';
+          const vlrAde = colValorIdx >= 0 ? (colsL1[colValorIdx - 1] || '') : '';
+          const [valorParcela, prz] = colValorIdx >= 0 ? _splitValorPrz(colsL1[colValorIdx] || '') : ['', ''];
+          const pgt = colValorIdx >= 0 ? (colsL1[colValorIdx + 1] || '') : '';
+          const noParc = colValorIdx >= 0 ? (colsL1[colValorIdx + 2] || '') : '';
+          const sitContrato = colValorIdx >= 0 ? (colsL1[colValorIdx + 3] || '') : '';
+          const sitParcela = colValorIdx >= 0 ? (colsL1[colValorIdx + 4] || '') : '';
+          const catServL1 = colValorIdx >= 0 ? (colsL1[colValorIdx + 5] || colsL1[colsL1.length - 1] || '') : (colsL1[colsL1.length - 1] || '');
+          const catServL2 = colsL2.filter((c, idx) => {
+            if (!c) return false;
+            if (_extrairCPF(c)) return false;
+            return true;
+          }).join(' ').trim();
+          const ultimaOff = offsets.length > 0 ? offsets[offsets.length - 1] : 0;
+          const vertTxt = verticais
+            .map(l => (ultimaOff > 0 ? (l.slice(ultimaOff) || l) : l).trim())
+            .filter(s => s && !MPGO_BLACKLIST_RODAPE.test(s))
+            .join(' ')
+            .trim();
+          const catServidorCompleto = [catServL1, catServL2, vertTxt].filter(Boolean).join(' ').trim();
+          const orgao = 'MPGO - Ministério Público do Estado de Goiás';
+
+          // looksLike final obrigatório: CPF + Valor Parcela preenchidos e formatados
+          const looksOk = EXTRACT_MPGO_REGEX_CPF.test(cpf) && EXTRACT_MPGO_REGEX_VALOR.test(valorParcela.replace(/\s+/g, ''));
+          if (!looksOk) {
+            __dbg.report('MPGO/SKIP-' + String(r), 'import-consignado.ts:mpgo-skip-row', 'M: skip looksLike=false', {
+              i: r, CPF: cpf, VP: valorParcela, mat: matricula, nome: nomeCompleto.slice(0, 40), cols: colsL1.slice(0, 8)
+            });
+            continue;
+          }
+
+          const row: Record<string, unknown> = {
+            CPF: cpf,
+            Nome: nomeCompleto || null,
+            Matricula: matricula || null,
+            Copetencia: null, // preenchido posteriormente por extractCompetenciaFromFileName (profile)
+            'Valor Parcela': valorParcela || null,
+            Orgao: orgao || null,
+            Corresp: corresp || null,
+            Servico: servico || null,
+            'No ADE': noAde || servico || null,
+            'Data Inc': dataInc || null,
+            'Data Ini': dataIni || null,
+            'Data Fim': dataFim || null,
+            'Vlr. ADE': vlrAde || null,
+            PRZ: prz || null,
+            PGT: pgt || null,
+            'No Parc': noParc || null,
+            'Sit. Contrato': sitContrato || null,
+            'Sit. Parcela': sitParcela || null,
+            'Cat. Servidor': catServidorCompleto || null,
+            __pdf_source_file: fileNameStr,
+          };
+          rowsOut.push(row);
+        }
+        const topHeaderLines = allLines.slice(0, Math.max(0, linhasPrincipaisIdx[0] ?? 30));
+        __dbg.report('MPGO/H3', 'import-consignado.ts:mpgo-posicional-resultado', 'M: resultado final parse MPGO posicional v2', {
+          offsetsCount: offsets.length,
+          offsets,
+          rowsCount: rowsOut.length,
+          linhasPrincipais: linhasPrincipaisIdx.length,
+          sampleFirst5: rowsOut.slice(0, 5).map((r) => ({
+            CPF: r['CPF'], Mat: r['Matricula'], Nome: String(r['Nome'] ?? '').slice(0, 45),
+            VP: r['Valor Parcela'], PRZ: r['PRZ'], DInc: r['Data Inc'], Orgao: String(r['Orgao'] ?? '').slice(0, 40)
+          })),
+        });
+        (parsedFinal as any).headers = headersMpgo;
+        (parsedFinal as any).rows = rowsOut;
+        (parsedFinal as any).extractedCompetenciaMmAaaa = null;
+        (parsedFinal as any).topHeaderLines = topHeaderLines;
       }
 
       let headersToImport: string[] = parsedFinal.headers;
@@ -29603,18 +31369,46 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // Regra: DEPOIS de extrair o parsedFinal.headers e ANTES do whitelist matching / fill-down de 10 colunas principais,
       // criamos um header aliases bidirecional: (1) se header original = alias → substitui headers por canônico;
       // (2) renomeia chaves em rowsToImport; (3) preserva o valor original em colunas extras (duplicamos antes de sobrescrever).
-      if (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra') {
+      // BLOQUEIO RC7 (plugin isolado): se plugin retornou skipAliases=true → NÃO EXECUTA esse bloco (evita renomeação destrutiva MPGO).
+      if (!pluginSkipAliases && kindLower === 'recurso_tce') {
+        const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
+          { canonical: 'CDG_ORDEM',          aliases: ['CDG ORDEM', 'COD ORDEM', 'CÓD ORDEM', 'ORDEM', 'CDGORDEM'] },
+          { canonical: 'Nome',               aliases: ['NOME', 'NOME SERVIDOR', 'SERVIDOR', 'FUNCIONÁRIO', 'FUNCIONARIO'] },
+          { canonical: 'CPF',                aliases: ['C.P.F.', 'CPF SERVIDOR', 'CPF DO SERVIDOR', 'CPF DO FUNCIONÁRIO', 'CPF DO FUNCIONARIO'] },
+          { canonical: 'PARCELA A SER PAGA', aliases: ['PARCELA A PAGAR', 'PARCELA', 'PARCELA A SER PAGA (R$)'] },
+          { canonical: 'TOTAL DE PARCELAS',  aliases: ['TOTAL PARCELAS', 'TOTAL DE PARCELA', 'QTDE PARCELAS', 'QTD PARCELAS', 'QUANTIDADE DE PARCELAS'] },
+          { canonical: 'VALOR',              aliases: ['VALOR (R$)', 'VALOR TOTAL', 'VALOR PARCELA'] },
+          { canonical: 'NMR_CONTRATO',       aliases: ['NMR CONTRATO', 'NR CONTRATO', 'Nº CONTRATO', 'N° CONTRATO', 'NUMERO CONTRATO', 'NÚMERO CONTRATO'] },
+        ];
+        const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9_]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+        const aliasLut = new Map<string, string>();
+        for (const entry of canonicalAliasMap) {
+          for (const a of [entry.canonical, ...entry.aliases]) {
+            aliasLut.set(buildNorm(a), entry.canonical);
+          }
+        }
+        const headerRenames = new Map<string, string>();
+        const newHeaders: string[] = [];
+        for (const h of headersToImport) {
+          const canonical = aliasLut.get(buildNorm(h));
+          if (canonical && !headerRenames.has(h)) headerRenames.set(h, canonical);
+          newHeaders.push(canonical || h);
+        }
+        if (headerRenames.size > 0) {
+          headersToImport = newHeaders;
+        }
+      } else if (!pluginSkipAliases && (kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_tcm')) {
         const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
           { canonical: 'Nome',              aliases: ['Funcionário','Funcionario','Nome Completo','Nome do Funcionário','Nome do Servidor','Servidor','Nome Colaborador','Colaborador'] },
           { canonical: 'CPF',               aliases: ['CPF do Funcionário','CPF Funcionário','CPF Servidor','C.P.F.','Número do CPF','Numero do CPF','Cpf'] },
           { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
           { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
-          { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
-          { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
-          { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
-          { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
-          { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
-          { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto'] },
+          { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero','Matricula','Matrícula','Corresp','Servico','No ADE','Nº ADE'] },
+          { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','N° Parcela','N° PARCELA','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)','No Parc','PGT','No Parc.'] },
+          { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas','PRZ'] },
+          { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento','Data Ini','Data Fim','Data Inc','Data Inclusão','Data Inclusao'] },
+          { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento','Sit. Contrato','Sit. Parcela','Sit Contrato','Sit Parcela','Cat. Servidor','Categoria','Categoria Servidor','Cat Servidor'] },
+          { canonical: 'Valor Parcela',     aliases: ['Valor da parcela','Valor Parc','Valor','Valor Mensal','Parcela Valor','Valor Bruto','Valor da Parcela (R$)','Valor da Prestacao','Valor da Prestação','Valor Líquido','Valor Liquido','Valor Desconto','Valor do Desconto','Vlr. ADE','Vlr ADE','Valor ADE'] },
         ];
         const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
         const aliasLut = new Map<string, string>();
@@ -29635,7 +31429,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         }
       }
       // =================== FIM ALIAS MAPEAMENTO CABEÇALHOS ===================
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_tce' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'recurso_tcm' || kindLower === 'recurso_mpgo' || kindLower === 'recurso_tjgo') {
         competFromHeader = extractCompet ? (parsedFinal.extractedCompetenciaMmAaaa ?? null) : null;
         // ===== 🔑 EXTRAIR COPETÊNCIA DE NOME DO ARQUIVO (padrão TRT-JULHO-2026.xlsx / TRE-MAIO-2026.xlsm / etc) =====
         // Regra do perfil TRT oficial (R17):
@@ -29698,13 +31492,30 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         // IMPORTANTE: use headersToImport PODE já ter sido renomeado pelo alias mapping TRT/TRE/ADFEGO/Eletra (Funcionario→Nome,
         //             Parcela Atual→N Parcela etc.).
         //             (Por isso a variável de matching = headersToImport (não mais parsedFinal.headers).
-        if (strictWhitelist && strictWhitelist.length > 0) {
+        // BLOQUEIO RC7 (plugin isolado): se plugin retornou skipWhitelist=true → PULA strict (plugin já retorna headers canônicos 1-1).
+        if (!pluginSkipWhitelist && strictWhitelist && strictWhitelist.length > 0) {
           const norm = (s: string) =>
             String(s ?? '')
               .normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
               .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
           const whitelistNorm = strictWhitelist.map((w) => ({ orig: w, norm: norm(w) }));
           const matchedBySource: Array<{ sourceHeader: string; targetHeader: string }> = [];
+          // RC FIX 2026-10-01 (MPGO PDF posicional v2): parser retorna 19 cols CANONICAS exatamente iguais
+          // aos nomes da tabela ("CPF","Nome","Matricula","Valor Parcela",...). Strict whitelist foi
+          // projetada para Excel com headers tipo "CPF do Titular" → quase não bate. Forçar mapeamento 1-1
+          // SEM depender de índice posicional (agora aliases NÃO são mais aplicados a MPGO de qualquer jeito).
+          if (kindLower === 'recurso_mpgo' && Array.isArray(headersToImport)) {
+            const hasCPF = headersToImport.includes('CPF');
+            const hasVP = headersToImport.includes('Valor Parcela');
+            const lenOk = headersToImport.length >= 15;
+            if (hasCPF && hasVP && lenOk) {
+              for (const h of headersToImport) {
+                if (typeof h === 'string' && h.trim()) {
+                  matchedBySource.push({ sourceHeader: h, targetHeader: h });
+                }
+              }
+            }
+          }
           for (let idx = 0; idx < headersToImport.length; idx++) {
             const hOrig = parsedFinal.headers[idx] || headersToImport[idx];
             const hNormKey = headersToImport[idx] || hOrig;
@@ -29721,8 +31532,37 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             dedupedMatches.push(m);
           }
           const realMatches = dedupedMatches;
+          // RC FIX 2026-10-01 [FALLBACK SEGURANÇA]: se kind=recurso_mpgo e o matching estiver abaixo de 15,
+          // REFORÇA mapeamento 1-1 headersCanonicos → colunasTabela (por que whitelist de Excel não bate PDF canônico).
+          if (kindLower === 'recurso_mpgo' && realMatches.length < 15 && Array.isArray(headersToImport)) {
+            const hasCPF2 = headersToImport.includes('CPF');
+            const hasVP2 = headersToImport.includes('Valor Parcela');
+            if (hasCPF2 && hasVP2) {
+              const targetsVistos = new Set(realMatches.map((m) => m.targetHeader));
+              for (const h of headersToImport) {
+                if (typeof h !== 'string' || !h.trim()) continue;
+                if (!targetsVistos.has(h)) {
+                  realMatches.push({ sourceHeader: h, targetHeader: h });
+                  targetsVistos.add(h);
+                }
+              }
+            }
+          }
           // Strict min matches — se não bater pelo menos N, pula arquivo safe.
           if (realMatches.length < strictMinMatches) {
+            // #region debug-point tce-import-strict-fail
+            if (kindLower === 'recurso_tce') {
+              const __dbg = __dbg_loaded({ env: true });
+              __dbg.report('B', 'import-consignado.ts:strict-whitelist', 'tce strict whitelist failed', {
+                fileName: String(file?.name ?? ''),
+                strictMinMatches,
+                matches: realMatches.length,
+                strictWhitelist,
+                headersRawPreview: parsedFinal.headers.slice(0, 40),
+                headersToImportPreview: headersToImport.slice(0, 40),
+              });
+            }
+            // #endregion
             importedFiles.push({
               fileName: file.name,
               targetTable: tableName,
@@ -29779,6 +31619,19 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           }
           const finalRowsRaw: Array<Record<string, unknown>> = [];
           const srcRows = Array.isArray(rowsToImport) && rowsToImport.length > 0 ? rowsToImport : parsedFinal.rows;
+          // #region debug-point tce-import-compet
+          if (kindLower === 'recurso_tce') {
+            const __dbg = __dbg_loaded({ env: true });
+            __dbg.report('C', 'import-consignado.ts:compet-detected', 'tce competFromHeader decision', {
+              fileName: String(file?.name ?? ''),
+              extractCompet,
+              extractedCompetenciaMmAaaa: (parsedFinal as any)?.extractedCompetenciaMmAaaa ?? null,
+              competFromHeader,
+              rowsParsed: Array.isArray(parsedFinal.rows) ? parsedFinal.rows.length : null,
+              rowsToImport: Array.isArray(rowsToImport) ? rowsToImport.length : null,
+            });
+          }
+          // #endregion
           for (const src of srcRows) {
             const outRow: Record<string, unknown> = {};
             for (const targetCol of finalHeaders) outRow[targetCol] = null;
@@ -29820,9 +31673,55 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               }
             }
             if (extractCompet && competFromHeader) outRow.Copetencia = competFromHeader;
+            // RC FIX 2026-10-01 MPGO PDF: preencher coluna Arquivo e coluna Copetencia fallback (se acima não setou),
+            // usando o campo __pdf_source_file que o parser MPGO posicional v2 injeta em cada row.
+            if (kindLower === 'recurso_mpgo' || kindLower === 'recurso_tjgo') {
+              const srcAny = src as any;
+              if (typeof srcAny?.__pdf_source_file === 'string' && srcAny.__pdf_source_file.trim()) {
+                outRow['Arquivo'] = String(srcAny.__pdf_source_file).trim();
+                if (!outRow.Copetencia || String(outRow.Copetencia).trim() === '') {
+                  try {
+                    const fname = String(srcAny.__pdf_source_file);
+                    const mAno = fname.match(/(20\d{2})/i);
+                    const mMes = fname.match(/(Janeiro|Fevereiro|Março|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)/i);
+                    if (mAno && mMes) {
+                      const mmNum = (['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro']
+                        .map((x) => x.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase())
+                        .indexOf(String(mMes[0]).normalize('NFD').replace(/\p{M}/gu,'').toLowerCase()) + 1);
+                      if (mmNum >= 1 && mmNum <= 12) {
+                        let mmFim = mmNum + 1;
+                        const anoInt = parseInt(String(mAno[0]), 10);
+                        const anoFim = mmFim > 12 ? anoInt + 1 : anoInt;
+                        mmFim = mmFim > 12 ? 1 : mmFim;
+                        outRow.Copetencia = `${String(mmFim).padStart(2,'0')}/${String(anoFim)}`;
+                      }
+                    }
+                  } catch (_e) {}
+                }
+              }
+            }
             const nonEmptyCols = Object.values(outRow).filter((v) => v !== null && v !== undefined && String(v).trim().length > 0).length;
             if (nonEmptyCols >= 2) finalRowsRaw.push(outRow);
           }
+          // #region debug-point tce-import-finalrows
+          if (kindLower === 'recurso_tce') {
+            const __dbg = __dbg_loaded({ env: true });
+            const preview = finalRowsRaw.slice(0, 3).map((r) => ({
+              CDG_ORDEM: r['CDG_ORDEM'] ?? null,
+              Nome: r['Nome'] ?? null,
+              CPF: r['CPF'] ?? null,
+              Copetencia: r['Copetencia'] ?? null,
+              PARCELA_A_SER_PAGA: r['PARCELA A SER PAGA'] ?? null,
+              TOTAL_DE_PARCELAS: r['TOTAL DE PARCELAS'] ?? null,
+              VALOR: r['VALOR'] ?? null,
+              NMR_CONTRATO: r['NMR_CONTRATO'] ?? null,
+            }));
+            __dbg.report('C', 'import-consignado.ts:finalRowsRaw', 'tce finalRowsRaw built', {
+              len: finalRowsRaw.length,
+              preview,
+            });
+          }
+          // #endregion
           // ╔══════════════════════════════════════════════════════════════════╗
           // ║ [DIAGNÓSTICO-TRE PRE-STAGE 2] finalRowsRaw APÓS nonEmptyCols≥2  ║
           // ╚══════════════════════════════════════════════════════════════════╝
@@ -30163,6 +32062,13 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             }
             return matches >= 5;
           };
+          const isSectionLabelRowRecursoTcm = (r: Record<string, unknown>): boolean => {
+            if (kindLower !== 'recurso_tcm' && kindLower !== 'recurso_eletra' && kindLower !== 'recurso_adfego') return false;
+            const nomeRaw = Object.prototype.hasOwnProperty.call(r, 'Nome') ? r['Nome'] : null;
+            const nome = nomeRaw === null || nomeRaw === undefined ? '' : String(nomeRaw).replace(/\s+/g, ' ').trim().toUpperCase();
+            if (!nome) return false;
+            return nome === 'NOVOS CONTRATOS' || nome.startsWith('NOVOS CONTRATOS ') || nome === 'CONTRATOS LIQUIDADOS' || nome.startsWith('CONTRATOS LIQUIDADOS ');
+          };
           const normCpf = (raw: unknown): string => String(raw ?? '').replace(/[^\d]/g, '').trim();
           const normContratoBR = (raw: unknown): string => {
             const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
@@ -30227,6 +32133,7 @@ export async function importByLearningProfileFromFolderUrl(opts: {
 
           const afterTotals: Array<Record<string, unknown>> = [];
           const seenIntra = new Set<string>();
+          let skipRecursoTcmLiquidatedSection = false;
           for (const r of finalRowsRaw) {
             const vals = Object.values(r);
             const anyTotal = vals.some((v) => {
@@ -30238,8 +32145,25 @@ export async function importByLearningProfileFromFolderUrl(opts: {
               const s = v === null || v === undefined ? '' : String(v).trim();
               return s.length > 0;
             });
-            if (!anyNotEmpty) continue;
+            if (!anyNotEmpty) {
+              if (kindLower === 'recurso_tcm' || kindLower === 'recurso_eletra' || kindLower === 'recurso_adfego') skipRecursoTcmLiquidatedSection = false;
+              continue;
+            }
+            if (kindLower === 'recurso_tcm' || kindLower === 'recurso_eletra' || kindLower === 'recurso_adfego') {
+              const nomeRaw = Object.prototype.hasOwnProperty.call(r, 'Nome') ? r['Nome'] : null;
+              const nome = nomeRaw === null || nomeRaw === undefined ? '' : String(nomeRaw).replace(/\s+/g, ' ').trim().toUpperCase();
+              if (nome.startsWith('CONTRATOS LIQUIDADOS')) {
+                skipRecursoTcmLiquidatedSection = true;
+                continue;
+              }
+              if (nome.startsWith('NOVOS CONTRATOS')) {
+                skipRecursoTcmLiquidatedSection = false;
+                continue;
+              }
+              if (skipRecursoTcmLiquidatedSection) continue;
+            }
             if (isHeaderGhostRow(r)) continue;
+            if (isSectionLabelRowRecursoTcm(r)) continue;
             cleanVencAndCompetencia(r);
             // Normaliza contrato p/ BR (141.132 -> 141,132) para igualdade na dedup
             if (Object.prototype.hasOwnProperty.call(r, 'Contrato')) {
@@ -30402,15 +32326,15 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           }
           headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
           rowsToImport = finalRows;
-        } else if (extractCompet && competFromHeader) {
-          // Sem whitelist mas com competência a partir do header: injeta em todas as linhas.
+        } else if (competFromHeader) {
+          // Sem whitelist (ou plugin skipWhitelist) mas com competência definida (top header OU nome do arquivo OU path): injeta em todas as linhas.
           rowsToImport = parsedFinal.rows.map((r) => ({ ...r, Copetencia: competFromHeader }));
           if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
         }
       }
 
       const extraStatic: Record<string, string | null> = {};
-      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') {
+      if (kindLower === 'recurso_adfego' || kindLower === 'recurso_eletra' || kindLower === 'recurso_tce' || kindLower === 'recurso_trt' || kindLower === 'recurso_tre' || kindLower === 'recurso_neoconsig_demais' || kindLower === 'extratos' || kindLower === 'relatorio') {
         if (sourceFileFull) extraStatic['__source_file'] = sourceFileFull;
       }
 
@@ -30496,6 +32420,97 @@ export async function importByLearningProfileFromFolderUrl(opts: {
         console.log(`═`.repeat(110) + '\n');
       }
       // ====== FIM DEBUG RECURSO TRT/TRE ======
+
+      if (tableName === 'Recurso TJGO') {
+        const refKeyFromHeaders =
+          headersToImport.find(
+            (h) => normalizeHeaderKey(h).replace(/\s/g, '') === 'REF_ANOMES',
+          ) ?? null;
+        const refKeyFromRow =
+          !refKeyFromHeaders && rowsToImport.length > 0
+            ? (Object.keys(rowsToImport[0] as Record<string, unknown>).find(
+                (k) => normalizeHeaderKey(k).replace(/\s/g, '') === 'REF_ANOMES',
+              ) ?? null)
+            : null;
+        const refKey = refKeyFromHeaders ?? refKeyFromRow;
+        const compKeyFromHeaders =
+          headersToImport.find((c) =>
+            ['COMPETENCIA', 'COPETENCIA'].includes(
+              normalizeHeaderKey(c).replace(/\s/g, ''),
+            ),
+          ) ?? null;
+        const compKey = compKeyFromHeaders ?? 'Copetencia';
+        const nmrCpfKey =
+          headersToImport.find(
+            (h) => normalizeHeaderKey(h).replace(/\s/g, '') === 'NMR_CPF',
+          ) ??
+          (!headersToImport.includes('NMR_CPF') && rowsToImport.length > 0
+            ? (Object.keys(rowsToImport[0] as Record<string, unknown>).find(
+                (k) => normalizeHeaderKey(k).replace(/\s/g, '') === 'NMR_CPF',
+              ) ?? null)
+            : null);
+        const cpfKeyFromHeaders =
+          headersToImport.find(
+            (h) => normalizeHeaderKey(h).replace(/\s/g, '') === 'CPF',
+          ) ?? null;
+        const cpfKey = cpfKeyFromHeaders ?? 'CPF';
+        const valorKeyFromHeaders =
+          headersToImport.find(
+            (h) => normalizeHeaderKey(h).replace(/\s/g, '') === 'VALOR',
+          ) ?? null;
+        const valorKey = valorKeyFromHeaders ?? 'VALOR';
+        const valorParcelaKeyFromHeaders =
+          headersToImport.find(
+            (h) => normalizeHeaderKey(h).replace(/\s/g, '') === 'VALORPARCELA',
+          ) ?? null;
+        const valorParcelaKey = valorParcelaKeyFromHeaders ?? 'Valor Parcela';
+        let changed = false;
+        if (refKey) {
+          rowsToImport = rowsToImport.map((r) => {
+            const cur = String((r as any)?.[compKey] ?? '').trim();
+            if (cur) return r;
+            const ref = String((r as any)?.[refKey] ?? '').trim();
+            const m = /^(\d{4})(\d{2})$/.exec(ref);
+            if (!m) return r;
+            const year0 = Number(m[1]);
+            const month0 = Number(m[2]);
+            if (!Number.isFinite(year0) || !Number.isFinite(month0) || month0 < 1 || month0 > 12) return r;
+            const month1 = month0 + 1;
+            const year1 = month1 > 12 ? year0 + 1 : year0;
+            const monthOut = month1 > 12 ? 1 : month1;
+            changed = true;
+            return { ...r, [compKey]: `${String(monthOut).padStart(2, '0')}/${year1}` };
+          });
+        }
+        if (nmrCpfKey) {
+          rowsToImport = rowsToImport.map((r) => {
+            const curCpf = String((r as any)?.[cpfKey] ?? '').trim();
+            if (curCpf) return r;
+            const digits = normalizeCpfDigits((r as any)?.[nmrCpfKey]);
+            if (digits.length !== 11) return r;
+            changed = true;
+            return { ...r, [cpfKey]: normalizeCpfValue(digits) };
+          });
+          if (!headersToImport.includes(cpfKey)) headersToImport = [cpfKey, ...headersToImport];
+        }
+        if (headersToImport.includes(valorKey)) {
+          rowsToImport = rowsToImport.map((r) => {
+            const curVal = String((r as any)?.[valorParcelaKey] ?? '').trim();
+            if (curVal) return r;
+            const src = (r as any)?.[valorKey];
+            const parsed = parseMoneyToCents(src);
+            if (parsed === null) return r;
+            changed = true;
+            return { ...r, [valorParcelaKey]: String(src) };
+          });
+          if (!headersToImport.includes(valorParcelaKey)) {
+            headersToImport = [valorParcelaKey, ...headersToImport];
+          }
+        }
+        if (changed && !headersToImport.includes(compKey)) {
+          headersToImport = [compKey, ...headersToImport];
+        }
+      }
 
       let res: { insertedRows: number; skippedRows: number };
       if (kindLower === 'extratos') {
@@ -30586,6 +32601,20 @@ export async function importByLearningProfileFromFolderUrl(opts: {
 
         res = { insertedRows: insertedTotal, skippedRows: skippedTotal };
       } else {
+        // #region debug-point tce-import-before-insert
+        if (kindLower === 'recurso_tce') {
+          const __dbg = __dbg_loaded({ env: true });
+          __dbg.report('D', 'import-consignado.ts:before-insert', 'tce before addMissingColumnsAndImportRows', {
+            fileName: String(file?.name ?? ''),
+            tableName,
+            mode: modeOverride,
+            checkDuplicateContent: checkDup,
+            headersToImportLen: Array.isArray(headersToImport) ? headersToImport.length : null,
+            headersToImportPreview: Array.isArray(headersToImport) ? headersToImport.slice(0, 30) : null,
+            rowsToImportLen: Array.isArray(rowsToImport) ? rowsToImport.length : null,
+          });
+        }
+        // #endregion
         res = addMissingColumnsAndImportRows(
           db,
           tableName,
@@ -30595,6 +32624,17 @@ export async function importByLearningProfileFromFolderUrl(opts: {
           modeOverride,
           Object.keys(extraStatic).length > 0 ? extraStatic : undefined,
         );
+        // #region debug-point tce-import-after-insert
+        if (kindLower === 'recurso_tce') {
+          const __dbg = __dbg_loaded({ env: true });
+          __dbg.report('D', 'import-consignado.ts:after-insert', 'tce addMissingColumnsAndImportRows result', {
+            fileName: String(file?.name ?? ''),
+            tableName,
+            insertedRows: Number((res as any)?.insertedRows ?? 0),
+            skippedRows: Number((res as any)?.skippedRows ?? 0),
+          });
+        }
+        // #endregion
         if (!tablesCreatedAgg.has(tableName)) tablesCreatedAgg.set(tableName, { insertedRows: 0, skippedRows: 0 });
         const cur = tablesCreatedAgg.get(tableName)!;
         cur.insertedRows += res.insertedRows;
@@ -30824,6 +32864,12 @@ export async function importByLearningProfileFromFolderUrl(opts: {
     try {
       // Regra oficial do usuário: se nenhuma linha inserida E nenhuma pulada = ERRO, não sucesso.
       const allZero = totalRowsInserted === 0 && totalRowsSkipped === 0;
+      // Nenhum arquivo compatível/encontrado nesta execução = não havia nada novo para importar.
+      // Não é erro: não deve gerar e-mail de FALHA. Sem isso, o lote diário (todas as entidades,
+      // dias úteis) disparava um e-mail "Importação FALHA • <tipo>" para cada órgão sem movimentação.
+      const noFilesToImport = Number(totalFilesMatched ?? 0) === 0;
+      // Modo lote: o e-mail individual por tipo é suprimido; o chamador envia 1 consolidado.
+      const suppressNotify = Boolean(opts?.suppressPerKindNotification);
       let outcome: 'success' | 'partial' | 'failed' = 'success';
       if (allZero) outcome = 'failed';
       else if (totalRowsInserted > 0 && totalRowsSkipped === 0) outcome = 'success';
@@ -30835,46 +32881,57 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             .slice(0, 5)
             .join(', ')
         : '';
-      if (allZero) {
+      if (allZero && noFilesToImport) {
+        // Nada a importar → não notifica (nem sucesso, nem falha). Mantém a classificação
+        // interna sem alterar contadores/retorno nem lançar erro (para não quebrar o lote diário).
+        notificationEmail = { attempted: false, sent: false, to: [], error: null };
+      } else if (allZero) {
         const errMsg = `Erro: nenhuma linha inserida nem pulada (0/0) em todos os arquivos compatíveis (${totalFilesMatched}).`
           + (zeroFilesList ? ` Arquivos: ${zeroFilesList}.` : '')
           + ` Parser retornou 0 linhas nos arquivos. Verifique o formato/layout dos arquivos (PDF deve ter tabelas com valores monetários e datas).`;
-        try {
-          notificationEmail = await sendImportFinishedEmailNotification({
-            notificationTo: opts?.notificationTo,
-            forceKind: opts?.forceKind ?? forceKindLower,
-            folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
-            outcome: 'failed',
-            totalFilesScanned,
-            totalFilesMatched,
-            totalRowsInserted,
-            totalRowsSkipped,
-            importedFiles,
-            errorMessage: errMsg,
-            mode: modeLabel,
-          });
-        } catch (eNotify) {
-          notificationEmail = {
-            attempted: true,
-            sent: false,
-            to: splitEmailRecipients(opts?.notificationTo),
-            error: eNotify instanceof Error ? eNotify.message : String(eNotify ?? 'Erro ao enviar notificação.'),
-          };
+        if (suppressNotify) {
+          notificationEmail = { attempted: false, sent: false, to: [], error: null };
+        } else {
+          try {
+            notificationEmail = await sendImportFinishedEmailNotification({
+              notificationTo: opts?.notificationTo,
+              forceKind: opts?.forceKind ?? forceKindLower,
+              folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
+              outcome: 'failed',
+              totalFilesScanned,
+              totalFilesMatched,
+              totalRowsInserted,
+              totalRowsSkipped,
+              importedFiles,
+              errorMessage: errMsg,
+              mode: modeLabel,
+            });
+          } catch (eNotify) {
+            notificationEmail = {
+              attempted: true,
+              sent: false,
+              to: splitEmailRecipients(opts?.notificationTo),
+              error: eNotify instanceof Error ? eNotify.message : String(eNotify ?? 'Erro ao enviar notificação.'),
+            };
+          }
         }
         throw new Error(errMsg);
+      } else if (suppressNotify) {
+        notificationEmail = { attempted: false, sent: false, to: [], error: null };
+      } else {
+        notificationEmail = await sendImportFinishedEmailNotification({
+          notificationTo: opts?.notificationTo,
+          forceKind: opts?.forceKind ?? forceKindLower,
+          folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
+          outcome,
+          totalFilesScanned,
+          totalFilesMatched,
+          totalRowsInserted,
+          totalRowsSkipped,
+          importedFiles,
+          mode: modeLabel,
+        });
       }
-      notificationEmail = await sendImportFinishedEmailNotification({
-        notificationTo: opts?.notificationTo,
-        forceKind: opts?.forceKind ?? forceKindLower,
-        folderUrlPreview: String(opts?.folderUrl ?? folderUrl ?? '').trim(),
-        outcome,
-        totalFilesScanned,
-        totalFilesMatched,
-        totalRowsInserted,
-        totalRowsSkipped,
-        importedFiles,
-        mode: modeLabel,
-      });
     } catch (eNotify) {
       notificationEmail = {
         attempted: true,
@@ -31455,7 +33512,7 @@ export async function debugOneshotTrtLocalImport(opts: {
             { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
             { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
             { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
-            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
+            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','N° Parcela','N° PARCELA','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
             { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
             { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
             { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
@@ -31804,7 +33861,7 @@ export async function debugOneshotTrtLocalImport(opts: {
             }
             headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
             rowsToImport = finalRows;
-          } else if (extractCompet && competFromHeader) {
+          } else if (competFromHeader) {
             rowsToImport = parsedFinalScoped.rows.map((r: any) => ({ ...r, Copetencia: competFromHeader }));
             if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
           }
@@ -32051,7 +34108,7 @@ export async function debugOneshotTreLocalImport(opts: {
             { canonical: 'Copetencia',        aliases: ['Mês/Ano Referência','Mes/Ano Referencia','Competência','Competencia','Mês Competência','Mes Competencia','Competência Mês','Competencia Mes','Período','Periodo','Referência','Referencia','Mês/Ano','Mes/Ano'] },
             { canonical: 'Desc Finalidade',   aliases: ['Produto','Finalidade','Natureza','Tipo de Produto','Modalidade','Tipo Crédito','Tipo de Crédito','Operação','Operacao','Descrição','Descricao','Observação','Observacao','Histórico','Historico'] },
             { canonical: 'Contrato',          aliases: ['Rubrica','Rubrica Desconto','Código Rubrica','Codigo Rubrica','Número Rubrica','Numero Rubrica','Contrato CGA','Número Contrato','Numero Contrato','Nº Contrato','No Contrato','Número do Contrato','Numero do Contrato','Código Contrato','Codigo Contrato','Contrato Número','Contrato Numero'] },
-            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
+            { canonical: 'N Parcela',         aliases: ['Prazo','Prazo Atual','Prazo Parcela','Parcela Atual','Parcela','Número da Parcela','Numero da Parcela','Nº Parcela','N° Parcela','N° PARCELA','No Parcela','Número Parcela','Numero Parcela','Parcela N','N Parc (Atual)'] },
             { canonical: 'Qtd Parcelas',      aliases: ['Prazo','Prazo Total','Total Prazo','Quantidade de Parcelas','Qtd Parcela','Total Parcelas','Número Total de Parcelas','Numero Total de Parcelas','Total de Parcelas','Qtde Parcelas','Quant Parcelas'] },
             { canonical: 'Vencimento',        aliases: ['Data de Vencimento','Vencimento Parcela','Venc','Data Vencimento','Dt Venc','Data Pagamento','Dt Pagamento'] },
             { canonical: 'Critério de Débito',aliases: ['Situação','Situacao','Status','Situação Desconto','Situacao Desconto','Critério','Criterio','Tipo Débito','Tipo Debito','Forma Pagamento'] },
@@ -32389,7 +34446,7 @@ export async function debugOneshotTreLocalImport(opts: {
           }
           headersToImport = [...canonicalBasePresent, ...extraHeadersFromRows];
           rowsToImport = finalRows;
-        } else if (extractCompetFinal && competFromHeader) {
+        } else if (competFromHeader) {
           rowsToImport = parsedFinalScoped.rows.map((r: any) => ({ ...r, Copetencia: competFromHeader }));
           if (!headersToImport.includes('Copetencia')) headersToImport = ['Copetencia', ...headersToImport];
         }
@@ -32571,6 +34628,9 @@ export async function runImportConsignado(opts: {
       kinds = [{ kind: kindsAll.find((k) => k.kind === rawTarget || k.kind.toLowerCase() === tLow)!.kind }];
     }
   }
+  // Execução em LOTE (vários órgãos): suprime o e-mail individual de cada tipo e envia,
+  // ao final, um único e-mail consolidado. Importações de um órgão específico seguem como antes.
+  const isBatchRun = kinds.length > 1;
   const resultsPerKind: Record<string, any> = {};
   const cumulRowsInjected: { totalRowsInserted: number; totalRowsSkipped: number; totalFilesMatched: number; totalFilesScanned: number; cumulFiles: unknown[]; firstErrorMessage?: string | null; firstErrorStack?: string | null } = {
     totalRowsInserted: 0,
@@ -32597,6 +34657,7 @@ export async function runImportConsignado(opts: {
         forceKind: k.kind,
         forceMode: String(opts.mode || 'append') === 'replace' ? 'replace' : 'append',
         notificationTo: opts.notificationTo,
+        suppressPerKindNotification: isBatchRun,
       }, {
         onProgressHook: (p) => {
           if (ctxOpts?.onProgressHook) {
@@ -32670,6 +34731,35 @@ export async function runImportConsignado(opts: {
     if (rr && typeof rr === 'object' && (rr as any).notificationEmail) {
       notificationEmailsByKind[k] = (rr as any).notificationEmail;
       if (!primaryNotificationEmail) primaryNotificationEmail = (rr as any).notificationEmail;
+    }
+  }
+  // Lote: substitui os N e-mails individuais por 1 e-mail consolidado. Só envia se houver
+  // movimentação (algo importado/pulado) ou falha real — dia sem novidades não gera e-mail.
+  if (isBatchRun) {
+    const perKind = Object.keys(resultsPerKind).map((kind) => {
+      const rr = resultsPerKind[kind] ?? {};
+      const errTxt = String(rr.error ?? '').trim();
+      return {
+        kind,
+        filesMatched: Number(rr.totalFilesMatched ?? 0),
+        rowsInserted: Number(rr.totalRowsInserted ?? 0),
+        rowsSkipped: Number(rr.totalRowsSkipped ?? 0),
+        error: (errTxt ? String(rr.error) : null) as string | null,
+      };
+    });
+    const hasMovimento = perKind.some((k) => k.filesMatched > 0 || k.rowsInserted > 0 || k.rowsSkipped > 0);
+    const hasFalha = perKind.some((k) => Boolean(String(k.error ?? '').trim()));
+    if (hasMovimento || hasFalha) {
+      primaryNotificationEmail = await sendConsolidatedImportEmailNotification({
+        notificationTo: opts.notificationTo,
+        executedAt: new Date(),
+        perKind,
+        totalFilesScanned: cumulRowsInjected.totalFilesScanned,
+        totalFilesMatched: cumulRowsInjected.totalFilesMatched,
+        totalRowsInserted: cumulRowsInjected.totalRowsInserted,
+        totalRowsSkipped: cumulRowsInjected.totalRowsSkipped,
+        mode: String(opts.mode || 'append'),
+      });
     }
   }
   return {
@@ -32875,7 +34965,7 @@ function buildConciliacaoEmailHtml(opts: {
   const who = escapeHtml(String(opts.closedBy ?? '').trim() || '');
 
   const totalTarifas = (Number(opts.totals.tarifaLinhaCents ?? 0) || 0) + (Number(opts.totals.tarifaTedCents ?? 0) || 0);
-  const saldoTarifas = -totalTarifas;
+  const saldoTarifas = +totalTarifas;
   const money = (cents: number) => `R$ ${centsToPtBr(Math.abs(cents))}`;
   const moneySigned = (cents: number) => (cents < 0 ? `- ${money(cents)}` : money(cents));
   const moneyDebit = (cents: number) => `- ${money(cents)}`;
@@ -32897,7 +34987,8 @@ function buildConciliacaoEmailHtml(opts: {
     }
     if (
       overrideEvent === 'DEVOLUÇÃO (QUITADO)' ||
-      overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)'
+      overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)' ||
+      overrideEvent === 'VALOR DEVOLVIDO (AVERBAÇÃO)'
     ) {
       return recursoCents;
     }
@@ -32906,7 +34997,7 @@ function buildConciliacaoEmailHtml(opts: {
   const totalDebito = rows.reduce((acc, r) => acc + rowDebitCentsForTotals(r), 0);
   const totalCredito = rows.reduce((acc, r) => acc + (Number(r?.extratosCents ?? 0) || 0), 0);
   const saldoTotal = totalCredito - totalDebito;
-  const saldoTotalizadorGeral = saldoTotal - saldoTarifas;
+  const saldoTotalizadorGeral = saldoTotal + saldoTarifas;
 
   const consolidatedHtml =
     rows.length === 0
@@ -33009,10 +35100,10 @@ function buildConciliacaoEmailHtml(opts: {
                   <div style="font-size:12px;color:#64748b;margin-top:6px">Saldo R$ do PDF (TOTAL D/C)</div>
                 </td>
                 <td style="width:12px"></td>
-                <td style="padding:12px 14px;background:#fff7ed;border:1px solid #fed7aa;border-radius:14px">
-                  <div style="font-size:12px;color:#9a3412;font-weight:900;letter-spacing:0.08em;text-transform:uppercase">TOTAL GERAL (APÓS TARIFAS)</div>
-                  <div style="font-size:18px;font-weight:900;color:#b91c1c;margin-top:6px">${escapeHtml(moneySigned(saldoTarifas))}</div>
-                  <div style="font-size:12px;color:#64748b;margin-top:6px">Tarifa Linha: ${escapeHtml(moneyDebit(Number(opts.totals.tarifaLinhaCents ?? 0) || 0))} • Tarifa TED: ${escapeHtml(moneyDebit(Number(opts.totals.tarifaTedCents ?? 0) || 0))}</div>
+                <td style="padding:12px 14px;background:#ecfeff;border:1px solid #cffafe;border-radius:14px">
+                  <div style="font-size:12px;color:#155e75;font-weight:900;letter-spacing:0.08em;text-transform:uppercase">TOTAL GERAL (APÓS TARIFAS)</div>
+                  <div style="font-size:18px;font-weight:900;color:${saldoTarifas < 0 ? '#b91c1c' : '#0f766e'};margin-top:6px">${escapeHtml(moneySigned(saldoTarifas))}</div>
+                  <div style="font-size:12px;color:#64748b;margin-top:6px">Tarifa Linha: ${escapeHtml(money(Number(opts.totals.tarifaLinhaCents ?? 0) || 0))} • Tarifa TED: ${escapeHtml(money(Number(opts.totals.tarifaTedCents ?? 0) || 0))}</div>
                 </td>
               </tr>
               <tr>
@@ -33020,7 +35111,7 @@ function buildConciliacaoEmailHtml(opts: {
                   <div style="font-size:12px;color:#003641;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;text-align:center">TOTALIZADOR GERAL (SALDOS)</div>
                   <div style="font-size:18px;font-weight:900;color:${saldoTotalizadorGeral < 0 ? '#b91c1c' : '#0f766e'};margin-top:8px;text-align:center">${escapeHtml(moneySigned(saldoTotalizadorGeral))}</div>
                   <div style="font-size:12px;color:#64748b;margin-top:8px;text-align:center">
-                    Coluna SALDO R$ do TOTAL (DÉBITO / CRÉDITO) − coluna SALDO R$ do TOTAL GERAL (APÓS TARIFAS)
+                    Coluna SALDO R$ do TOTAL (DÉBITO / CRÉDITO) + coluna SALDO R$ do TOTAL GERAL (APÓS TARIFAS)
                   </div>
                 </td>
               </tr>
@@ -33634,7 +35725,8 @@ async function createConciliacaoPdfBuffer(opts: {
     }
     if (
       overrideEvent === 'DEVOLUÇÃO (QUITADO)' ||
-      overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)'
+      overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)' ||
+      overrideEvent === 'VALOR DEVOLVIDO (AVERBAÇÃO)'
     ) {
       return recursoCents;
     }
@@ -33652,7 +35744,7 @@ async function createConciliacaoPdfBuffer(opts: {
     const extratosCents = Number(r.extratosCents ?? 0) || 0;
     const overrideEvent = typeof (r as any)?.event === 'string' ? String((r as any).event).trim() : '';
     const debitCents =
-      overrideEvent === 'DEVOLUÇÃO (QUITADO)' || overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)'
+      overrideEvent === 'DEVOLUÇÃO (QUITADO)' || overrideEvent === 'DEVOLUÇÃO (ANTECIPADO)' || overrideEvent === 'VALOR DEVOLVIDO (AVERBAÇÃO)'
         ? recursoCents
         : relatorioCents;
     const computedEvent =
@@ -33695,11 +35787,11 @@ async function createConciliacaoPdfBuffer(opts: {
       {
         date: '',
         event: 'Tarifa Linha',
-        debit: `- ${formatCurrency(opts.totals.tarifaLinhaCents)}`,
-        credit: '',
-        saldo: `- ${formatCurrency(opts.totals.tarifaLinhaCents)}`,
+        debit: '',
+        credit: formatCurrency(opts.totals.tarifaLinhaCents),
+        saldo: formatCurrency(opts.totals.tarifaLinhaCents),
       },
-      { saldoColor: '#C00000', debitColor: '#C00000' },
+      { saldoColor: '#166534' },
     );
   }
   if (opts.totals.tarifaTedCents > 0) {
@@ -33707,31 +35799,30 @@ async function createConciliacaoPdfBuffer(opts: {
       {
         date: '',
         event: 'Tarifa TED',
-        debit: `- ${formatCurrency(opts.totals.tarifaTedCents)}`,
-        credit: '',
-        saldo: `- ${formatCurrency(opts.totals.tarifaTedCents)}`,
+        debit: '',
+        credit: formatCurrency(opts.totals.tarifaTedCents),
+        saldo: formatCurrency(opts.totals.tarifaTedCents),
       },
-      { saldoColor: '#C00000', debitColor: '#C00000' },
+      { saldoColor: '#166534' },
     );
   }
   const totalTarifas = (Number(opts.totals.tarifaLinhaCents ?? 0) || 0) + (Number(opts.totals.tarifaTedCents ?? 0) || 0);
-  const totalTarifasSaldo = -totalTarifas;
+  const totalTarifasSaldo = +totalTarifas;
   drawRowPaged(
     {
       date: '',
       event: 'TOTAL GERAL (APÓS TARIFAS)',
-      debit: totalTarifas > 0 ? `- ${formatCurrency(totalTarifas)}` : '',
-      credit: '',
+      debit: '',
+      credit: totalTarifas > 0 ? formatCurrency(totalTarifas) : '',
       saldo: totalTarifas > 0 ? formatCurrencySigned(totalTarifasSaldo) : formatCurrencySigned(0),
     },
     {
       fill: '#E6E6E6',
       bold: true,
-      debitColor: totalTarifas > 0 ? '#C00000' : undefined,
-      saldoColor: totalTarifas > 0 ? '#C00000' : '#000000',
+      saldoColor: totalTarifas > 0 ? '#166534' : '#000000',
     },
   );
-  const saldoGeralSomado = totalMainSaldo - totalTarifasSaldo;
+  const saldoGeralSomado = totalMainSaldo + totalTarifasSaldo;
   const drawOuterOnlyRow = (cells: { label: string; saldo: string }, optsRow?: { fill?: string; bold?: boolean; saldoColor?: string }) => {
     const fill = optsRow?.fill;
     const totalW = colDate + colEvent + colDebit + colCredit + colSaldo;
@@ -34815,7 +36906,15 @@ export async function runAutomationDriveHealthCheck(which?: 'principal' | 'alego
   const entries: Array<{ key: string; label: string; url?: string | null }> = [];
   if (!which || which === 'all' || which === 'principal') entries.push({ key: 'principal', label: 'Pasta Automação (Recursos / Extratos)', url: cfg.sharePointFolderUrl });
   if (!which || which === 'all' || which === 'alego') entries.push({ key: 'alego', label: 'Recurso ALEGO', url: cfg.recursoAlegoUrl });
+  if (!which || which === 'all') entries.push({ key: 'neoconsig_demais', label: 'Demais Neoconsig', url: cfg.recursoNeoconsigDemaisUrl });
   if (!which || which === 'all' || which === 'adfego') entries.push({ key: 'adfego', label: 'Recurso ADFEGO', url: cfg.recursoAdfegoUrl });
+  if (!which || which === 'all') entries.push({ key: 'tce', label: 'Recurso TCE-GO', url: cfg.recursoTceUrl });
+  if (!which || which === 'all') entries.push({ key: 'tcm', label: 'Recurso TCM-GO', url: cfg.recursoTcmUrl });
+  if (!which || which === 'all') entries.push({ key: 'tre', label: 'Recurso TRE-GO', url: cfg.recursoTreUrl });
+  if (!which || which === 'all') entries.push({ key: 'trt', label: 'Recurso TRT-18', url: cfg.recursoTrtUrl });
+  if (!which || which === 'all') entries.push({ key: 'eletra', label: 'Recurso ELETRO-GO', url: cfg.recursoEletraUrl });
+  if (!which || which === 'all') entries.push({ key: 'mpgo', label: 'Recurso MPGO', url: cfg.recursoMpgoUrl });
+  if (!which || which === 'all') entries.push({ key: 'tjgo', label: 'Recurso TJGO', url: cfg.recursoTjgoUrl });
   if (!which || which === 'all' || which === 'sisbr') entries.push({ key: 'sisbr', label: 'Relatório SISBR', url: cfg.relatorioSisbrUrl });
   const out: Record<string, { label: string; url?: string | null; result: Awaited<ReturnType<typeof graphResolveDriveFolderHealthCheck>> }> = {};
   let overall = true;
@@ -34828,8 +36927,82 @@ export async function runAutomationDriveHealthCheck(which?: 'principal' | 'alego
   return { checked: out, overallOk: overall };
 }
 
-export function listImportJobsRecent(opts?: { limit?: number }): { jobs: JobRecord[]; totalInMemory: number } {
-  return { jobs: ImportJobsManager.listRecent(opts?.limit ?? 50), totalInMemory: ImportJobsManager.inMem.size };
+async function listImportJobsPersistedFromDb(limit = 50): Promise<JobRecord[]> {
+  try {
+    const out: JobRecord[] = [];
+    await _f3OpenDb<void>(async (db) => {
+      try {
+        if (!tableExists(db, 'consignado_app_config')) return;
+        const stmtRaw = db.prepare(`SELECT key, value FROM consignado_app_config WHERE key LIKE ? ORDER BY rowid DESC LIMIT ?;`);
+        if (!stmtRaw) return;
+        try {
+          const bound = stmtRaw.bind([`${JOB_KV_PREFIX}%`, Math.max(1, Math.min(2000, Number(limit) || 50) * 4)]);
+          if (bound) {
+            let rowsRead = 0;
+            const maxRows = Math.max(1, Math.min(2000, Number(limit) || 50) * 4);
+            try {
+              while (stmtRaw.step() && rowsRead < maxRows) {
+                rowsRead += 1;
+                try {
+                  const row = stmtRaw.getAsObject() as { key?: unknown; value?: unknown };
+                  const raw = typeof row.value === 'string' && row.value ? String(row.value) : '';
+                  if (!raw) continue;
+                  try {
+                    const parsed = JSON.parse(raw) as Partial<JobRecord>;
+                    if (parsed && typeof parsed.jobId === 'string' && typeof parsed.status === 'string' && typeof parsed.createdAtIso === 'string') {
+                      out.push(parsed as JobRecord);
+                    }
+                  } catch { /* ignore */ }
+                } catch { /* ignore */ }
+              }
+            } catch { /* ignore */ }
+          }
+        } finally { try { (stmtRaw as { free?: () => void }).free?.(); } catch { /* ignore */ } }
+      } catch { /* ignore */ }
+    });
+    // Fallback filesystem (import-jobs-fallback)
+    try {
+      const fsMod = require('node:fs');
+      const pathMod = require('node:path');
+      const fs: { existsSync?: (p: string) => boolean; readdirSync?: (p: string) => string[]; readFileSync?: (p: string, e: string) => string } = fsMod || {};
+      if (fs?.readdirSync && fs?.readFileSync && pathMod?.dirname && pathMod?.join) {
+        const dbPath = getSqlitePath();
+        const dir: string = pathMod.join(pathMod.dirname(dbPath), 'import-jobs-fallback');
+        const okDir: boolean = Boolean(fs.existsSync && fs.existsSync(dir));
+        if (okDir) {
+          const filesArr: string[] = (fs.readdirSync(dir) || []).filter((f: string) => f.endsWith('.json')).sort().reverse();
+          for (const f of filesArr.slice(0, 80)) {
+            try {
+              const p: string = pathMod.join(dir, f);
+              const raw = String(fs.readFileSync(p, 'utf8') ?? '');
+              if (!raw.trim()) continue;
+              const parsed = JSON.parse(raw) as { persistedAt?: string; record?: JobRecord };
+              if (parsed?.record && typeof parsed.record.jobId === 'string' && typeof parsed.record.status === 'string' && typeof parsed.record.createdAtIso === 'string') {
+                if (!out.some((x) => x.jobId === parsed.record!.jobId)) out.push(parsed.record);
+              }
+            } catch { /* ignore */ }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+    out.sort((a, b) => new Date(b.createdAtIso).getTime() - new Date(a.createdAtIso).getTime());
+    return out.slice(0, Math.max(1, Math.min(2000, Number(limit) || 50)));
+  } catch {
+    return [];
+  }
+}
+
+export async function listImportJobsRecent(opts?: { limit?: number }): Promise<{ jobs: JobRecord[]; totalInMemory: number }> {
+  const limit = Math.max(1, Math.min(500, Number(opts?.limit ?? 50)));
+  const inMemJobs: JobRecord[] = [];
+  for (const r of ImportJobsManager.inMem.values()) inMemJobs.push(r);
+  const persisted = await listImportJobsPersistedFromDb(limit);
+  const byId = new Map<string, JobRecord>();
+  for (const r of persisted) byId.set(r.jobId, r);
+  for (const r of inMemJobs) byId.set(r.jobId, r);
+  const merged = Array.from(byId.values());
+  merged.sort((a, b) => new Date(b.createdAtIso).getTime() - new Date(a.createdAtIso).getTime());
+  return { jobs: merged.slice(0, limit), totalInMemory: ImportJobsManager.inMem.size };
 }
 export async function getImportJob(jobId: string): Promise<JobRecord | null> {
   const r = ImportJobsManager.getOrNull(jobId);
@@ -35459,7 +37632,7 @@ export async function runAutomationHealthGeneral(): Promise<{
 }> {
   const cfg = await getAutomationConfig();
   const schedules = (await listAutomationSchedules()).map((s) => ({ id: s.id, title: s.title, nextRunAtIso: s.nextRunAtIso, enabled: s.enabled, lastRunAtIso: s.lastRunAtIso }));
-  const jobs = listImportJobsRecent({ limit: 500 }).jobs;
+  const jobs = (await listImportJobsRecent({ limit: 500 })).jobs;
   const cutoff7 = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const j7 = jobs.filter((j) => new Date(j.createdAtIso).getTime() >= cutoff7);
   let linhasIn = 0, linhasSkip = 0;
