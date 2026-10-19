@@ -16,6 +16,7 @@ import {
   pluginConfigFromOptions,
 } from './import-plugin-loader';
 import type { ConsignadoImportPlugin } from './plugins/import-plugin.interface';
+import { RECURSO_ALEGO_LEARNING_PROFILE } from './profiles/recurso_alego.profile';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: false });
 if (process.env.NODE_ENV !== 'production') {
@@ -6796,17 +6797,12 @@ function learningProfileExists(db: Database, id: string): boolean {
 function ensureDefaultLearningProfiles(db: Database) {
   if (!tableExists(db, 'import_learning_profiles')) return;
   upsertLearningProfile(db, {
-    id: 'recurso_alego',
-    kind: 'recurso_alego',
-    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
-    fileNameRegex: '^ALEGO\\s*-\\s*.+\\.(xlsx|xlsm|xls)$',
-    targetTable: 'Recurso ALEGO',
-    options: {
-      mode: 'append',
-      folderCandidates: ['ALEGO'],
-      ignoreImportados: true,
-      checkDuplicateContent: true,
-    },
+    id: RECURSO_ALEGO_LEARNING_PROFILE.id,
+    kind: RECURSO_ALEGO_LEARNING_PROFILE.kind,
+    matchUrlContains: normalizeUrl(RECURSO_ALEGO_LEARNING_PROFILE.matchUrlContainsRaw),
+    fileNameRegex: RECURSO_ALEGO_LEARNING_PROFILE.fileNameRegex,
+    targetTable: RECURSO_ALEGO_LEARNING_PROFILE.targetTable,
+    options: { ...RECURSO_ALEGO_LEARNING_PROFILE.options },
   });
   // ========= REGRA OFICIAL GRAVADA em 2026-08-17 — RECURSO ADFEGO =========
   // NÃO ALTERAR SEM AVISO EXPLÍCITO DO USUÁRIO. (Carry-over sessão anterior: linha 1 intacta.)

@@ -5,8 +5,13 @@ import type {
 } from './plugins/import-plugin.interface';
 import RecursoMpgoPlugin from './plugins/recurso_mpgo.plugin';
 import RecursoTjgoPlugin from './plugins/recurso_tjgo.plugin';
+import RecursoAlegoPlugin from './plugins/recurso_alego.plugin';
 
-const BUILTIN_PLUGINS: Array<ConsignadoImportPlugin> = [RecursoMpgoPlugin, RecursoTjgoPlugin];
+const BUILTIN_PLUGINS: Array<ConsignadoImportPlugin> = [
+  RecursoMpgoPlugin,
+  RecursoTjgoPlugin,
+  RecursoAlegoPlugin,
+];
 const byIdCache = new Map<string, ConsignadoImportPlugin | null>();
 
 function getBuiltin(pluginId: string): ConsignadoImportPlugin | null {
