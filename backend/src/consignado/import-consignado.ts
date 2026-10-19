@@ -16,6 +16,7 @@ import {
   pluginConfigFromOptions,
 } from './import-plugin-loader';
 import type { ConsignadoImportPlugin } from './plugins/import-plugin.interface';
+import { RECURSO_TCE_LEARNING_PROFILE } from './profiles/recurso_tce.profile';
 import { RECURSO_ALEGO_LEARNING_PROFILE } from './profiles/recurso_alego.profile';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env'), override: false });
@@ -6854,33 +6855,12 @@ function ensureDefaultLearningProfiles(db: Database) {
     },
   });
   upsertLearningProfile(db, {
-    id: 'recurso_tce',
-    kind: 'recurso_tce',
-    matchUrlContains: normalizeUrl('/99-Automações_TI/9.Recuperação de Crédito/'),
-    fileNameRegex: '.*TCE.*\\.(xlsx|xlsm|xls)$',
-    targetTable: 'Recurso TCE',
-    options: {
-      mode: 'append',
-      profileVersion: '2026-09-14_tce_fix_header_and_compet_v2_copetencia_in_hash',
-      folderCandidates: ['Relatório Orgão/TCE', 'TCE'],
-      ignoreImportados: true,
-      checkDuplicateContent: true,
-      strictColumnWhitelist: [
-        'CDG_ORDEM',
-        'Nome',
-        'CPF',
-        'Copetencia',
-        'PARCELA A SER PAGA',
-        'TOTAL DE PARCELAS',
-        'VALOR',
-        'NMR_CONTRATO',
-      ],
-      strictColumnMinMatches: 5,
-      extractCompetenciaFromTopHeader: true,
-      extractCompetenciaFromFileName: true,
-      competenciaMesArquivoSemIncremento: false,
-      moveToImportadosSubfolderAfterImport: true,
-    },
+    id: RECURSO_TCE_LEARNING_PROFILE.id,
+    kind: RECURSO_TCE_LEARNING_PROFILE.kind,
+    matchUrlContains: normalizeUrl(RECURSO_TCE_LEARNING_PROFILE.matchUrlContainsRaw),
+    fileNameRegex: RECURSO_TCE_LEARNING_PROFILE.fileNameRegex,
+    targetTable: RECURSO_TCE_LEARNING_PROFILE.targetTable,
+    options: { ...RECURSO_TCE_LEARNING_PROFILE.options },
   });
   upsertLearningProfile(db, {
     id: 'recurso_tcm',
@@ -7570,6 +7550,15 @@ function getOrgaoColumnsConfigFromDb(db: Database): {
   return out;
 }
 
+// Aliases de órgão que devem ser tratados como o órgão canônico correspondente.
+// Ex.: o extrato (layout TODOS) traz "CONSIGNATARIAS DPCI" como descrição do lançamento, mas o
+// órgão real é a Secretaria de Estado da Segurança (relatório SISBR "86649 - SECRETARIA DE ESTADO
+// DA SEGURANCA"). Canonizando aqui, o De/Para do órgão canônico já cobre a consignatária, sem
+// precisar de um par duplicado no De/Para (que é 1:1).
+const ORGAO_CANONICAL_ALIASES: Record<string, string> = {
+  'CONSIGNATARIAS DPCI': 'SECRETARIA DE ESTADO DA SEGURANCA',
+};
+
 function normalizeOrgaoValueKey(value: string): string {
   const base = value.trim().replace(/\s+/g, ' ');
   const noAccents = base.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -7578,7 +7567,7 @@ function normalizeOrgaoValueKey(value: string): string {
     .replace(/[^A-Z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return normalized;
+  return ORGAO_CANONICAL_ALIASES[normalized] ?? normalized;
 }
 
 function normalizeExtratosOrgaoForMatch(value: unknown): string | null {
@@ -7673,57 +7662,65 @@ function getExtratosConsolidacaoHistoricoKeys(
   return out;
 }
 
-function getRelatorioConsolidacaoOrgaoKeys(
+function getRelatorioConsolidacaoSourceKeysForTarget(
   db: Database,
-  opts: { recursoTableRaw: string },
+  opts: { targetRecursoTableRaw: string },
 ): Set<string> {
-  const baseKey = normalizeOrgaoValueKey(opts.recursoTableRaw);
+  const baseKey = normalizeOrgaoValueKey(opts.targetRecursoTableRaw);
   if (!baseKey) return new Set();
   if (!tableExists(db, 'relatorio_consolidacao_recurso')) return new Set();
   const rows = readTableRows(db, 'relatorio_consolidacao_recurso', [
     'orgao_extratos_key',
+    'orgao_relatorio_raw',
     'orgao_extratos_raw',
     'orgao_relatorio_key',
   ]);
   const out = new Set<string>();
   for (const r of rows) {
-    const ok =
-      typeof (r as any).orgao_extratos_key === 'string'
-        ? String((r as any).orgao_extratos_key).trim()
-        : '';
-    const raw =
-      typeof (r as any).orgao_extratos_raw === 'string'
-        ? String((r as any).orgao_extratos_raw).trim()
-        : '';
-    const resolvedRawKey = raw ? normalizeOrgaoValueKey(resolveRecursoTableForOrgao(db, raw)) : '';
-    if ((!ok || ok !== baseKey) && (!resolvedRawKey || resolvedRawKey !== baseKey)) continue;
-    const rk =
+    const targetKey =
       typeof (r as any).orgao_relatorio_key === 'string'
         ? String((r as any).orgao_relatorio_key).trim()
         : '';
-    if (rk) out.add(rk);
+    const rawTarget =
+      typeof (r as any).orgao_relatorio_raw === 'string'
+        ? String((r as any).orgao_relatorio_raw).trim()
+        : '';
+    const resolvedTargetKey = rawTarget
+      ? normalizeOrgaoValueKey(resolveRecursoTableForOrgao(db, rawTarget))
+      : '';
+    if (
+      (!targetKey || targetKey !== baseKey) &&
+      (!resolvedTargetKey || resolvedTargetKey !== baseKey)
+    ) {
+      continue;
+    }
+    const sourceKey =
+      typeof (r as any).orgao_extratos_key === 'string'
+        ? String((r as any).orgao_extratos_key).trim()
+        : '';
+    if (sourceKey) out.add(sourceKey);
   }
   return out;
 }
 
-function getRelatorioKeysForConsolidacaoTargets(
+function getRelatorioKeysForConsolidacaoSources(
   db: Database,
-  opts: { targetKeys: Set<string> },
+  opts: { sourceKeys: Set<string> },
 ): Set<string> {
   const out = new Set<string>();
-  if (!opts.targetKeys.size) return out;
+  if (!opts.sourceKeys.size) return out;
 
   const recursoTableKeys = new Set(
     listRecursoTableNamesFromDb(db).map((name) => normalizeOrgaoValueKey(name)).filter(Boolean),
   );
-  const recursoTargets = new Set<string>();
+  const recursoSources = new Set<string>();
 
-  for (const key of opts.targetKeys) {
-    if (recursoTableKeys.has(key)) recursoTargets.add(key);
+  for (const key of opts.sourceKeys) {
+    if (recursoTableKeys.has(key)) recursoSources.add(key);
     else out.add(key);
   }
 
-  if (!recursoTargets.size || !tableExists(db, 'orgao_depara')) return out;
+  if (!recursoSources.size || !tableExists(db, 'orgao_depara')) return out;
 
   const rows = readTableRows(db, 'orgao_depara', ['extratos_value', 'relatorio_value']);
   for (const r of rows) {
@@ -7731,20 +7728,20 @@ function getRelatorioKeysForConsolidacaoTargets(
       typeof (r as any).extratos_value === 'string' ? String((r as any).extratos_value).trim() : '';
     const relatorioKey = normalizeRelatorioOrgaoForMatch((r as any).relatorio_value);
     if (!extratosRaw || !relatorioKey) continue;
-    const targetTableKey = normalizeOrgaoValueKey(resolveRecursoTableForOrgao(db, extratosRaw));
-    if (!targetTableKey || !recursoTargets.has(targetTableKey)) continue;
+    const sourceTableKey = normalizeOrgaoValueKey(resolveRecursoTableForOrgao(db, extratosRaw));
+    if (!sourceTableKey || !recursoSources.has(sourceTableKey)) continue;
     out.add(relatorioKey);
   }
 
   return out;
 }
 
-function getRecursoTargetTablesForConsolidacaoSource(
+function getRecursoSourceTablesForConsolidacaoTarget(
   db: Database,
-  opts: { sourceRecursoTableRaw: string },
+  opts: { targetRecursoTableRaw: string },
 ): string[] {
-  const sourceKey = normalizeOrgaoValueKey(opts.sourceRecursoTableRaw);
-  if (!sourceKey) return [];
+  const targetKey = normalizeOrgaoValueKey(opts.targetRecursoTableRaw);
+  if (!targetKey) return [];
   if (!tableExists(db, 'relatorio_consolidacao_recurso')) return [];
 
   const rows = readTableRows(db, 'relatorio_consolidacao_recurso', [
@@ -7756,30 +7753,33 @@ function getRecursoTargetTablesForConsolidacaoSource(
 
   const out = new Set<string>();
   for (const r of rows) {
-    const rawSource =
-      typeof (r as any).orgao_extratos_raw === 'string'
-        ? String((r as any).orgao_extratos_raw).trim()
-        : '';
-    const directSourceKey =
-      typeof (r as any).orgao_extratos_key === 'string'
-        ? String((r as any).orgao_extratos_key).trim()
-      : '';
-    const resolvedSourceKey = rawSource
-      ? normalizeOrgaoValueKey(resolveRecursoTableForOrgao(db, rawSource))
-      : '';
-    if ((!directSourceKey || directSourceKey !== sourceKey) && (!resolvedSourceKey || resolvedSourceKey !== sourceKey)) {
-      continue;
-    }
-
     const rawTarget =
       typeof (r as any).orgao_relatorio_raw === 'string'
         ? String((r as any).orgao_relatorio_raw).trim()
         : '';
-    if (!rawTarget) continue;
-    const resolvedTarget = resolveRecursoTableForOrgao(db, rawTarget);
-    if (!resolvedTarget || !tableExists(db, resolvedTarget)) continue;
-    if (normalizeOrgaoValueKey(resolvedTarget) === sourceKey) continue;
-    out.add(resolvedTarget);
+    const directTargetKey =
+      typeof (r as any).orgao_relatorio_key === 'string'
+        ? String((r as any).orgao_relatorio_key).trim()
+        : '';
+    const resolvedTargetKey = rawTarget
+      ? normalizeOrgaoValueKey(resolveRecursoTableForOrgao(db, rawTarget))
+      : '';
+    if (
+      (!directTargetKey || directTargetKey !== targetKey) &&
+      (!resolvedTargetKey || resolvedTargetKey !== targetKey)
+    ) {
+      continue;
+    }
+
+    const rawSource =
+      typeof (r as any).orgao_extratos_raw === 'string'
+        ? String((r as any).orgao_extratos_raw).trim()
+        : '';
+    if (!rawSource) continue;
+    const resolvedSource = resolveRecursoTableForOrgao(db, rawSource);
+    if (!resolvedSource || !tableExists(db, resolvedSource)) continue;
+    if (normalizeOrgaoValueKey(resolvedSource) === targetKey) continue;
+    out.add(resolvedSource);
   }
 
   return Array.from(out.values()).sort((a, b) => a.localeCompare(b));
@@ -11514,11 +11514,11 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
   const orgaoConfig = getOrgaoColumnsConfigFromDb(db);
   const orgaoDePara = getOrgaoDeParaSets(db, { onlyExtratos: orgaoInput });
   const orgaoDeParaMaps = getOrgaoDeParaMaps(db, { onlyExtratos: orgaoInput });
-  const relatorioConsolidacaoTargetKeys = getRelatorioConsolidacaoOrgaoKeys(db, {
-    recursoTableRaw: recursoTable,
+  const relatorioConsolidacaoSourceKeys = getRelatorioConsolidacaoSourceKeysForTarget(db, {
+    targetRecursoTableRaw: recursoTable,
   });
-  const relatorioConsolidacaoKeys = getRelatorioKeysForConsolidacaoTargets(db, {
-    targetKeys: relatorioConsolidacaoTargetKeys,
+  const relatorioConsolidacaoKeys = getRelatorioKeysForConsolidacaoSources(db, {
+    sourceKeys: relatorioConsolidacaoSourceKeys,
   });
   const relatorioKeysForMatch = new Set<string>([
     ...Array.from(orgaoDePara.relatorio),
@@ -11937,11 +11937,11 @@ export async function conciliarRecursoOrgaoRelatorio(opts: {
   };
   appendRecursoItemsFromTable(recursoTable);
 
-  const consolidatedTargetTables = getRecursoTargetTablesForConsolidacaoSource(db, {
-    sourceRecursoTableRaw: recursoTable,
+  const consolidatedSourceTables = getRecursoSourceTablesForConsolidacaoTarget(db, {
+    targetRecursoTableRaw: recursoTable,
   });
-  for (const targetTable of consolidatedTargetTables) {
-    appendRecursoItemsFromTable(targetTable);
+  for (const sourceTable of consolidatedSourceTables) {
+    appendRecursoItemsFromTable(sourceTable);
   }
 
   const relSelectCols = [
@@ -15805,10 +15805,10 @@ export async function clonarParaRelatorioSisbrFromExtratos(opts: {
     };
     add(requestedSourceRecursoTable);
     add(recursoTable);
-    for (const targetTable of getRecursoTargetTablesForConsolidacaoSource(db, {
-      sourceRecursoTableRaw: recursoTable,
+    for (const sourceTable of getRecursoSourceTablesForConsolidacaoTarget(db, {
+      targetRecursoTableRaw: recursoTable,
     })) {
-      add(targetTable);
+      add(sourceTable);
     }
     return out;
   })();
@@ -31367,26 +31367,23 @@ export async function importByLearningProfileFromFolderUrl(opts: {
       // (2) renomeia chaves em rowsToImport; (3) preserva o valor original em colunas extras (duplicamos antes de sobrescrever).
       // BLOQUEIO RC7 (plugin isolado): se plugin retornou skipAliases=true → NÃO EXECUTA esse bloco (evita renomeação destrutiva MPGO).
       if (!pluginSkipAliases && kindLower === 'recurso_tce') {
-        const canonicalAliasMap: Array<{ canonical: string; aliases: Array<string> }> = [
-          { canonical: 'CDG_ORDEM',          aliases: ['CDG ORDEM', 'COD ORDEM', 'CÓD ORDEM', 'ORDEM', 'CDGORDEM'] },
-          { canonical: 'Nome',               aliases: ['NOME', 'NOME SERVIDOR', 'SERVIDOR', 'FUNCIONÁRIO', 'FUNCIONARIO'] },
-          { canonical: 'CPF',                aliases: ['C.P.F.', 'CPF SERVIDOR', 'CPF DO SERVIDOR', 'CPF DO FUNCIONÁRIO', 'CPF DO FUNCIONARIO'] },
-          { canonical: 'PARCELA A SER PAGA', aliases: ['PARCELA A PAGAR', 'PARCELA', 'PARCELA A SER PAGA (R$)'] },
-          { canonical: 'TOTAL DE PARCELAS',  aliases: ['TOTAL PARCELAS', 'TOTAL DE PARCELA', 'QTDE PARCELAS', 'QTD PARCELAS', 'QUANTIDADE DE PARCELAS'] },
-          { canonical: 'VALOR',              aliases: ['VALOR (R$)', 'VALOR TOTAL', 'VALOR PARCELA'] },
-          { canonical: 'NMR_CONTRATO',       aliases: ['NMR CONTRATO', 'NR CONTRATO', 'Nº CONTRATO', 'N° CONTRATO', 'NUMERO CONTRATO', 'NÚMERO CONTRATO'] },
-        ];
         const buildNorm = (s: string) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu,'').replace(/[^a-z0-9_]+/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
-        const aliasLut = new Map<string, string>();
-        for (const entry of canonicalAliasMap) {
-          for (const a of [entry.canonical, ...entry.aliases]) {
-            aliasLut.set(buildNorm(a), entry.canonical);
-          }
-        }
+        const resolveTceCanonicalHeader = (header: string): string => {
+          const normalized = buildNorm(header);
+          if (!normalized) return header;
+          if (['cdg_ordem', 'cdg ordem', 'cod ordem', 'c d ordem', 'ordem', 'cdgordem'].includes(normalized)) return 'CDG_ORDEM';
+          if (['nome', 'nome servidor', 'servidor', 'funcionario'].includes(normalized)) return 'Nome';
+          if (['cpf', 'c p f', 'cpf servidor', 'cpf do servidor', 'cpf do funcionario'].includes(normalized)) return 'CPF';
+          if (['parcela a ser paga', 'parcela a pagar', 'parcela', 'parcela a ser paga r'].includes(normalized)) return 'PARCELA A SER PAGA';
+          if (['total de parcelas', 'total parcelas', 'total de parcela', 'qtde parcelas', 'qtd parcelas', 'quantidade de parcelas'].includes(normalized)) return 'TOTAL DE PARCELAS';
+          if (['valor', 'valor r', 'valor total', 'valor parcela'].includes(normalized)) return 'VALOR';
+          if (['nmr_contrato', 'nmr contrato', 'nr contrato', 'numero contrato', 'numero do contrato'].includes(normalized)) return 'NMR_CONTRATO';
+          return header;
+        };
         const headerRenames = new Map<string, string>();
         const newHeaders: string[] = [];
         for (const h of headersToImport) {
-          const canonical = aliasLut.get(buildNorm(h));
+          const canonical = resolveTceCanonicalHeader(h);
           if (canonical && !headerRenames.has(h)) headerRenames.set(h, canonical);
           newHeaders.push(canonical || h);
         }
@@ -32120,10 +32117,24 @@ export async function importByLearningProfileFromFolderUrl(opts: {
             const cop = Object.prototype.hasOwnProperty.call(r, 'Copetencia') ? String(r['Copetencia'] ?? '').trim() : '';
             const nome = Object.prototype.hasOwnProperty.call(r, 'Nome') ? String(r['Nome'] ?? '').replace(/\s+/g, ' ').trim().toUpperCase() : '';
             const cpf = normCpf(Object.prototype.hasOwnProperty.call(r, 'CPF') ? r['CPF'] : '');
-            const contrato = normContratoBR(Object.prototype.hasOwnProperty.call(r, 'Contrato') ? r['Contrato'] : '');
-            const nParcela = Object.prototype.hasOwnProperty.call(r, 'N° Parcela')
-              ? String(r['N° Parcela'] ?? '').trim()
-              : (Object.prototype.hasOwnProperty.call(r, 'N Parcela') ? String(r['N Parcela'] ?? '').trim() : '');
+            const contrato = kindLower === 'recurso_tce'
+              ? normContratoBR(
+                  Object.prototype.hasOwnProperty.call(r, 'NMR_CONTRATO') && String(r['NMR_CONTRATO'] ?? '').trim()
+                    ? r['NMR_CONTRATO']
+                    : (Object.prototype.hasOwnProperty.call(r, 'CDG_ORDEM') ? r['CDG_ORDEM'] : ''),
+                )
+              : normContratoBR(Object.prototype.hasOwnProperty.call(r, 'Contrato') ? r['Contrato'] : '');
+            const nParcela = kindLower === 'recurso_tce'
+              ? String(
+                  Object.prototype.hasOwnProperty.call(r, 'PARCELA A SER PAGA')
+                    ? r['PARCELA A SER PAGA'] ?? ''
+                    : '',
+                ).trim()
+              : (
+                  Object.prototype.hasOwnProperty.call(r, 'N° Parcela')
+                    ? String(r['N° Parcela'] ?? '').trim()
+                    : (Object.prototype.hasOwnProperty.call(r, 'N Parcela') ? String(r['N Parcela'] ?? '').trim() : '')
+                );
             return `${cop}|${cpf}|${nome}|${contrato}|${nParcela}`;
           };
 
