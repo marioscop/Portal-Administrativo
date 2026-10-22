@@ -3554,7 +3554,7 @@ export default function CreditoPage() {
       t === 'liquidacao_recurso_judicial_relatorio_sisbr' ||
       t.startsWith('liquidacao_recurso_judicial')
     )
-      return 'Liquidação de Recurso Judical'
+      return 'Liquidação de Recurso Judicial'
     if (t === 'recurso_recebido_a_maior_relatorio_sisbr' || t.startsWith('recurso_recebido_a_maior'))
       return 'Recurso Recebido a Maior'
     if (
@@ -4114,7 +4114,7 @@ export default function CreditoPage() {
         label: 'Liquidação Processo Judicial',
       },
       { key: 'nao_possui_recurso_relatorio_sisbr', label: 'Não possui Recurso' },
-      { key: 'liquidacao_recurso_judicial_relatorio_sisbr', label: 'Liquidação de Recurso Judical' },
+      { key: 'liquidacao_recurso_judicial_relatorio_sisbr', label: 'Liquidação de Recurso Judicial' },
       { key: 'recurso_recebido_a_maior_relatorio_sisbr', label: 'Recurso Recebido a Maior' },
       { key: 'devolucao_parcial_averbacao_relatorio_sisbr', label: 'Devolução Parcial (Averbação)' },
       { key: 'recurso_recebido_a_menor_relatorio_sisbr', label: 'Recurso Recebido a Menor' },
@@ -10061,7 +10061,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoAlegoUrl}
                             onChange={(e) => setRecursoAlegoUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgão/ (ou .../ALEGO%20-%20042026.xlsx)"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/ (ou .../ALEGO%20-%20042026.xlsx)"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10073,7 +10073,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoNeoconsigDemaisUrl}
                             onChange={(e) => setRecursoNeoconsigDemaisUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Demais%20Orgão/NEOCONSIG%20TODOS%20-%2005.2026.xlsx"
+                            placeholder="Ex.: https://.../Relatório%20Demais%20Órgãos/NEOCONSIG%20TODOS%20-%2005.2026.xlsx"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10085,7 +10085,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoAdfegoUrl}
                             onChange={(e) => setRecursoAdfegoUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgão/ADFEGO/ADFEGO.xls"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/ADFEGO/ADFEGO.xls"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10097,7 +10097,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoMpgoUrl}
                             onChange={(e) => setRecursoMpgoUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgao/GOIAS%20MPGO"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/GOIAS%20MPGO"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10109,7 +10109,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoTceUrl}
                             onChange={(e) => setRecursoTceUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgao/TCE"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/TCE"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10121,7 +10121,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoTcmUrl}
                             onChange={(e) => setRecursoTcmUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgao/TCM"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/TCM"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10133,7 +10133,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoTreUrl}
                             onChange={(e) => setRecursoTreUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgão/TRE/RELATORIO%20-%20TRE.xlsx"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/TRE/RELATORIO%20-%20TRE.xlsx"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10145,7 +10145,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoTrtUrl}
                             onChange={(e) => setRecursoTrtUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgão/TRT/Consignados%20TRT%20-%20Maio%20-2026.xlsx"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/TRT/Consignados%20TRT%20-%20Maio%20-2026.xlsx"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10157,7 +10157,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoEletraUrl}
                             onChange={(e) => setRecursoEletraUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgão/Eletra/RELATORIO%20-%20ELETRA.xlsx"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/Eletra/RELATORIO%20-%20ELETRA.xlsx"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10169,7 +10169,7 @@ export default function CreditoPage() {
                             className="control"
                             value={recursoTjgoUrl}
                             onChange={(e) => setRecursoTjgoUrl(e.target.value)}
-                            placeholder="Ex.: https://.../Relatório%20Orgao/TJGO"
+                            placeholder="Ex.: https://.../Relatório%20Órgão/TJGO"
                             disabled={settingsLocked}
                           />
                         </div>
@@ -10341,7 +10341,7 @@ export default function CreditoPage() {
 
                 <section className="panel">
                   <div className="panel-head">
-                    <h2>De/Para de Orgão</h2>
+                    <h2>De/Para de Órgão</h2>
                     <span className="chip">
                       <FileText size={16} />
                       Associação
@@ -15913,7 +15913,7 @@ export default function CreditoPage() {
                       className="field"
                       style={{ display: 'grid', gridTemplateRows: 'auto 44px', alignItems: 'start' }}
                     >
-                      <label>Orgão</label>
+                      <label>Órgão</label>
                       <select
                         className="control month-select"
                         value={conciliacaoOrgao}
@@ -16117,7 +16117,7 @@ export default function CreditoPage() {
                               ),
                             },
                             {
-                              label: 'Total recurso Orgão',
+                              label: 'Total recurso Órgão',
                               value: (
                                 <span
                                   className={isExtratoEqualRecurso ? 'celebrate-check' : undefined}
@@ -20000,13 +20000,13 @@ export default function CreditoPage() {
                                           setRelatorioAntecipadoDevolvidoDate('')
                                         }
                                         if (next === 'liquidacao_processo_judicial_relatorio_sisbr') {
-                                          const DEFAULT_PROCESSO_JUDICIAL = 'Parcelas em Deposito Judical'
+                                          const DEFAULT_PROCESSO_JUDICIAL = 'Parcelas em Depósito Judicial'
                                           if (
                                             !relatorioOcorrenciaJustification.trim() ||
                                             relatorioOcorrenciaJustification
                                               .trim()
                                               .toLowerCase()
-                                              .startsWith('parcelas em deposito judical')
+                                              .startsWith('parcelas em depósito judicial')
                                           ) {
                                             setRelatorioOcorrenciaJustification(DEFAULT_PROCESSO_JUDICIAL)
                                           }
@@ -20030,7 +20030,7 @@ export default function CreditoPage() {
                                           color: 'rgba(255,255,255,0.92)',
                                         }}
                                       >
-                                        Alterar Orgão
+                                        Alterar Órgão
                                       </option>
                                       <option
                                         value="repactuacao_relatorio_sisbr"
@@ -20093,7 +20093,7 @@ export default function CreditoPage() {
                                           color: 'rgba(255,255,255,0.92)',
                                         }}
                                       >
-                                        Liquidação de Recurso Judical
+                                        Liquidação de Recurso Judicial
                                       </option>
                                       <option
                                         value="recurso_recebido_a_maior_relatorio_sisbr"

@@ -283,6 +283,8 @@ export const JURIDICO_CONFIG_KEY_NOTIFICACOES_ESCRITORIO = 'notificacoes:escrito
 export const JURIDICO_CONFIG_KEY_NOTIFICACOES_COBRANCA = 'notificacoes:cobranca:emails';
 export const JURIDICO_CONFIG_KEY_PRAZO_PROTOCOLO_EXTRAJ = 'regras:prazos:protocolo_extrajudicial:dias';
 export const JURIDICO_CONFIG_KEY_PRAZO_AJUIZAMENTO = 'regras:prazos:ajuizamento:dias';
+export const JURIDICO_CONFIG_KEY_CADASTRO_GERENTES = 'cadastro:gerentes:pares';
+export const JURIDICO_CONFIG_KEY_TIPO_ACOES_COLUNAS_PREFIX = 'ui:tipo_acoes:colunas:';
 
 export const DEFAULT_PRAZO_PROTOCOLO_EXTRAJ = 15;
 export const DEFAULT_PRAZO_AJUIZAMENTO = 45;
@@ -295,6 +297,78 @@ export interface JuridicoNotificacoesConfig {
 export interface JuridicoRegrasPrazosConfig {
   prazoProtocoloExtrajudicialDias: number;
   prazoAjuizamentoDias: number;
+}
+
+export interface JuridicoGerenteCadastro {
+  nome: string;
+  pa: string;
+}
+
+export interface JuridicoTipoAcoesColumnWidths {
+  origem: number;
+  autor: number;
+  reu: number;
+  contrato: number;
+  processo: number;
+  status: number;
+  natureza: number;
+  valor: number;
+}
+
+export interface JuridicoTipoAcoesColumnWidthsConfig {
+  widths: JuridicoTipoAcoesColumnWidths;
+  customized: boolean;
+}
+
+const JURIDICO_TIPO_ACOES_COLUNAS_DEFAULT: JuridicoTipoAcoesColumnWidths = {
+  origem: 148,
+  autor: 128,
+  reu: 248,
+  contrato: 126,
+  processo: 192,
+  status: 168,
+  natureza: 162,
+  valor: 118,
+};
+
+const JURIDICO_TIPO_ACOES_COLUNAS_MIN: JuridicoTipoAcoesColumnWidths = {
+  origem: 120,
+  autor: 110,
+  reu: 140,
+  contrato: 110,
+  processo: 160,
+  status: 140,
+  natureza: 142,
+  valor: 100,
+};
+
+function _tipoAcoesColunasConfigKey(email: string): string {
+  return `${JURIDICO_CONFIG_KEY_TIPO_ACOES_COLUNAS_PREFIX}${email}`;
+}
+
+function _clampTipoAcoesColuna(key: keyof JuridicoTipoAcoesColumnWidths, value: unknown): number {
+  const n = Math.round(Number(value));
+  const fallback = JURIDICO_TIPO_ACOES_COLUNAS_DEFAULT[key];
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(JURIDICO_TIPO_ACOES_COLUNAS_MIN[key], Math.min(420, n));
+}
+
+function _parseTipoAcoesColumnWidths(raw: unknown): JuridicoTipoAcoesColumnWidths {
+  let parsed: any = raw;
+  if (typeof raw === 'string') {
+    try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  }
+  const source = parsed && typeof parsed === 'object' ? parsed : {};
+  return {
+    origem: _clampTipoAcoesColuna('origem', source.origem),
+    autor: _clampTipoAcoesColuna('autor', source.autor),
+    reu: _clampTipoAcoesColuna('reu', source.reu),
+    contrato: _clampTipoAcoesColuna('contrato', source.contrato),
+    processo: _clampTipoAcoesColuna('processo', source.processo),
+    status: _clampTipoAcoesColuna('status', source.status),
+    natureza: _clampTipoAcoesColuna('natureza', source.natureza),
+    valor: _clampTipoAcoesColuna('valor', source.valor),
+  };
 }
 
 function _tableExists(db: Database, name: string): boolean {
@@ -418,6 +492,47 @@ export async function getJuridicoRegrasPrazosConfig(): Promise<JuridicoRegrasPra
   });
 }
 
+export async function getJuridicoTipoAcoesColumnWidths(requestedByEmail: unknown): Promise<JuridicoTipoAcoesColumnWidthsConfig> {
+  const by = juridicoNormalizeEmail(requestedByEmail);
+  if (!by) throw new JuridicoForbiddenError('E-mail solicitante não informado.');
+  if (!(await hasJuridicoAccess(by))) {
+    throw new JuridicoForbiddenError('Acesso ao Módulo Jurídico não identificado para este usuário.');
+  }
+  return withJuridicoDbInternal(({ db }) => {
+    const raw = getJuridicoAppConfigValue(db, _tipoAcoesColunasConfigKey(by));
+    return {
+      widths: _parseTipoAcoesColumnWidths(raw),
+      customized: Boolean(raw),
+    };
+  });
+}
+
+export async function setJuridicoTipoAcoesColumnWidths(input: {
+  requestedByEmail: unknown;
+  widths?: unknown;
+  reset?: unknown;
+}): Promise<JuridicoTipoAcoesColumnWidthsConfig> {
+  const by = juridicoNormalizeEmail(input?.requestedByEmail);
+  if (!by) throw new JuridicoForbiddenError('E-mail solicitante não informado.');
+  if (!(await hasJuridicoAccess(by))) {
+    throw new JuridicoForbiddenError('Acesso ao Módulo Jurídico não identificado para este usuário.');
+  }
+  const reset = Boolean(input?.reset);
+  const widths = _parseTipoAcoesColumnWidths(input?.widths);
+  await withJuridicoDbInternal(({ db, persist }) => {
+    setJuridicoAppConfigValue(
+      db,
+      _tipoAcoesColunasConfigKey(by),
+      reset ? null : JSON.stringify(widths),
+    );
+    persist();
+  });
+  return {
+    widths: reset ? { ...JURIDICO_TIPO_ACOES_COLUNAS_DEFAULT } : widths,
+    customized: !reset,
+  };
+}
+
 export async function getDistinctStatusesOptions(): Promise<string[]> {
   return withJuridicoDbInternal(({ db }) => {
     try {
@@ -442,6 +557,121 @@ export async function getDistinctStatusesOptions(): Promise<string[]> {
     } catch {
       return [] as string[];
     }
+  });
+}
+
+export async function getDistinctGerentesOptions(): Promise<string[]> {
+  return withJuridicoDbInternal(({ db }) => {
+    try {
+      const rs = db.exec(
+        `SELECT DISTINCT gerente FROM processos WHERE gerente IS NOT NULL AND TRIM(gerente) <> '' ORDER BY gerente COLLATE NOCASE ASC`,
+      );
+      const cols = rs[0]?.columns || [];
+      const values = rs[0]?.values || [];
+      const idxGerente = cols.indexOf('gerente');
+      const list: string[] = [];
+      const seen = new Set<string>();
+      for (const row of values) {
+        const v = String((idxGerente >= 0 ? row[idxGerente] : null) ?? '').trim();
+        if (!v) continue;
+        const k = v.toUpperCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        list.push(v);
+      }
+      list.sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
+      return list;
+    } catch {
+      return [] as string[];
+    }
+  });
+}
+
+function _parseGerentesCadastro(raw: unknown): JuridicoGerenteCadastro[] {
+  let arr: unknown = raw;
+  if (typeof raw === 'string') {
+    try { arr = JSON.parse(raw); } catch { arr = []; }
+  }
+  if (!Array.isArray(arr)) return [];
+  const out: JuridicoGerenteCadastro[] = [];
+  const seen = new Set<string>();
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const nome = String((item as any).nome ?? '').trim();
+    const pa = String((item as any).pa ?? '').trim();
+    if (!nome) continue;
+    const k = nome.toUpperCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ nome, pa });
+  }
+  out.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }));
+  return out;
+}
+
+function _derivedGerentesComPa(db: Database): JuridicoGerenteCadastro[] {
+  try {
+    const rs = db.exec(
+      `SELECT gerente, numero_pa_enviados_ajuizamento FROM processos
+       WHERE TRIM(COALESCE(gerente, '')) <> ''
+         AND TRIM(COALESCE(numero_pa_enviados_ajuizamento, '')) <> ''
+       ORDER BY id ASC`,
+    );
+    const cols = rs[0]?.columns || [];
+    const values = rs[0]?.values || [];
+    const idxGerente = cols.indexOf('gerente');
+    const idxPa = cols.indexOf('numero_pa_enviados_ajuizamento');
+    const map = new Map<string, JuridicoGerenteCadastro>();
+    for (const row of values) {
+      const nome = String((idxGerente >= 0 ? row[idxGerente] : null) ?? '').trim();
+      const pa = String((idxPa >= 0 ? row[idxPa] : null) ?? '').trim();
+      if (!nome || !pa || pa === '0') continue;
+      map.set(nome.toUpperCase(), { nome, pa });
+    }
+    return Array.from(map.values());
+  } catch {
+    return [];
+  }
+}
+
+function _mergeGerentesCadastro(...lists: JuridicoGerenteCadastro[][]): JuridicoGerenteCadastro[] {
+  const map = new Map<string, JuridicoGerenteCadastro>();
+  for (const list of lists) {
+    for (const g of list) map.set(g.nome.toUpperCase(), g);
+  }
+  const out = Array.from(map.values());
+  out.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }));
+  return out;
+}
+
+export async function getJuridicoGerentesCadastro(): Promise<JuridicoGerenteCadastro[]> {
+  return withJuridicoDbInternal(({ db }) =>
+    _mergeGerentesCadastro(
+      _derivedGerentesComPa(db),
+      _parseGerentesCadastro(getJuridicoAppConfigValue(db, JURIDICO_CONFIG_KEY_CADASTRO_GERENTES)),
+    ),
+  );
+}
+
+export async function addJuridicoGerenteCadastro(input: {
+  nome?: unknown;
+  pa?: unknown;
+  requestedByEmail: unknown;
+}): Promise<JuridicoGerenteCadastro[]> {
+  await requireJuridicoAdmin(input?.requestedByEmail);
+  const nome = String(input?.nome ?? '').trim();
+  const pa = String(input?.pa ?? '').trim();
+  if (nome.length < 2) throw new Error('Informe o nome do gerente (mínimo 2 caracteres).');
+  return withJuridicoDbInternal(({ db, persist }) => {
+    const current = _parseGerentesCadastro(getJuridicoAppConfigValue(db, JURIDICO_CONFIG_KEY_CADASTRO_GERENTES));
+    const key = nome.toUpperCase();
+    const idx = current.findIndex((g) => g.nome.toUpperCase() === key);
+    if (idx >= 0) current[idx] = { nome, pa };
+    else current.push({ nome, pa });
+    current.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }));
+    setJuridicoAppConfigValue(db, JURIDICO_CONFIG_KEY_CADASTRO_GERENTES, JSON.stringify(current));
+    persist();
+    return _mergeGerentesCadastro(_derivedGerentesComPa(db), current);
   });
 }
 
@@ -1290,15 +1520,6 @@ function _buildNovoProcessoCobrancaTemplate(params: { row: Record<string, any> }
           </div>` : ''}
         </div>` : ''}
 
-        <div style="margin-top:22px;border-top:1px dashed #CDD6DB;padding-top:14px;">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-            <a href="#" style="display:block;text-decoration:none;background:linear-gradient(135deg,#7DB61C 0%,#5B9A06 100%);color:#fff;font-size:13px;font-weight:800;text-align:center;padding:11px 10px;border-radius:12px;box-shadow:0 6px 16px rgba(125,182,28,0.28);letter-spacing:0.2px;">✅ Atestar como Válido</a>
-            <a href="#" style="display:block;text-decoration:none;background:linear-gradient(135deg,#F05265 0%,#C23E4D 100%);color:#fff;font-size:13px;font-weight:800;text-align:center;padding:11px 10px;border-radius:12px;box-shadow:0 6px 16px rgba(240,82,101,0.28);letter-spacing:0.2px;">⚠️ Solicitar Ajuste</a>
-          </div>
-          <div style="margin-top:10px;font-size:11.5px;color:#567;text-align:center;">
-            Botões apenas para conferência visual rápida. Para solicitar ajuste, responda este e-mail com as alterações necessárias.
-          </div>
-        </div>
       </td></tr>
       <tr><td style="background:#F4F7F9;padding:14px 24px;font-size:11.5px;color:#556;text-align:center;border-top:1px solid #E6EBEF;line-height:1.55;">
         © 2026 Sicoob Juriscred • Jurídico<br/>

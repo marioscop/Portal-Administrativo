@@ -14,12 +14,14 @@ import {
 
 const FIXED_ADMIN_EMAIL = 'mario.junior@sicoobjuriscred.com.br';
 const BACKEND_PREFIX = '/api/juridico';
+const GERENTE_PA_OPTIONS = ['PA-3348-00', 'PA-3348-01', 'PA-3348-03'] as const;
 
-const parseMoneyCsv = (v: any) => {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'number') return v.toFixed(2).replace('.', ',');
-  return String(v);
-};
+const blobToDataUrl = (blob: Blob): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result ?? ''));
+  reader.onerror = () => reject(reader.error ?? new Error('Falha ao ler arquivo.'));
+  reader.readAsDataURL(blob);
+});
 
 function brl(n: any): string {
   try {
@@ -316,9 +318,11 @@ const JURISCRED_CNPJ = '09.552.111/0001-85';
 function _autoFillJuriscredCnpjOnNome(formCur: any, parte: 'autor' | 'reu', index: number, nextNome: string): any {
   const nomeKey = `${parte}_${index}_nome`;
   const docKey = `${parte}_${index}_cpf_cnpj`;
-  const next = { ...formCur, [nomeKey]: nextNome };
   const raw = String(nextNome ?? '').trim();
-  if (raw && raw.toUpperCase() === 'JURISCRED') {
+  const normalizedNome = /^juriscred\s*celg$/i.test(raw) ? 'JURISCRED' : nextNome;
+  const next = { ...formCur, [nomeKey]: normalizedNome };
+  const normalizedRaw = String(normalizedNome ?? '').trim();
+  if (normalizedRaw && normalizedRaw.toUpperCase() === 'JURISCRED') {
     next[docKey] = JURISCRED_CNPJ;
   }
   return next;
@@ -388,6 +392,111 @@ interface KpiTrend {
   variant?: 'hi' | 'al' | 'gold' | 'navy' | 'def' | 'gray';
 }
 
+type TipoAcoesColumnKey = 'origem' | 'autor' | 'reu' | 'contrato' | 'processo' | 'status' | 'natureza' | 'valor';
+type TipoAcoesColumnWidths = Record<TipoAcoesColumnKey, number>;
+
+const DEFAULT_TIPO_ACOES_COLUMN_WIDTHS: TipoAcoesColumnWidths = {
+  origem: 148,
+  autor: 128,
+  reu: 248,
+  contrato: 126,
+  processo: 192,
+  status: 168,
+  natureza: 162,
+  valor: 118,
+};
+
+const MIN_TIPO_ACOES_COLUMN_WIDTHS: TipoAcoesColumnWidths = {
+  origem: 120,
+  autor: 110,
+  reu: 140,
+  contrato: 110,
+  processo: 160,
+  status: 140,
+  natureza: 142,
+  valor: 100,
+};
+
+const TIPO_ACOES_DEFAULT_WIDTH_TOTAL = Object.values(DEFAULT_TIPO_ACOES_COLUMN_WIDTHS)
+  .reduce((sum, width) => sum + width, 0);
+
+function normalizeTipoAcoesColumnWidths(raw: any): TipoAcoesColumnWidths {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const clamp = (key: TipoAcoesColumnKey) => {
+    const n = Math.round(Number(src[key]));
+    if (!Number.isFinite(n)) return DEFAULT_TIPO_ACOES_COLUMN_WIDTHS[key];
+    return Math.max(MIN_TIPO_ACOES_COLUMN_WIDTHS[key], Math.min(420, n));
+  };
+  return {
+    origem: clamp('origem'),
+    autor: clamp('autor'),
+    reu: clamp('reu'),
+    contrato: clamp('contrato'),
+    processo: clamp('processo'),
+    status: clamp('status'),
+    natureza: clamp('natureza'),
+    valor: clamp('valor'),
+  };
+}
+
+function mapApiRowToGridRow(r: any): JuridicoRow {
+  const coalesceNome = (chaves: string[]): string => {
+    for (const c of chaves) {
+      const v = r?.[c];
+      if (v != null && String(v).trim() !== '') return String(v);
+    }
+    return '';
+  };
+  const getConcatAutores = (): string => {
+    const concat = (r?.autores ?? '');
+    if (concat) return String(concat);
+    const partes: string[] = [];
+    for (let i = 1; i <= 6; i++) {
+      const n = r?.[`autor_${i}_nome`];
+      if (n != null && String(n).trim() !== '') partes.push(String(n));
+    }
+    return partes.join('; ');
+  };
+  const getConcatReus = (): string => {
+    const concat = (r?.reus ?? '');
+    if (concat) return String(concat);
+    const partes: string[] = [];
+    for (let i = 1; i <= 6; i++) {
+      const n = r?.[`reu_${i}_nome`];
+      if (n != null && String(n).trim() !== '') partes.push(String(n));
+    }
+    return partes.join('; ');
+  };
+  const valorNum = (v: any): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const concatAutores = getConcatAutores();
+  const concatReus = getConcatReus();
+  const out: JuridicoRow = {
+    ...(r as any),
+    autor: concatAutores || coalesceNome(['autor_1_nome', 'autor']),
+    reu: concatReus || coalesceNome(['reus', 'reu_1_nome', 'reu']),
+    contrato: coalesceNome(['numero_contrato_sicoob', 'contrato_sicoob', 'contrato']),
+    processo: coalesceNome(['numero_processo_ajuizamento', 'numero_processo', 'processo']),
+    data: coalesceNome([
+      'data_distribuicao_ajuizamento', 'data_evento', 'data_recebimento_cobranca_extrajudicial',
+      'data_protocolizacao_cartorio_extrajudicial', 'created_at', 'data',
+    ]),
+    status: coalesceNome(['status', 'status_ultimo_andamento_ajuizamento', 'status_extrajudicial']),
+    natureza: coalesceNome(['natureza']),
+    valor: valorNum(r?.valor_dado_causa_ajuizamento ?? r?.valor ?? r?.valor_estimado_perda_ajuizamento ?? 0),
+    custas: valorNum(
+      (r?.custas_honorarios ?? 0)
+      + (r?.custas_processuais_extrajudiciais ?? 0)
+      + (r?.honorarios_realizados ?? 0)
+    ),
+  };
+  if (!out.autor) out.autor = concatAutores;
+  if (!out.reu) out.reu = concatReus;
+  return out;
+}
+
 const JuridicoDashboardPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -410,6 +519,9 @@ const JuridicoDashboardPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [ano, setAno] = useState<string>('');
   const [mes, setMes] = useState<string>('');
+  const [chartHoverMonth, setChartHoverMonth] = useState<number | null>(null);
+  const [chartLegendHover, setChartLegendHover] = useState<'passivo' | 'ativo' | 'acordos' | 'mm3' | null>(null);
+  const juridicoChartRef = useRef<ReactECharts | null>(null);
   const [origem, setOrigem] = useState<string>('');
   const [nome, setNome] = useState<string>('');
   const [status, setStatus] = useState<string>('');
@@ -418,10 +530,27 @@ const JuridicoDashboardPage: React.FC = () => {
   const [showCamposBranco, setShowCamposBranco] = useState<boolean>(false);
   const [showSettings, setShowSettings] = useState<boolean>(false);
 
+  const clearChartSeriesHover = useCallback(() => {
+    setChartHoverMonth(null);
+    const chart = juridicoChartRef.current?.getEchartsInstance?.();
+    if (!chart) return;
+    try {
+      chart.dispatchAction({ type: 'hideTip' });
+      chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' } as any);
+      chart.dispatchAction({ type: 'downplay' } as any);
+    } catch {
+      // Ignore transient chart teardown timing during rerenders.
+    }
+  }, []);
+
+  const clearChartInteractionState = useCallback(() => {
+    setChartHoverMonth(null);
+    setChartLegendHover(null);
+  }, []);
+
   /* CAMPOS LACUNAS (mesmos do Score Saúde — manter coerência operacional ↔ executivo) */
   const LACUNA_CAMPOS: { key: string; label: string; weight: number; check: (r: JuridicoRow) => boolean; cor: string }[] = [
     { key: 'gerente',   label: 'Gerente Responsável',     weight: 1.2, cor: '#D64340', check: r => !(r.gerente !== null && r.gerente !== undefined && String(r.gerente).trim().length > 0) },
-    { key: 'serasa',    label: 'Serasa/Jurídico',         weight: 0.9, cor: '#D64340', check: r => !(r.serasa_enviados_juridico !== null && r.serasa_enviados_juridico !== undefined && String(r.serasa_enviados_juridico).trim().length > 0) },
     { key: 'pa_env',    label: 'Nº PA Enviados',          weight: 0.8, cor: '#D64340', check: r => !(r.numero_pa_enviados_ajuizamento !== null && r.numero_pa_enviados_ajuizamento !== undefined && String(r.numero_pa_enviados_ajuizamento).trim().length > 0) },
     { key: 'natureza',  label: 'Natureza (Ativo/Passivo)', weight: 2.5, cor: '#FB8C00', check: r => !(r.natureza !== null && r.natureza !== undefined && String(r.natureza).trim().length > 0) },
     { key: 'tipo_acao', label: 'Tipo Ação (ajuizamento)', weight: 2.0, cor: '#FB8C00', check: r => !(r.tipo_acao_ajuizamento !== null && r.tipo_acao_ajuizamento !== undefined && String(r.tipo_acao_ajuizamento).trim().length > 0) },
@@ -508,7 +637,6 @@ const JuridicoDashboardPage: React.FC = () => {
       { key: 'autor',     label: 'Autor(es) Nome(s)',       weight: 1.2, check: r => nonEmpty(r.autor_1_nome) || nonEmpty(r.autores) },
       { key: 'reu',       label: 'Réu(s) Nome(s)',          weight: 1.2, check: r => nonEmpty(r.reu_1_nome) || nonEmpty(r.reus) },
       { key: 'contrato',  label: 'Nº Contrato Sicoob',      weight: 1.0, check: r => nonEmpty(r.numero_contrato_sicoob) || nonEmpty(r.contrato_sicoob) },
-      { key: 'serasa',    label: 'Serasa/Jurídico',         weight: 0.9, check: r => nonEmpty(r.serasa_enviados_juridico) },
       { key: 'pa',        label: 'Nº PA Enviados',          weight: 0.8, check: r => nonEmpty(r.numero_pa_enviados_ajuizamento) },
     ];
     const W_TOTAL = healthFields.reduce((s, f) => s + f.weight, 0);
@@ -693,14 +821,23 @@ const JuridicoDashboardPage: React.FC = () => {
 
   const [userEmail, setUserEmail] = useState<string>('');
   const [userName, setUserName] = useState<string>('');
+  const [tipoAcoesColumnWidths, setTipoAcoesColumnWidths] = useState<TipoAcoesColumnWidths>(DEFAULT_TIPO_ACOES_COLUMN_WIDTHS);
+  const [tipoAcoesColumnWidthsCustomized, setTipoAcoesColumnWidthsCustomized] = useState(false);
   const [jurIsAdmin, setJurIsAdmin] = useState(false);
   const [jurSettingsLocked, setJurSettingsLocked] = useState(true);
   const [kpis, setKpis] = useState<KpiTrend[]>([]);
-  const [chartData, setChartData] = useState<{ mes: number; ativo: number; passivo: number }[]>([]);
+  const [chartData, setChartData] = useState<{ mes: number; ativo: number; passivo: number; acordos: number }[]>([]);
   const [anosOptions, setAnosOptions] = useState<string[]>([]);
   const [origensOptions, setOrigensOptions] = useState<string[]>([]);
   const [, setStatusesOptions] = useState<string[]>([]);
   const [statusesDistinctDb, setStatusesDistinctDb] = useState<string[]>([]);
+  const [gerentesDistinctDb, setGerentesDistinctDb] = useState<string[]>([]);
+  const [gerentesCadastro, setGerentesCadastro] = useState<Array<{ nome: string; pa: string }>>([]);
+  const [gerenteAddOpen, setGerenteAddOpen] = useState(false);
+  const [gerenteNewNome, setGerenteNewNome] = useState('');
+  const [gerenteNewPa, setGerenteNewPa] = useState('');
+  const [gerenteAddSaving, setGerenteAddSaving] = useState(false);
+  const [dlgSaving, setDlgSaving] = useState(false);
   const [dlgOpen, setDlgOpen] = useState(false);
   const [dlgEdit, setDlgEdit] = useState<JuridicoRow | null>(null);
   const [form, setForm] = useState<Partial<JuridicoRow>>({});
@@ -742,6 +879,10 @@ const JuridicoDashboardPage: React.FC = () => {
   const [iconTextAnimId, setIconTextAnimId] = useState<number>(0);
   const [iconTextKey, setIconTextKey] = useState<number>(0);
   const [iconTextPos, setIconTextPos] = useState<'front'|'back'>('front');
+  const origemFormAtual = String(form.origem ?? '').trim();
+  const showAjuizamentoSection = origemFormAtual === 'Cooperativa Autora' || origemFormAtual === 'Cooperativa Ré';
+  const showExtrajudicialSection = origemFormAtual === 'Extrajudicial';
+  const tipoAcoesColumnWidthsRef = useRef<TipoAcoesColumnWidths>(DEFAULT_TIPO_ACOES_COLUMN_WIDTHS);
   const ac = useRef<AbortController | null>(null);
   const nomeDebounce = useRef<number | null>(null);
 
@@ -835,6 +976,128 @@ const JuridicoDashboardPage: React.FC = () => {
     };
   }, []);
 
+  useEffect(() => {
+    tipoAcoesColumnWidthsRef.current = tipoAcoesColumnWidths;
+  }, [tipoAcoesColumnWidths]);
+
+  useEffect(() => {
+    if (!userEmail) return;
+    let cancelled = false;
+    const loadTipoAcoesColumnWidths = async () => {
+      try {
+        const res = await fetch(`${BACKEND_PREFIX}/config/tipo-acoes-colunas?requestedBy=${encodeURIComponent(userEmail)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && data && typeof data === 'object') {
+          setTipoAcoesColumnWidths(normalizeTipoAcoesColumnWidths(data.widths));
+          setTipoAcoesColumnWidthsCustomized(Boolean(data.customized));
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    void loadTipoAcoesColumnWidths();
+    return () => { cancelled = true; };
+  }, [userEmail]);
+
+  const persistTipoAcoesColumnWidths = useCallback(async (widths: TipoAcoesColumnWidths) => {
+    if (!userEmail) return;
+    try {
+      const res = await fetch(`${BACKEND_PREFIX}/config/tipo-acoes-colunas`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestedByEmail: userEmail,
+          widths,
+        }),
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      if (data && typeof data === 'object') {
+        setTipoAcoesColumnWidths(normalizeTipoAcoesColumnWidths(data.widths));
+        setTipoAcoesColumnWidthsCustomized(Boolean(data.customized));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [userEmail]);
+
+  const resetTipoAcoesColumnWidths = useCallback(async () => {
+    setTipoAcoesColumnWidths({ ...DEFAULT_TIPO_ACOES_COLUMN_WIDTHS });
+    setTipoAcoesColumnWidthsCustomized(false);
+    tipoAcoesColumnWidthsRef.current = { ...DEFAULT_TIPO_ACOES_COLUMN_WIDTHS };
+    if (!userEmail) return;
+    try {
+      const res = await fetch(`${BACKEND_PREFIX}/config/tipo-acoes-colunas`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestedByEmail: userEmail,
+          reset: true,
+        }),
+      });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      if (data && typeof data === 'object') {
+        setTipoAcoesColumnWidths(normalizeTipoAcoesColumnWidths(data.widths));
+        setTipoAcoesColumnWidthsCustomized(Boolean(data.customized));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [userEmail]);
+
+  const startTipoAcoesColumnResize = useCallback((key: TipoAcoesColumnKey, ev: React.MouseEvent<HTMLSpanElement>) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const startX = ev.clientX;
+    const th = ev.currentTarget.closest('th');
+    const startWidth = Math.round(th?.getBoundingClientRect().width || tipoAcoesColumnWidthsRef.current[key]);
+    setTipoAcoesColumnWidthsCustomized(true);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (moveEv: MouseEvent) => {
+      const delta = moveEv.clientX - startX;
+      setTipoAcoesColumnWidths((prev) => ({
+        ...prev,
+        [key]: Math.max(MIN_TIPO_ACOES_COLUMN_WIDTHS[key], Math.min(420, Math.round(startWidth + delta))),
+      }));
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      void persistTipoAcoesColumnWidths(tipoAcoesColumnWidthsRef.current);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [persistTipoAcoesColumnWidths]);
+
+  const tipoAcoesTableMinWidth = useMemo(
+    () => (
+      tipoAcoesColumnWidths.origem
+      + tipoAcoesColumnWidths.autor
+      + tipoAcoesColumnWidths.reu
+      + tipoAcoesColumnWidths.contrato
+      + tipoAcoesColumnWidths.processo
+      + tipoAcoesColumnWidths.status
+      + tipoAcoesColumnWidths.natureza
+      + tipoAcoesColumnWidths.valor
+      + 52
+    ),
+    [tipoAcoesColumnWidths],
+  );
+
+  const getTipoAcoesColumnCssWidth = useCallback((key: TipoAcoesColumnKey): number | string => {
+    if (tipoAcoesColumnWidthsCustomized) return tipoAcoesColumnWidths[key];
+    const pct = (DEFAULT_TIPO_ACOES_COLUMN_WIDTHS[key] / TIPO_ACOES_DEFAULT_WIDTH_TOTAL) * 100;
+    return `max(${pct.toFixed(4)}%, ${MIN_TIPO_ACOES_COLUMN_WIDTHS[key]}px)`;
+  }, [tipoAcoesColumnWidths, tipoAcoesColumnWidthsCustomized]);
+
   const loadDashboard = () => loadDashboardWithFilters(nome, ano, mes, origem, status, natureza);
 
   const loadDashboardWithFilters = async (pNome: string, pAno: string, pMes: string, pOrigem: string, pStatus: string, pNatureza: string) => {
@@ -920,77 +1183,17 @@ const JuridicoDashboardPage: React.FC = () => {
         row0_sample: Array.isArray(data.rows) && data.rows[0] ? data.rows[0] : null,
       });
       const rowsArrRaw: any[] = Array.isArray(data.rows) ? (data.rows as any[]) : [];
-      const rowsArr: JuridicoRow[] = rowsArrRaw.map((r) => {
-        const coalesceNome = (chaves: string[]): string => {
-          for (const c of chaves) {
-            const v = (r as any)[c];
-            if (v != null && String(v).trim() !== '') return String(v);
-          }
-          return '';
-        };
-        const getConcatAutores = (): string => {
-          const concat = (r.autores ?? '');
-          if (concat) return String(concat);
-          const partes: string[] = [];
-          for (let i = 1; i <= 6; i++) {
-            const n = (r as any)[`autor_${i}_nome`];
-            if (n != null && String(n).trim() !== '') partes.push(String(n));
-          }
-          return partes.join('; ');
-        };
-        const concatAutores = getConcatAutores();
-        const getConcatReus = (): string => {
-          const concat = (r.reus ?? '');
-          if (concat) return String(concat);
-          const partes: string[] = [];
-          for (let i = 1; i <= 6; i++) {
-            const n = (r as any)[`reu_${i}_nome`];
-            if (n != null && String(n).trim() !== '') partes.push(String(n));
-          }
-          return partes.join('; ');
-        };
-        const concatReus = getConcatReus();
-        const valorNum = (v: any): number => {
-          const n = Number(v);
-          return Number.isFinite(n) ? n : 0;
-        };
-        const out: JuridicoRow = {
-          ...(r as any),
-          autor: concatAutores || coalesceNome(['autor_1_nome','autor','autor', 'autor_1_nome']),
-          reu: concatReus || coalesceNome(['reus', 'reu_1_nome','reu']),
-          contrato: coalesceNome(['contrato_sicoob','numero_contrato_sicoob','contrato']),
-          processo: coalesceNome(['numero_processo_ajuizamento','numero_processo','processo']),
-          data: coalesceNome([
-            'data_distribuicao_ajuizamento','data_evento','data_recebimento_cobranca_extrajudicial',
-            'data_protocolizacao_cartorio_extrajudicial','created_at','data',
-          ]),
-          status: coalesceNome([
-            'status_ultimo_andamento_ajuizamento','status_extrajudicial','status',
-          ]),
-          natureza: coalesceNome(['natureza']),
-          valor: valorNum(r.valor ?? r.valor_dado_causa_ajuizamento ?? r.valor_estimado_perda_ajuizamento ?? 0),
-          custas: valorNum(
-            (r.custas_honorarios ?? 0)
-            + (r.custas_processuais_extrajudiciais ?? 0)
-            + (r.honorarios_realizados ?? 0)
-          ),
-        };
-        if (!out.autor) out.autor = concatAutores;
-        if (!out.reu) out.reu = concatReus;
-        return out;
-      });
+      const rowsArr: JuridicoRow[] = rowsArrRaw.map(mapApiRowToGridRow);
       setRows(rowsArr);
       let kArr: KpiTrend[] = [];
       if (Array.isArray(data.kpis)) {
         kArr = data.kpis as KpiTrend[];
       } else if (typeof data.kpis === 'object' && data.kpis) {
         const refLabels: Array<[string, string, any, any]> = [
-          ['solicitacoes', 'Solicitacoes enviadas ao juridico', 'def', 'total_registros'],
-          ['contratos_em_atraso', 'Contratos em atraso judicial', 'al', null],
+          ['solicitacoes', 'Solicitações enviadas ao jurídico', 'def', 'total_registros'],
           ['total_valor_passivo', 'Total valor Passivo', 'def', null],
           ['total_valor_ativo', 'Total valor Ativo', 'def', null],
           ['total_valor_extinta', 'Total valor Extinta', 'def', null],
-          ['custas_honorarios_total', 'Custas e honorarios', 'def', null],
           ['processos_extintos', 'Processos extintos', 'def', null],
           ['processos_ajuizados', 'Processos ajuizados', 'gray', null],
         ];
@@ -1025,6 +1228,7 @@ const JuridicoDashboardPage: React.FC = () => {
         mes: typeof c?.mes_idx === 'number' ? c.mes_idx : (i + 1),
         ativo: Number(c?.ativo) ?? 0,
         passivo: Number(c?.passivo) ?? 0,
+        acordos: Number(c?.acordos) ?? 0,
         label: c?.mes_ano ?? c?.mes ?? String(i + 1),
       })));
       setAnosOptions(Array.isArray(data.anos) ? data.anos : []);
@@ -1040,6 +1244,27 @@ const JuridicoDashboardPage: React.FC = () => {
           setStatusesDistinctDb(merged);
         }
       } catch (_eSt) { /* no-op */ }
+      try {
+        const respGe = await fetch(`${BACKEND_PREFIX}/options/distinct-gerentes`, { signal: ctrl.signal });
+        if (respGe.ok) {
+          const geData = await respGe.json();
+          const list: string[] = Array.isArray(geData?.options) ? geData.options : [];
+          list.sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
+          setGerentesDistinctDb(list);
+        }
+      } catch (_eGe) { /* no-op */ }
+      try {
+        const respGc = await fetch(`${BACKEND_PREFIX}/options/cadastro-gerentes`, { signal: ctrl.signal });
+        if (respGc.ok) {
+          const gcData = await respGc.json();
+          const arrGc = Array.isArray(gcData?.options) ? gcData.options : [];
+          setGerentesCadastro(
+            arrGc
+              .map((g: any) => ({ nome: String(g?.nome ?? '').trim(), pa: String(g?.pa ?? '').trim() }))
+              .filter((g: any) => g.nome),
+          );
+        }
+      } catch (_eGc) { /* no-op */ }
       setTotalRegistros(typeof data.total === 'number' ? data.total : (rowsArr.length ?? 0));
       void __dbg('info', 'fe.load.state_applied', {
         rows_len: rowsArr.length,
@@ -1155,24 +1380,289 @@ const JuridicoDashboardPage: React.FC = () => {
     });
   }, [rows, ano, mes, origem, nome, status, natureza, lacunasFiltro, LACUNA_CAMPOS]);
 
-  const handleCsv = () => {
-    const headers = ['Origem', 'Data', 'Autor(es)', 'Réu(s)', 'Contrato Sicoob',
-      'Nº Processo', 'Status', 'Natureza', 'Valor', 'Custas/Honorários'];
-    const rowsArr = rows.map(r => [
-      r.origem ?? '', r.data ?? '', r.autor ?? '', r.reu ?? '',
-      r.contrato ?? '', r.processo ?? '', r.status ?? '', r.natureza ?? '',
-      parseMoneyCsv(r.valor), parseMoneyCsv(r.custas),
-    ]);
-    const esc = (s: any) => `"${String(s ?? '').replace(/"/g, '""')}"`;
-    const lines = [headers.map(esc).join(';')]
-      .concat(rowsArr.map(r => r.map(esc).join(';')));
-    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `processos-juridico-${ano || 'todos'}-${mes || 'todos'}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const autoSizeTipoAcoesColumn = useCallback((key: TipoAcoesColumnKey) => {
+    const measureCanvas = document.createElement('canvas');
+    const ctx = measureCanvas.getContext('2d');
+    if (!ctx) return;
+
+    const headerLabels: Record<TipoAcoesColumnKey, string> = {
+      origem: 'Origem',
+      autor: 'Autor(es)',
+      reu: 'Réu(s)',
+      contrato: 'Contrato Sicoob',
+      processo: 'Nº Processo',
+      status: 'Status',
+      natureza: 'Natureza',
+      valor: 'Valor',
+    };
+
+    const sampleValues: Record<TipoAcoesColumnKey, string[]> = {
+      origem: filtered.map((r) => String(r.origem || '-')),
+      autor: filtered.map((r) => String(r.autor || '-')),
+      reu: filtered.map((r) => String(r.reu || '-')),
+      contrato: filtered.map((r) => String(r.contrato || '-')),
+      processo: filtered.map((r) => String(r.processo || '-')),
+      status: filtered.map((r) => String(r.status || '-')),
+      natureza: filtered.map((r) => String(r.natureza || '-')),
+      valor: filtered.map((r) => brl(r.valor)),
+    };
+
+    const headerFont = `${thStyle.fontWeight || 800} ${thStyle.fontSize || 12}px Fira Sans, system-ui, -apple-system, sans-serif`;
+    const bodyFontByKey: Record<TipoAcoesColumnKey, string> = {
+      origem: `${tdStyle.fontSize || 13.2}px Fira Sans, system-ui, -apple-system, sans-serif`,
+      autor: `${tdStyle.fontSize || 13.2}px Fira Sans, system-ui, -apple-system, sans-serif`,
+      reu: `${tdStyle.fontSize || 13.2}px Fira Sans, system-ui, -apple-system, sans-serif`,
+      contrato: `${tdStyle.fontSize || 13.2}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`,
+      processo: `${tdStyle.fontSize || 13.2}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`,
+      status: `${tdStyle.fontSize || 13.2}px Fira Sans, system-ui, -apple-system, sans-serif`,
+      natureza: `700 11px Fira Sans, system-ui, -apple-system, sans-serif`,
+      valor: `${tdStyle.fontSize || 13.2}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`,
+    };
+
+    ctx.font = headerFont;
+    let maxWidth = Math.ceil(ctx.measureText(headerLabels[key]).width);
+
+    ctx.font = bodyFontByKey[key];
+    for (const value of sampleValues[key]) {
+      maxWidth = Math.max(maxWidth, Math.ceil(ctx.measureText(value).width));
+    }
+
+    const paddingExtra = key === 'natureza' ? 42 : key === 'valor' ? 28 : 24;
+    const nextWidth = Math.max(MIN_TIPO_ACOES_COLUMN_WIDTHS[key], Math.min(420, maxWidth + paddingExtra));
+
+    setTipoAcoesColumnWidthsCustomized(true);
+    setTipoAcoesColumnWidths((prev) => ({
+      ...prev,
+      [key]: nextWidth,
+    }));
+    const nextWidths = {
+      ...tipoAcoesColumnWidthsRef.current,
+      [key]: nextWidth,
+    };
+    tipoAcoesColumnWidthsRef.current = nextWidths;
+    void persistTipoAcoesColumnWidths(nextWidths);
+  }, [filtered, persistTipoAcoesColumnWidths]);
+
+  const renderTipoAcoesResizeHandle = useCallback((key: TipoAcoesColumnKey) => (
+    <span
+      role="presentation"
+      onMouseDown={(ev) => startTipoAcoesColumnResize(key, ev)}
+      onDoubleClick={(ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        autoSizeTipoAcoesColumn(key);
+      }}
+      style={{
+        position: 'absolute',
+        top: 0,
+        right: -6,
+        width: 12,
+        height: '100%',
+        cursor: 'col-resize',
+        zIndex: 4,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+      title="Arraste para ajustar a coluna ou dê duplo clique para autoajustar"
+    >
+      <span style={{
+        width: 2,
+        height: 18,
+        borderRadius: 999,
+        background: 'rgba(255,255,255,0.96)',
+        boxShadow: '0 0 0 1px rgba(255,255,255,0.14)',
+        opacity: 0.95,
+      }} />
+    </span>
+  ), [autoSizeTipoAcoesColumn, startTipoAcoesColumnResize]);
+
+  const handleExportXlsx = async () => {
+    try {
+      const { Workbook } = await import('exceljs');
+      const workbook = new Workbook();
+      workbook.creator = 'Portal Administrativo';
+      workbook.company = 'Sicoob Juriscred';
+      workbook.created = new Date();
+      workbook.modified = new Date();
+
+      const sheet = workbook.addWorksheet('Tipo de ações', {
+        views: [{ state: 'frozen', ySplit: 6 }],
+      });
+
+      sheet.properties.defaultRowHeight = 21;
+      sheet.getColumn(1).width = 16;
+      sheet.getColumn(2).width = 18;
+      sheet.getRow(1).height = 30;
+      sheet.getRow(2).height = 24;
+      sheet.getRow(3).height = 20;
+      sheet.pageSetup = {
+        orientation: 'landscape',
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 },
+      };
+      const xlsxHeaderBg = 'FF003641';
+      const paintRange = (fromRow: number, toRow: number, fromCol: number, toCol: number, argb: string) => {
+        for (let row = fromRow; row <= toRow; row++) {
+          for (let col = fromCol; col <= toCol; col++) {
+            sheet.getCell(row, col).fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb },
+            };
+          }
+        }
+      };
+      paintRange(1, 3, 1, 9, xlsxHeaderBg);
+      paintRange(4, 5, 1, 9, xlsxHeaderBg);
+      const exportadoPor = (userName || userEmail || 'Usuário não identificado').trim();
+      const exportadoEm = new Date().toLocaleString('pt-BR');
+
+      const filtrosAtivos = [
+        ano ? `Ano: ${ano}` : null,
+        mes ? `Mês: ${monthLabel(parseInt(mes, 10))}` : null,
+        origem ? `Origem: ${origem}` : null,
+        nome ? `Consulta: ${nome}` : null,
+        status ? `Status: ${status}` : null,
+        natureza ? `Natureza: ${natureza}` : null,
+        lacunasFiltro.length ? `Lacunas: ${lacunasFiltro.join(', ')}` : null,
+      ].filter(Boolean).join(' | ') || 'Sem filtros adicionais';
+
+      try {
+        const logoRes = await fetch('/assets/sicoob-juriscred.png', { cache: 'no-cache' });
+        if (logoRes.ok) {
+          const logoBase64 = await blobToDataUrl(await logoRes.blob());
+          const logoId = workbook.addImage({ base64: logoBase64, extension: 'png' });
+          sheet.addImage(logoId, {
+            tl: { col: 0.18, row: 0.08 },
+            ext: { width: 196, height: 52 },
+          });
+        }
+      } catch {
+        /* segue sem logo se o asset não puder ser lido */
+      }
+
+      sheet.mergeCells('D1:I1');
+      sheet.getCell('D1').value = 'Módulo Jurídico - Tipo de ações';
+      sheet.getCell('D1').font = { name: 'Fira Sans', bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
+      sheet.getCell('D1').alignment = { vertical: 'middle', horizontal: 'left' };
+
+      sheet.mergeCells('D2:I2');
+      sheet.getCell('D2').value = 'Exportação XLSX conforme os filtros aplicados na tela';
+      sheet.getCell('D2').font = { name: 'Fira Sans', size: 11, color: { argb: 'FFD8ECE8' } };
+      sheet.getCell('D2').alignment = { vertical: 'middle', horizontal: 'left' };
+
+      sheet.mergeCells('D3:I3');
+      sheet.getCell('D3').value = `Exportado por: ${exportadoPor} | Data/Hora: ${exportadoEm}`;
+      sheet.getCell('D3').font = { name: 'Fira Sans', size: 10.5, color: { argb: 'FFB8D7D1' } };
+      sheet.getCell('D3').alignment = { vertical: 'middle', horizontal: 'left' };
+
+      sheet.mergeCells('A4:I4');
+      sheet.getCell('A4').value = `Filtros: ${filtrosAtivos}`;
+      sheet.getCell('A4').font = { name: 'Fira Sans', size: 10.5, color: { argb: 'FFFFFFFF' } };
+      sheet.getCell('A4').alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
+
+      sheet.mergeCells('A5:I5');
+      sheet.getCell('A5').value = `Total exportado: ${filtered.length} registro${filtered.length === 1 ? '' : 's'}`;
+      sheet.getCell('A5').font = { name: 'Fira Sans', size: 10.5, bold: true, color: { argb: 'FF96CB3A' } };
+      sheet.getCell('A5').alignment = { vertical: 'middle', horizontal: 'left' };
+
+      const headerRowIndex = 6;
+      const columns = [
+        { header: 'Origem', key: 'origem', width: 22 },
+        { header: 'Data', key: 'data', width: 14 },
+        { header: 'Autor(es)', key: 'autor', width: 30 },
+        { header: 'Réu(s)', key: 'reu', width: 30 },
+        { header: 'Contrato Sicoob', key: 'contrato', width: 18 },
+        { header: 'Nº Processo', key: 'processo', width: 22 },
+        { header: 'Status', key: 'status', width: 28 },
+        { header: 'Natureza', key: 'natureza', width: 14 },
+        { header: 'Valor', key: 'valor', width: 16 },
+      ] as const;
+
+      columns.forEach((col, index) => {
+        const cell = sheet.getCell(headerRowIndex, index + 1);
+        cell.value = col.header;
+        cell.font = { name: 'Fira Sans', bold: true, size: 11, color: { argb: 'FFFFFFFF' } };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: xlsxHeaderBg },
+        };
+        cell.alignment = { vertical: 'middle', horizontal: index >= 8 ? 'right' : 'left' };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FF0A4A57' } },
+          bottom: { style: 'thin', color: { argb: 'FF0A4A57' } },
+          left: { style: 'thin', color: { argb: 'FF0A4A57' } },
+          right: { style: 'thin', color: { argb: 'FF0A4A57' } },
+        };
+        sheet.getColumn(index + 1).width = col.width;
+      });
+
+      filtered.forEach((r, idx) => {
+        const rowIndex = headerRowIndex + 1 + idx;
+        const row = sheet.getRow(rowIndex);
+        row.values = [
+          r.origem ?? '',
+          r.data ?? '',
+          r.autor ?? '',
+          r.reu ?? '',
+          r.contrato ?? '',
+          r.processo ?? '',
+          r.status ?? '',
+          r.natureza ?? '',
+          Number(r.valor ?? 0),
+        ];
+        row.eachCell((cell, colNumber) => {
+          cell.font = {
+            name: colNumber >= 9 ? 'Fira Code' : 'Fira Sans',
+            size: 10.5,
+            color: { argb: 'FF003641' },
+          };
+          cell.alignment = {
+            vertical: 'middle',
+            horizontal: colNumber >= 9 ? 'right' : 'left',
+            wrapText: colNumber === 3 || colNumber === 4 || colNumber === 7,
+          };
+          cell.border = {
+            bottom: { style: 'thin', color: { argb: '1A003641' } },
+          };
+          if (idx % 2 === 1) {
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: '0A00AE9D' },
+            };
+          }
+        });
+        row.getCell(9).numFmt = '"R$" #,##0.00';
+      });
+
+      sheet.autoFilter = {
+        from: { row: headerRowIndex, column: 1 },
+        to: { row: headerRowIndex, column: columns.length },
+      };
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob(
+        [buffer],
+        { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+      );
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `processos-juridico-${ano || 'todos'}-${mes || 'todos'}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setToast({ kind: 'ok', title: 'XLSX exportado', msg: `${filtered.length} registro${filtered.length === 1 ? '' : 's'} exportado${filtered.length === 1 ? '' : 's'} com sucesso.` });
+      setTimeout(() => setToast(null), 2600);
+    } catch (e: any) {
+      console.error(e);
+      setToast({ kind: 'err', title: 'Falha ao exportar XLSX', msg: e?.message || 'Não foi possível gerar o arquivo.' });
+      setTimeout(() => setToast(null), 3600);
+    }
   };
 
   const handleNovo = () => {
@@ -1315,8 +1805,8 @@ const JuridicoDashboardPage: React.FC = () => {
       tipo_acao_ajuizamento: toText(base.tipo_acao_ajuizamento),
       origem_processo_1grau_ajuizamento: toText(base.origem_processo_1grau_ajuizamento),
       processos_vinculados_ajuizamento: toText(base.processos_vinculados_ajuizamento),
-      status_ultimo_andamento_ajuizamento: toText(base.status_ultimo_andamento_ajuizamento),
-      status_extrajudicial: toText(base.status_extrajudicial),
+      status_ultimo_andamento_ajuizamento: toText(base.status ?? base.status_ultimo_andamento_ajuizamento ?? base.status_extrajudicial),
+      status_extrajudicial: toText(base.status ?? base.status_extrajudicial ?? base.status_ultimo_andamento_ajuizamento),
       matricula_extrajudicial: toText(base.matricula_extrajudicial),
       numero_protocolo_cartorio_extrajudicial: toText(base.numero_protocolo_cartorio_extrajudicial),
       cartorio_extrajudicial: toText(base.cartorio_extrajudicial),
@@ -1326,7 +1816,7 @@ const JuridicoDashboardPage: React.FC = () => {
       serasa_enviados_juridico: toText(base.serasa_enviados_juridico),
       origem_importacao: toText(base.origem_importacao),
       observacoes: toText(base.observacoes),
-      status: toText(base.status),
+      status: toText(base.status ?? base.status_ultimo_andamento_ajuizamento ?? base.status_extrajudicial),
       natureza: toText(base.natureza) || 'Ativo',
     };
     setDlgEdit(r);
@@ -1373,6 +1863,7 @@ const JuridicoDashboardPage: React.FC = () => {
   };
 
   const handleSalvar = async () => {
+    if (dlgSaving) return;
     const autores = Array.from({ length: 6 }, (_, i) => ({
       nome: String(form[`autor_${i + 1}_nome`] ?? '').trim(),
       cpf: String(form[`autor_${i + 1}_cpf_cnpj`] ?? '').trim(),
@@ -1443,6 +1934,9 @@ const JuridicoDashboardPage: React.FC = () => {
     body.reu = reusTexto.join('; ');
     body.autores = autoresTexto.join('; ');
     body.reus = reusTexto.join('; ');
+    body.status = String(body.status ?? '').trim();
+    body.status_ultimo_andamento_ajuizamento = body.status || undefined;
+    body.status_extrajudicial = body.status || undefined;
     body.contrato_sicoob = String(body.numero_contrato_sicoob ?? body.contrato_sicoob ?? '').trim() || undefined;
     body.numero_contrato_sicoob = body.contrato_sicoob;
     body.numero_processo = String(body.numero_processo_ajuizamento ?? body.numero_processo ?? '').trim() || undefined;
@@ -1452,6 +1946,7 @@ const JuridicoDashboardPage: React.FC = () => {
     body.requestedByEmail = jurCurrentEmail || FIXED_ADMIN_EMAIL;
 
     try {
+      setDlgSaving(true);
       const id = dlgEdit?.id;
       const url = id
         ? `${BACKEND_PREFIX}/processos/${encodeURIComponent(String(id))}`
@@ -1463,10 +1958,22 @@ const JuridicoDashboardPage: React.FC = () => {
         body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(await res.text() || 'Sem permissão.');
+      const saved = await res.json().catch(() => null);
+      if (saved && typeof saved === 'object') {
+        const savedRow = mapApiRowToGridRow(saved);
+        setRows((prev) => {
+          const exists = prev.some((r) => String(r.id) === String(savedRow.id));
+          if (exists) return prev.map((r) => (String(r.id) === String(savedRow.id) ? { ...r, ...savedRow } : r));
+          return [savedRow, ...prev];
+        });
+        if (!dlgEdit?.id) setTotalRegistros((prev) => prev + 1);
+      }
       setDlgOpen(false);
-      loadDashboard();
+      await loadDashboard();
     } catch (e: any) {
       alert(e?.message || 'Erro ao salvar.');
+    } finally {
+      setDlgSaving(false);
     }
   };
 
@@ -1794,6 +2301,60 @@ const JuridicoDashboardPage: React.FC = () => {
     }
   };
 
+  const addGerenteCadastro = async (nomeRaw: string, paRaw: string) => {
+    const nome = String(nomeRaw ?? '').trim();
+    const pa = String(paRaw ?? '').trim();
+    if (nome.length < 2) {
+      setToast({ kind: 'err', title: 'Gerente inválido', msg: 'Digite o nome do gerente (mínimo 2 caracteres).' });
+      setTimeout(() => setToast(null), 3300);
+      return false;
+    }
+    if (!jurIsAdmin) {
+      setToast({ kind: 'err', title: 'Sem permissão', msg: 'Somente administradores podem cadastrar gerentes.' });
+      setTimeout(() => setToast(null), 3300);
+      return false;
+    }
+    try {
+      setGerenteAddSaving(true);
+      const res = await fetch(`${BACKEND_PREFIX}/config/gerentes/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nome, pa, requestedByEmail: userEmail || undefined }),
+      });
+      if (!res.ok) {
+        let txt = 'Falha ao cadastrar gerente.';
+        try { const err = await res.text(); if (err && err.trim()) txt = err; } catch {}
+        if (res.status === 403 || res.status === 401) txt = 'Sem permissão — entre em contato com um administrador.';
+        throw new Error(txt);
+      }
+      const saved = await res.json().catch(() => null);
+      const arrSaved = Array.isArray(saved?.entries) ? saved.entries : [];
+      const list = arrSaved
+        .map((g: any) => ({ nome: String(g?.nome ?? '').trim(), pa: String(g?.pa ?? '').trim() }))
+        .filter((g: any) => g.nome);
+      setGerentesCadastro(list);
+      setGerentesDistinctDb(prev => {
+        const merged = Array.from(new Set([...list.map((g: any) => g.nome), ...prev]));
+        merged.sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }));
+        return merged;
+      });
+      setForm(prev => {
+        const next: any = { ...prev, gerente: nome };
+        if (pa) next.numero_pa_enviados_ajuizamento = pa;
+        return next;
+      });
+      setToast({ kind: 'ok', title: 'Gerente cadastrado', msg: `"${nome}"${pa ? ` — PA ${pa}` : ''} adicionado com sucesso.` });
+      setTimeout(() => setToast(null), 3300);
+      return true;
+    } catch (e: any) {
+      setToast({ kind: 'err', title: 'Erro ao cadastrar', msg: e?.message || 'Tente novamente em alguns segundos.' });
+      setTimeout(() => setToast(null), 4200);
+      return false;
+    } finally {
+      setGerenteAddSaving(false);
+    }
+  };
+
   const handleSalvarRegrasPrazos = async () => {
     if (!jurIsAdmin) return;
     if (jurSettingsLocked) {
@@ -1927,47 +2488,105 @@ const JuridicoDashboardPage: React.FC = () => {
       chartData.find(d => d.mes === i + 1)?.ativo ?? 0);
     const passivoArr = Array.from({ length: 12 }, (_, i) =>
       chartData.find(d => d.mes === i + 1)?.passivo ?? 0);
+    const acordosArr = Array.from({ length: 12 }, (_, i) =>
+      chartData.find(d => d.mes === i + 1)?.acordos ?? 0);
     const mesSel = mes ? parseInt(mes, 10) : null;
-    const maxVal = Math.max(1, ...ativoArr, ...passivoArr);
-    const maxWithTop = Math.ceil(maxVal * 1.28);
-    const thresholdForInside = maxWithTop * 0.82;
+    const activeMonth = chartHoverMonth ?? mesSel;
+    const allSeriesValues = [...ativoArr, ...passivoArr, ...acordosArr]
+      .map((v) => Number(v) || 0)
+      .filter((v) => v > 0);
+    const sortedSeriesValues = [...allSeriesValues].sort((a, b) => b - a);
+    const maxVal = sortedSeriesValues[0] ?? 0;
 
-    const labelFromValue = (v: number, isInside: boolean) => {
+    const calcNiceStep = (value: number) => {
+      if (!Number.isFinite(value) || value <= 0) return 1;
+      const magnitude = 10 ** Math.floor(Math.log10(value));
+      const normalized = value / magnitude;
+      if (normalized <= 1) return magnitude;
+      if (normalized <= 2) return 2 * magnitude;
+      if (normalized <= 5) return 5 * magnitude;
+      return 10 * magnitude;
+    };
+
+    const calcAxisInterval = (value: number, approxTicks = 5) => {
+      const base = Math.max(value / Math.max(approxTicks, 1), 1);
+      return calcNiceStep(base);
+    };
+
+    const calcAxisMax = (value: number, approxTicks = 5) => {
+      const interval = calcAxisInterval(value, approxTicks);
+      return Math.max(interval, Math.ceil(Math.max(value, 1) / interval) * interval);
+    };
+
+    const formatAxisMoney = (v: number) => {
+      if (v === 0) return '0';
+      const abs = Math.abs(v);
+      if (abs >= 1000000) return `${(v / 1000000).toFixed(1)}M`;
+      if (abs >= 1000) return `${Math.round(v / 1000)}k`;
+      return `${Math.round(v)}`;
+    };
+
+      const useAxisBreak = false;
+    const AXIS_BREAK_LOW_MAX = useAxisBreak
+      ? calcAxisMax(Math.max(maxVal * 0.06, 350000), 4)
+      : 0;
+    const AXIS_BREAK_HIGH_MIN = useAxisBreak
+      ? Math.max(AXIS_BREAK_LOW_MAX + calcAxisInterval(AXIS_BREAK_LOW_MAX, 4), Math.floor((maxVal * 0.72) / 100000) * 100000)
+      : 0;
+    const AXIS_BREAK_HIGH_MAX = useAxisBreak
+      ? calcAxisMax(maxVal * 1.02, 4)
+      : 0;
+    const upperBandMax = useAxisBreak ? Math.max(AXIS_BREAK_HIGH_MAX - AXIS_BREAK_HIGH_MIN, 0) : 0;
+    const singleAxisTickCount = maxVal >= 10000000 ? 6 : 5;
+    const singleAxisBaseMax = maxVal > 0 ? maxVal * (maxVal >= 10000000 ? 1.05 : 1.08) : 1000000;
+    const singleAxisInterval = calcAxisInterval(singleAxisBaseMax, singleAxisTickCount);
+    const singleAxisMax = Math.max(
+      singleAxisInterval * singleAxisTickCount,
+      Math.ceil(Math.max(singleAxisBaseMax, 1) / singleAxisInterval) * singleAxisInterval,
+    );
+
+    const formatCompactMoney = (v: number) => {
+      if (v <= 0) return '';
+      const abs = Math.abs(v);
+      if (abs >= 1000000) {
+        return 'R$ ' + (v / 1000000).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + 'M';
+      } else if (abs >= 1000) {
+        return 'R$ ' + Math.round(v / 1000).toLocaleString('pt-BR') + 'k';
+      }
+      return brl(v);
+    };
+
+    const formatVariacaoPct = (passivo: number, ativo: number) => {
+      if (!(passivo > 0) || !(ativo >= 0)) return null;
+      const pct = ((ativo - passivo) / passivo) * 100;
+      const sign = pct > 0 ? '+' : '';
+      return {
+        pct,
+        label: `${sign}${Math.round(pct).toLocaleString('pt-BR')}%`,
+        direction: pct >= 0 ? 'up' : 'down',
+      } as const;
+    };
+      const movingAverageAtivoArr = ativoArr.map((_value, index, arr) => {
+        const start = Math.max(0, index - 2);
+        const window = arr.slice(start, index + 1).map((v) => Number(v) || 0);
+        const total = window.reduce((sum, item) => sum + item, 0);
+        return window.length ? total / window.length : 0;
+      });
+
+    const labelFromValue = (v: number, mode: 'lower' | 'upper') => {
       const base: any = {
         show: v > 0,
         rotate: 90,
-        position: isInside ? 'insideTop' : 'top',
-        distance: isInside ? 6 : 4,
-        formatter: () => {
-          if (v <= 0) return '';
-          const abs = Math.abs(v);
-          if (abs >= 1000000) {
-            return 'R$ ' + (v / 1000000).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + 'M';
-          } else if (abs >= 1000) {
-            return 'R$ ' + Math.round(v / 1000).toLocaleString('pt-BR') + 'k';
-          }
-          return brl(v);
-        },
+        position: mode === 'upper' ? 'inside' : 'top',
+        distance: mode === 'upper' ? 0 : 4,
+        formatter: () => formatCompactMoney(v),
         fontSize: 10.5,
         fontFamily: "'Fira Sans', sans-serif",
         fontWeight: 700,
-        align: 'left',
-        verticalAlign: 'middle',
+        align: mode === 'upper' ? 'center' : 'left',
+        verticalAlign: mode === 'upper' ? 'middle' : 'middle',
       };
-      if (isInside) {
-        // dentro da barra (navy/verde escuro) → texto BRANCO, LIMPO, sem fundo (não queremos sobrepor o card)
-        return {
-          ...base,
-          color: '#FFFFFF',
-          textBorderColor: 'rgba(0,0,0,0.22)',
-          textBorderWidth: 0.8,
-          textShadowBlur: 2,
-          textShadowColor: 'rgba(0,0,0,0.25)',
-        };
-      }
-      // FORA da barra (top, canvas branco) → CARD estilo "Total valor Extinta" completo
-      return {
-        ...base,
+      const cardStyle = {
         color: '#003641',
         backgroundColor: {
           type: 'linear', x: 0, y: 0, x2: 1, y2: 1,
@@ -1982,21 +2601,498 @@ const JuridicoDashboardPage: React.FC = () => {
         padding: [4, 6, 4, 7],
         extraCssText: `border-left: 3px solid; border-image: linear-gradient(180deg, #33C5B8 0%, #00AE9D 100%) 1; box-shadow: 0 3px 8px rgba(0,54,65,0.09);`,
       };
+      if (mode === 'upper') {
+        return {
+          ...base,
+          ...cardStyle,
+          offset: [0, 0],
+        };
+      }
+      return {
+        ...base,
+        ...cardStyle,
+      };
     };
 
+    const buildBarStyle = (
+      kind: 'passivo' | 'ativo' | 'acordos',
+      index: number,
+      borderRadius: number[],
+    ) => {
+      const selected = activeMonth === index + 1;
+        const legendMatched = !chartLegendHover || chartLegendHover === kind;
+      const palette = kind === 'passivo'
+        ? {
+            top: selected ? '#3A7A88' : '#1D5A68',
+            mid: selected ? '#2C6672' : '#114856',
+            bottom: selected ? '#214D57' : '#003641',
+            border: selected ? 'rgba(129, 191, 205, 0.92)' : 'rgba(132, 199, 214, 0.54)',
+            glow: selected ? 'rgba(42, 98, 112, 0.34)' : 'rgba(0, 54, 65, 0.20)',
+          }
+        : kind === 'ativo'
+          ? {
+                top: selected ? '#A9D94D' : '#8BC22A',
+              mid: selected ? '#A9D94D' : '#8BC22A',
+              bottom: selected ? '#8CC62B' : '#7DB61C',
+              border: selected ? 'rgba(237, 255, 181, 0.96)' : 'rgba(230, 255, 169, 0.58)',
+              glow: selected ? 'rgba(150, 203, 58, 0.34)' : 'rgba(125, 182, 28, 0.22)',
+            }
+          : {
+              top: selected ? '#FFD28D' : '#FFC068',
+              mid: selected ? '#FFBE61' : '#FFA62B',
+              bottom: selected ? '#FFA739' : '#FB8C00',
+              border: selected ? 'rgba(255, 236, 188, 0.96)' : 'rgba(255, 221, 170, 0.56)',
+              glow: selected ? 'rgba(255, 183, 77, 0.30)' : 'rgba(251, 140, 0, 0.18)',
+            };
+      return {
+        color: {
+          type: 'linear',
+          x: 0,
+          y: 0,
+          x2: 0,
+          y2: 1,
+          colorStops: [
+            { offset: 0, color: palette.top },
+            { offset: 0.38, color: palette.mid },
+            { offset: 1, color: palette.bottom },
+          ],
+        },
+          opacity: (activeMonth && activeMonth !== index + 1 ? 0.42 : 1) * (legendMatched ? 1 : 0.16),
+        borderRadius,
+        borderWidth: 1,
+        borderColor: palette.border,
+          shadowBlur: legendMatched ? (selected ? 14 : 9) : 0,
+        shadowColor: palette.glow,
+        shadowOffsetY: 3,
+      };
+    };
+    const hiddenBarStyle = {
+      opacity: 0,
+      borderWidth: 0,
+      shadowBlur: 0,
+      shadowOffsetY: 0,
+      color: 'rgba(0,0,0,0)',
+    };
+    const variacaoPorMes = Array.from({ length: 12 }, (_, i) => formatVariacaoPct(passivoArr[i] ?? 0, ativoArr[i] ?? 0));
+    const formatMonthAxisLabel = (index: number) => {
+      const mesLabel = mesesLabels[index] ?? '';
+      const variacao = variacaoPorMes[index];
+      if (!variacao) return `{mes|${mesLabel}}`;
+      const richKey = variacao.direction === 'down' ? 'varDown' : 'varUp';
+      const arrow = variacao.direction === 'down' ? '▼' : '▲';
+      return `{mes|${mesLabel}}\n{${richKey}|${arrow} ${variacao.label}}`;
+    };
+
+    const buildSingleAxisBarData = (
+      values: number[],
+        kind: 'passivo' | 'ativo' | 'acordos',
+    ) => values.map((v, i) => ({
+      value: v,
+      rawValue: v,
+        itemStyle: buildBarStyle(kind, i, [8, 8, 3, 3]),
+      label: labelFromValue(v, 'lower'),
+    }));
+      const buildMovingAverageData = (clampMax?: number) => movingAverageAtivoArr.map((value, index) => ({
+        value: clampMax && value > clampMax ? clampMax : value,
+        rawValue: value,
+        symbolSize: activeMonth === index + 1 ? 9 : 7,
+        itemStyle: {
+          color: '#00AE9D',
+          borderColor: '#F7FFFE',
+          borderWidth: 1.4,
+          opacity: (activeMonth && activeMonth !== index + 1 ? 0.48 : 1) * (!chartLegendHover || chartLegendHover === 'mm3' ? 1 : 0.14),
+          shadowBlur: !chartLegendHover || chartLegendHover === 'mm3' ? (activeMonth === index + 1 ? 10 : 6) : 0,
+          shadowColor: 'rgba(0, 174, 157, 0.28)',
+        },
+      }));
+
+    const chartGrid = useAxisBreak
+      ? [
+          { left: 46, right: 20, top: 36, height: 70 },
+          { left: 46, right: 20, top: 106, bottom: 62 },
+        ]
+      : { left: 46, right: 20, top: 34, bottom: 60 };
+
+    const chartXAxis = useAxisBreak
+      ? [
+          {
+            type: 'category',
+            gridIndex: 0,
+            data: mesesLabels,
+            axisLabel: { show: false },
+            axisTick: { show: false },
+            axisLine: { show: false },
+          },
+          {
+            type: 'category',
+            gridIndex: 1,
+            data: mesesLabels,
+            axisLabel: {
+              interval: 0,
+              rotate: 0,
+              margin: 12,
+              formatter: (_value: string, index: number) => formatMonthAxisLabel(index),
+              rich: {
+                mes: { color: '#003641', fontSize: 11, fontWeight: 700, lineHeight: 14 },
+                varUp: {
+                  color: '#5E8A18',
+                  fontSize: 9,
+                  fontWeight: 700,
+                  lineHeight: 18,
+                  backgroundColor: 'rgba(232, 246, 236, 0.98)',
+                  borderColor: 'rgba(143, 191, 70, 0.28)',
+                  borderWidth: 1,
+                  borderRadius: 9,
+                  padding: [2, 6, 2, 6],
+                },
+                varDown: {
+                  color: '#B64141',
+                  fontSize: 9,
+                  fontWeight: 700,
+                  lineHeight: 18,
+                  backgroundColor: 'rgba(252, 239, 239, 0.98)',
+                  borderColor: 'rgba(226, 85, 85, 0.22)',
+                  borderWidth: 1,
+                  borderRadius: 9,
+                  padding: [2, 6, 2, 6],
+                },
+              },
+            },
+            axisTick: { alignWithLabel: true },
+            axisLine: { lineStyle: { color: 'rgba(0,54,65,0.35)' } },
+          },
+        ]
+      : {
+          type: 'category',
+          data: mesesLabels,
+          axisLabel: {
+            interval: 0,
+            rotate: 0,
+            margin: 12,
+            formatter: (_value: string, index: number) => formatMonthAxisLabel(index),
+            rich: {
+              mes: { color: '#003641', fontSize: 11, fontWeight: 700, lineHeight: 14 },
+              varUp: {
+                color: '#5E8A18',
+                fontSize: 9,
+                fontWeight: 700,
+                lineHeight: 18,
+                backgroundColor: 'rgba(232, 246, 236, 0.98)',
+                borderColor: 'rgba(143, 191, 70, 0.28)',
+                borderWidth: 1,
+                borderRadius: 9,
+                padding: [2, 6, 2, 6],
+              },
+              varDown: {
+                color: '#B64141',
+                fontSize: 9,
+                fontWeight: 700,
+                lineHeight: 18,
+                backgroundColor: 'rgba(252, 239, 239, 0.98)',
+                borderColor: 'rgba(226, 85, 85, 0.22)',
+                borderWidth: 1,
+                borderRadius: 9,
+                padding: [2, 6, 2, 6],
+              },
+            },
+          },
+          axisTick: { alignWithLabel: true },
+          axisLine: { lineStyle: { color: 'rgba(0,54,65,0.35)' } },
+        };
+
+    const chartYAxis = useAxisBreak
+      ? [
+          {
+            type: 'value',
+            gridIndex: 0,
+            min: 0,
+            max: upperBandMax,
+            interval: calcAxisInterval(upperBandMax || 1, 4),
+            axisLabel: {
+              showMaxLabel: false,
+              color: '#003641', fontSize: 11, fontWeight: 600,
+              formatter: (v: number) => formatAxisMoney(AXIS_BREAK_HIGH_MIN + v),
+            },
+            splitLine: { lineStyle: { color: 'rgba(125, 182, 28, 0.18)', type: 'dashed' } },
+          },
+          {
+            type: 'value',
+            gridIndex: 1,
+            min: 0,
+            max: AXIS_BREAK_LOW_MAX,
+            interval: calcAxisInterval(AXIS_BREAK_LOW_MAX || 1, 4),
+            axisLabel: {
+              showMaxLabel: false,
+              color: '#003641', fontSize: 11, fontWeight: 600,
+              formatter: (v: number) => formatAxisMoney(v),
+            },
+            splitLine: { lineStyle: { color: 'rgba(125, 182, 28, 0.18)', type: 'dashed' } },
+          },
+        ]
+        : [
+            {
+              type: 'value',
+              min: 0,
+              max: singleAxisMax,
+              interval: singleAxisInterval,
+              splitNumber: singleAxisTickCount,
+              axisLabel: {
+                showMaxLabel: false,
+                color: '#003641', fontSize: 11, fontWeight: 600,
+                formatter: (v: number) => formatAxisMoney(v),
+              },
+              splitLine: { lineStyle: { color: 'rgba(125, 182, 28, 0.18)', type: 'dashed' } },
+          },
+          ];
+
+    const chartSeries = useAxisBreak
+      ? [
+          {
+            name: 'Passivo', type: 'bar', xAxisIndex: 0, yAxisIndex: 0,
+              legendHoverLink: false,
+            color: '#003641',
+            clip: false,
+            barWidth: 30,
+            barMinHeight: 0,
+            data: passivoArr.map((v, i) => {
+              const upperValue = v >= AXIS_BREAK_HIGH_MIN ? Math.min(v, AXIS_BREAK_HIGH_MAX) - AXIS_BREAK_HIGH_MIN : 0;
+              return ({
+              value: upperValue,
+              rawValue: v,
+              itemStyle: upperValue > 0 ? buildBarStyle('passivo', i, [8, 8, 0, 0]) : hiddenBarStyle,
+              label: v >= AXIS_BREAK_HIGH_MIN ? labelFromValue(v, 'upper') : { show: false },
+            })}),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+          {
+            name: 'Ativo', type: 'bar', xAxisIndex: 0, yAxisIndex: 0,
+              legendHoverLink: false,
+            color: '#7DB61C',
+            clip: false,
+            barWidth: 30,
+            barMinHeight: 0,
+            data: ativoArr.map((v, i) => {
+              const upperValue = v >= AXIS_BREAK_HIGH_MIN ? Math.min(v, AXIS_BREAK_HIGH_MAX) - AXIS_BREAK_HIGH_MIN : 0;
+              return ({
+              value: upperValue,
+              rawValue: v,
+              itemStyle: upperValue > 0 ? buildBarStyle('ativo', i, [8, 8, 0, 0]) : hiddenBarStyle,
+              label: v >= AXIS_BREAK_HIGH_MIN ? labelFromValue(v, 'upper') : { show: false },
+            })}),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+          {
+            name: 'Acordos', type: 'bar', xAxisIndex: 0, yAxisIndex: 0,
+              legendHoverLink: false,
+            color: '#FB8C00',
+            clip: false,
+            barWidth: 30,
+            barMinHeight: 0,
+            data: acordosArr.map((v, i) => {
+              const upperValue = v >= AXIS_BREAK_HIGH_MIN ? Math.min(v, AXIS_BREAK_HIGH_MAX) - AXIS_BREAK_HIGH_MIN : 0;
+              return ({
+              value: upperValue,
+              rawValue: v,
+              itemStyle: upperValue > 0 ? buildBarStyle('acordos', i, [8, 8, 0, 0]) : hiddenBarStyle,
+              label: v >= AXIS_BREAK_HIGH_MIN ? labelFromValue(v, 'upper') : { show: false },
+            })}),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+          {
+            name: 'Passivo', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
+              legendHoverLink: false,
+            color: '#003641',
+            clip: false,
+            barWidth: 30,
+            barMinHeight: 10,
+            data: passivoArr.map((v, i) => ({
+              value: Math.min(v, AXIS_BREAK_LOW_MAX),
+              rawValue: v,
+              itemStyle: buildBarStyle('passivo', i, v >= AXIS_BREAK_HIGH_MIN ? [0, 0, 0, 0] : [8, 8, 3, 3]),
+              label: v >= AXIS_BREAK_HIGH_MIN ? { show: false } : labelFromValue(v, 'lower'),
+            })),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+          {
+            name: 'Ativo', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
+              legendHoverLink: false,
+            color: '#7DB61C',
+            clip: false,
+            barWidth: 30,
+            barMinHeight: 10,
+            data: ativoArr.map((v, i) => ({
+              value: Math.min(v, AXIS_BREAK_LOW_MAX),
+              rawValue: v,
+              itemStyle: buildBarStyle('ativo', i, v >= AXIS_BREAK_HIGH_MIN ? [0, 0, 0, 0] : [8, 8, 3, 3]),
+              label: v >= AXIS_BREAK_HIGH_MIN ? { show: false } : labelFromValue(v, 'lower'),
+            })),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+          {
+            name: 'Acordos', type: 'bar', xAxisIndex: 1, yAxisIndex: 1,
+              legendHoverLink: false,
+            color: '#FB8C00',
+            clip: false,
+            barWidth: 30,
+            barMinHeight: 10,
+            data: acordosArr.map((v, i) => ({
+              value: Math.min(v, AXIS_BREAK_LOW_MAX),
+              rawValue: v,
+              itemStyle: buildBarStyle('acordos', i, v >= AXIS_BREAK_HIGH_MIN ? [0, 0, 0, 0] : [8, 8, 3, 3]),
+              label: v >= AXIS_BREAK_HIGH_MIN ? { show: false } : labelFromValue(v, 'lower'),
+            })),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+            {
+              name: 'MM3 Ativo', type: 'line', xAxisIndex: 1, yAxisIndex: 1,
+                legendHoverLink: false,
+              smooth: 0.28,
+              symbol: 'circle',
+              showSymbol: true,
+              connectNulls: true,
+              z: 20,
+              data: buildMovingAverageData(AXIS_BREAK_LOW_MAX),
+              lineStyle: {
+                color: '#00AE9D',
+                width: 2.6,
+                type: 'dashed',
+                  opacity: !chartLegendHover || chartLegendHover === 'mm3' ? 1 : 0.14,
+                shadowBlur: 8,
+                shadowColor: 'rgba(0, 174, 157, 0.18)',
+              },
+              itemStyle: {
+                color: '#00AE9D',
+                borderColor: '#F7FFFE',
+                borderWidth: 1.4,
+              },
+              emphasis: { focus: 'series' },
+            },
+        ]
+      : [
+          {
+            name: 'Passivo', type: 'bar',
+              legendHoverLink: false,
+            color: '#003641',
+            clip: false,
+            barWidth: 34,
+            barMinHeight: 10,
+            data: buildSingleAxisBarData(passivoArr, 'passivo'),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+          {
+            name: 'Ativo', type: 'bar',
+              legendHoverLink: false,
+            color: '#7DB61C',
+            clip: false,
+            barWidth: 34,
+            barMinHeight: 10,
+            data: buildSingleAxisBarData(ativoArr, 'ativo'),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+          {
+            name: 'Acordos', type: 'bar',
+              legendHoverLink: false,
+            color: '#FB8C00',
+            clip: false,
+            barWidth: 34,
+            barMinHeight: 10,
+            data: buildSingleAxisBarData(acordosArr, 'acordos'),
+            labelLayout: { hideOverlap: false },
+            emphasis: { focus: 'series', itemStyle: { shadowBlur: 18, shadowOffsetY: 4 } },
+          },
+            {
+              name: 'MM3 Ativo', type: 'line', yAxisIndex: 0,
+                legendHoverLink: false,
+              smooth: 0.28,
+              symbol: 'circle',
+              showSymbol: true,
+              connectNulls: true,
+              z: 20,
+              data: buildMovingAverageData(),
+              lineStyle: {
+                color: '#00AE9D',
+                width: 2.6,
+                type: 'dashed',
+                  opacity: !chartLegendHover || chartLegendHover === 'mm3' ? 1 : 0.14,
+                shadowBlur: 8,
+                shadowColor: 'rgba(0, 174, 157, 0.18)',
+              },
+              itemStyle: {
+                color: '#00AE9D',
+                borderColor: '#F7FFFE',
+                borderWidth: 1.4,
+              },
+              emphasis: { focus: 'series' },
+            },
+        ];
+
     return {
-      color: ['#003641', '#7DB61C'],
-      grid: { left: 46, right: 30, top: 52, bottom: 56 },
-      legend: {
-        show: true, top: 4, right: 6,
-        textStyle: { color: '#003641', fontSize: 12, fontWeight: 650 },
-        data: ['Passivo', 'Ativo'],
-        icon: 'roundRect',
-        itemWidth: 14, itemHeight: 10,
-        itemGap: 16,
-      },
+      animationDuration: 240,
+      grid: chartGrid,
+        legend: [
+          {
+              show: false, top: 4, right: 6,
+            legendHoverLink: false,
+            textStyle: { color: '#003641', fontSize: 12, fontWeight: 650 },
+            data: ['Passivo', 'Ativo', 'Acordos'],
+            icon: 'roundRect',
+            itemWidth: 14, itemHeight: 10,
+            itemGap: 16,
+          },
+          {
+              show: false, top: 28, right: 6,
+            legendHoverLink: false,
+            textStyle: { color: '#003641', fontSize: 11.5, fontWeight: 600 },
+            data: [{ name: 'MM3 Ativo', icon: 'roundRect' }],
+            formatter: (name: string) => (name === 'MM3 Ativo' ? 'Média Móvel 3 meses' : name),
+            itemWidth: 14, itemHeight: 10,
+            itemGap: 16,
+          },
+        ],
       tooltip: {
         trigger: 'axis',
+        formatter: (params: any) => {
+          const rows = Array.isArray(params) ? params : [params];
+          const axisValue = rows.find((p: any) => p?.axisValueLabel)?.axisValueLabel ?? '';
+          const byName = new Map<string, { color: string; value: number }>();
+          for (const row of rows) {
+            const name = String(row?.seriesName ?? '').trim();
+            if (!name) continue;
+            const rawValue = Number(row?.data?.rawValue ?? row?.data?.value ?? 0);
+            const color = typeof row?.color === 'string'
+              ? row.color
+                : (name === 'Passivo'
+                  ? '#003641'
+                  : name === 'Ativo'
+                    ? '#7DB61C'
+                    : name === 'Acordos'
+                      ? '#FB8C00'
+                      : '#00AE9D');
+            const prev = byName.get(name);
+            if (!prev || rawValue > prev.value) byName.set(name, { color, value: rawValue });
+          }
+            const lines = ['Passivo', 'Ativo', 'Acordos', 'MM3 Ativo']
+            .filter((name) => byName.has(name))
+            .map((name) => {
+              const item = byName.get(name)!;
+                const label = name === 'MM3 Ativo' ? 'Média Móvel 3 meses' : name;
+                return `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+                <span style="width:10px;height:10px;border-radius:3px;background:${item.color};display:inline-block;"></span>
+                  <span style="font-weight:700;min-width:56px;">${label}</span>
+                <span>${brl(item.value)}</span>
+              </div>`;
+            })
+            .join('');
+          return `<div style="font-weight:800;margin-bottom:2px;">${axisValue}</div>${lines}`;
+        },
         backgroundColor: {
           type: 'linear', x: 0, y: 0, x2: 1, y2: 1,
           colorStops: [
@@ -2008,83 +3104,70 @@ const JuridicoDashboardPage: React.FC = () => {
         borderWidth: 1,
         padding: [10, 13, 11, 14],
         textStyle: { color: '#003641', fontSize: 12, fontWeight: 700, fontFamily: "'Fira Sans', sans-serif" },
-        valueFormatter: (v: any) => brl(v),
         axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(0,174,157,0.10)' } },
         extraCssText: `border-radius: 10px 12px 12px 10px; border-left: 4px solid; border-image: linear-gradient(180deg, #33C5B8 0%, #00AE9D 100%) 1; box-shadow: 0 10px 24px rgba(0,54,65,0.13), 0 2px 6px rgba(0,54,65,0.08);`,
       },
-      xAxis: {
-        type: 'category',
-        data: mesesLabels,
-        axisLabel: { color: '#003641', fontSize: 11, interval: 0, rotate: 0, fontWeight: 600 },
-        axisTick: { alignWithLabel: true },
-        axisLine: { lineStyle: { color: 'rgba(0,54,65,0.35)' } },
-      },
-      yAxis: {
-        type: 'value',
-        min: 0,
-        max: maxWithTop,
-        scale: true,
-        splitNumber: 5,
-        axisLabel: {
-          color: '#003641', fontSize: 11, fontWeight: 600,
-          formatter: (v: number) => {
-            if (v === 0) return '0';
-            const abs = Math.abs(v);
-            if (abs >= 1000000) return ((v / 1000000).toFixed(1) + 'M');
-            if (abs >= 1000) return (Math.round(v / 1000) + 'k');
-            return String(v);
-          },
-        },
-        splitLine: { lineStyle: { color: 'rgba(125, 182, 28, 0.18)', type: 'dashed' } },
-      },
-      barGap: '28%',
-      barCategoryGap: '28%',
-      series: [
-        {
-          name: 'Passivo', type: 'bar',
-          barWidth: 22,
-          barMinHeight: 3,
-          data: passivoArr.map((v, i) => ({
-            value: v,
-            itemStyle: {
-              color: {
-                type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
-                colorStops: [
-                  { offset: 0, color: mesSel === i + 1 ? '#2A6270' : '#003641' },
-                  { offset: 1, color: mesSel === i + 1 ? '#003641' : '#001E24' },
-                ],
-              },
-              opacity: mesSel && mesSel !== i + 1 ? 0.40 : 1,
-              borderRadius: [6, 6, 2, 2],
-            },
-            label: labelFromValue(v, v >= thresholdForInside),
-          })),
-          emphasis: { focus: 'series' },
-        },
-        {
-          name: 'Ativo', type: 'bar',
-          barWidth: 22,
-          barMinHeight: 3,
-          data: ativoArr.map((v, i) => ({
-            value: v,
-            itemStyle: {
-              color: {
-                type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
-                colorStops: [
-                  { offset: 0, color: mesSel === i + 1 ? '#A6DA53' : '#7DB61C' },
-                  { offset: 1, color: mesSel === i + 1 ? '#6A9F16' : '#507A0E' },
-                ],
-              },
-              opacity: mesSel && mesSel !== i + 1 ? 0.40 : 1,
-              borderRadius: [6, 6, 2, 2],
-            },
-            label: labelFromValue(v, v >= thresholdForInside),
-          })),
-          emphasis: { focus: 'series' },
-        },
-      ],
+      axisPointer: useAxisBreak ? { link: [{ xAxisIndex: [0, 1] }] } : undefined,
+      xAxis: chartXAxis,
+      yAxis: chartYAxis,
+      graphic: [],
+      barGap: '0%',
+      barCategoryGap: '30%',
+      series: chartSeries,
     };
-  }, [chartData, mesesLabels, mes]);
+  }, [chartData, mesesLabels, ano, mes, origem, nome, status, natureza, lacunasFiltro, chartHoverMonth, chartLegendHover]);
+
+  const juridicoChartEvents = useMemo(() => ({
+    mousemove: (event: any) => {
+      const dataIndex = Number(event?.dataIndex);
+      if (Number.isFinite(dataIndex) && dataIndex >= 0) {
+        setChartHoverMonth(Math.max(1, Math.min(12, dataIndex + 1)));
+        return;
+      }
+      clearChartSeriesHover();
+    },
+    updateAxisPointer: (event: any) => {
+      const info = Array.isArray(event?.axesInfo) ? event.axesInfo[0] : null;
+      if (!info) {
+        clearChartSeriesHover();
+        return;
+      }
+      const rawValue = info.value ?? info.axisValue ?? null;
+      if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+        setChartHoverMonth(Math.max(1, Math.min(12, rawValue + 1)));
+        return;
+      }
+      const monthIndex = mesesLabels.findIndex((label) => label === String(rawValue ?? '').trim());
+      setChartHoverMonth(monthIndex >= 0 ? monthIndex + 1 : null);
+    },
+    mouseout: clearChartSeriesHover,
+    globalout: clearChartSeriesHover,
+  }), [clearChartSeriesHover, mesesLabels]);
+
+  useEffect(() => {
+    const chart = juridicoChartRef.current?.getEchartsInstance?.();
+    if (!chart) return;
+    const dom = chart.getDom?.();
+    const zr = chart.getZr?.();
+    if (!dom || !zr) return;
+
+    const clearHover = () => clearChartSeriesHover();
+    const clearHoverFromZr = (event?: any) => {
+      if (!event?.target) clearChartSeriesHover();
+    };
+
+    dom.addEventListener('mouseleave', clearHover);
+    dom.addEventListener('pointerleave', clearHover);
+    zr.on('globalout', clearHover);
+    zr.on('mouseout', clearHoverFromZr);
+
+    return () => {
+      dom.removeEventListener('mouseleave', clearHover);
+      dom.removeEventListener('pointerleave', clearHover);
+      zr.off('globalout', clearHover);
+      zr.off('mouseout', clearHoverFromZr);
+    };
+  }, [chartOption, clearChartSeriesHover]);
 
   const chipsAplicados = (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
@@ -2165,6 +3248,82 @@ const JuridicoDashboardPage: React.FC = () => {
         #juridico-root .trendGood { background: rgba(150,203,58,0.18); color: #6A9F16; border: 1px solid rgba(125,182,28,0.35); }
         #juridico-root .trendBad  { background: rgba(0,174,157,0.14); color: #0B8077; border: 1px solid rgba(0,174,157,0.40); }
         #juridico-root .trendFlat { background: rgba(0,54,65,0.10); color: #003641; border: 1px solid rgba(0,54,65,0.25); }
+        #juridico-root .natureza-dot-wrap {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 10px;
+          height: 10px;
+          flex: 0 0 10px;
+          overflow: visible;
+        }
+        #juridico-root .natureza-dot-core {
+          position: relative;
+          z-index: 2;
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          border: 1px solid rgba(0,0,0,0.10);
+        }
+        #juridico-root .natureza-dot-wave {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          width: 10px;
+          height: 10px;
+          border-radius: 50%;
+          border: 1.5px solid rgba(125,182,28,0.38);
+          transform: translate(-50%, -50%) scale(0.72);
+          opacity: 0;
+          pointer-events: none;
+        }
+        #juridico-root .natureza-dot-wrap.is-ativo .natureza-dot-core {
+          animation: natureza-ativo-pulse 1.9s ease-in-out infinite;
+          box-shadow: 0 0 0 0 rgba(125,182,28,0.0);
+        }
+        #juridico-root .natureza-dot-wrap.is-ativo .natureza-dot-wave.wave-1 {
+          animation: natureza-ativo-wave 1.9s ease-out infinite;
+        }
+        #juridico-root .natureza-dot-wrap.is-ativo .natureza-dot-wave.wave-2 {
+          animation: natureza-ativo-wave 1.9s ease-out 0.95s infinite;
+        }
+        @keyframes natureza-ativo-pulse {
+          0%, 100% {
+            transform: scale(1);
+            box-shadow: 0 0 0 0 rgba(125,182,28,0.0);
+            filter: brightness(1);
+          }
+          35% {
+            transform: scale(1.18);
+            box-shadow: 0 0 10px rgba(125,182,28,0.40);
+            filter: brightness(1.08);
+          }
+          55% {
+            transform: scale(0.96);
+            box-shadow: 0 0 4px rgba(125,182,28,0.18);
+            filter: brightness(1);
+          }
+        }
+        @keyframes natureza-ativo-wave {
+          0% {
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(0.72);
+          }
+          18% {
+            opacity: 0.42;
+          }
+          100% {
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(2.45);
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          #juridico-root .natureza-dot-wrap.is-ativo .natureza-dot-core,
+          #juridico-root .natureza-dot-wrap.is-ativo .natureza-dot-wave {
+            animation: none !important;
+          }
+        }
         #juridico-root .cornerBar {
           position: absolute; top: 0; bottom: 0; left: 0; width: 4px;
           border-radius: 10px 0 0 10px;
@@ -3097,7 +4256,7 @@ const JuridicoDashboardPage: React.FC = () => {
           <div style={{
             fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase',
             fontWeight: 700, opacity: 0.78, padding: '4px 6px', color: '#FFFFFF',
-          }}>Atalhos Rápido</div>
+          }}>Atalhos Rápidos</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 7, marginTop: 2, marginBottom: 6 }}>
             {origensOptions.map(orig => (
               <button type="button" key={orig} className="interactive"
@@ -3294,7 +4453,13 @@ const JuridicoDashboardPage: React.FC = () => {
             <>
               <ConfiguracoesHeader title="Configurações • Automação" onBack={() => navigate('/juridico')} onHome={() => navigate('/juridico')} />
               <Sec title="Notificações">
-                <div style={{ ...card, padding: 14, marginBottom: 14 }}>
+                <div
+                  style={{ ...card, padding: 14, marginBottom: 14 }}
+                  onMouseLeave={() => {
+                    setChartHoverMonth(null);
+                    setChartLegendHover(null);
+                  }}
+                >
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 10,
                     marginBottom: 14, paddingBottom: 12,
@@ -3859,8 +5024,8 @@ const JuridicoDashboardPage: React.FC = () => {
               {/* KPIs */}
               {(() => {
                 const kSource = kpis.length ? kpis : emptyKpis;
-                const groupA = kSource.slice(0, 2);
-                const groupB = kSource.slice(2);
+                const groupA = kSource.slice(0, 1);
+                const groupB = kSource.slice(1);
                 const outerStyle: React.CSSProperties = {
                   padding: 10,
                   borderRadius: 14,
@@ -3919,7 +5084,10 @@ const JuridicoDashboardPage: React.FC = () => {
               {chipsAplicados}
 
               {/* GRÁFICO ATIVO × PASSIVO */}
-              <div style={{ ...card, padding: 14, marginBottom: 14 }}>
+              <div
+                style={{ ...card, padding: 14, marginBottom: 14 }}
+                onMouseLeave={clearChartInteractionState}
+              >
                 <div style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                   marginBottom: 10, gap: 10, flexWrap: 'wrap',
@@ -3928,16 +5096,76 @@ const JuridicoDashboardPage: React.FC = () => {
                     <div style={{
                       fontSize: 13, letterSpacing: 0.08, textTransform: 'uppercase',
                       fontWeight: 800, color: '#003641',
-                    }}>Ativo × Passivo ao longo do tempo</div>
+                    }}>Ativo × Passivo × Acordos ao longo do tempo</div>
                     <div style={{ opacity: 0.7, fontSize: 11.5, marginTop: 3 }}>
                       Valores totais por mês — {ano || 'Todos os anos'}
                     </div>
                   </div>
+                    <div style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'flex-end',
+                      gap: 14,
+                      rowGap: 6,
+                      flexWrap: 'wrap',
+                      color: '#003641',
+                      fontSize: 11.5,
+                      fontWeight: 700,
+                    }}>
+                      {[
+                        { label: 'Passivo', color: '#003641', key: 'passivo' as const },
+                        { label: 'Ativo', color: '#7DB61C', key: 'ativo' as const },
+                        { label: 'Acordos', color: '#FB8C00', key: 'acordos' as const },
+                        { label: 'Média Móvel 3 meses', color: '#00AE9D', key: 'mm3' as const },
+                      ].map((item) => (
+                        <span
+                          key={item.label}
+                          onMouseEnter={() => setChartLegendHover(item.key)}
+                          onMouseLeave={() => setChartLegendHover(null)}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            cursor: 'pointer',
+                            opacity: !chartLegendHover || chartLegendHover === item.key ? 1 : 0.48,
+                            transition: 'opacity 120ms ease, transform 120ms ease, background 120ms ease',
+                            transform: chartLegendHover === item.key ? 'translateY(-1px)' : 'none',
+                            padding: '2px 4px',
+                            borderRadius: 8,
+                            background: chartLegendHover === item.key ? 'rgba(0, 174, 157, 0.08)' : 'transparent',
+                          }}>
+                          {item.key === 'mm3' ? (
+                            <span style={{
+                              width: 16,
+                              height: 0,
+                              borderTop: `3px dashed ${item.color}99`,
+                              flexShrink: 0,
+                              opacity: 0.72,
+                            }} />
+                          ) : (
+                            <span style={{
+                              width: 13,
+                              height: 9,
+                              borderRadius: 3,
+                              background: item.color,
+                              boxShadow: `0 0 0 1px ${item.color}22 inset`,
+                              flexShrink: 0,
+                            }} />
+                          )}
+                          <span>{item.label}</span>
+                        </span>
+                      ))}
+                    </div>
                 </div>
-                <ReactECharts option={chartOption}
-                  notMerge={true} lazyUpdate={false}
-                  style={{ height: 300, width: '100%' }}
-                  opts={{ renderer: 'canvas' }} />
+                <div onMouseLeave={clearChartSeriesHover}>
+                  <ReactECharts
+                      ref={juridicoChartRef}
+                      option={chartOption}
+                      onEvents={juridicoChartEvents}
+                    notMerge={true} lazyUpdate={false}
+                    style={{ height: 314, width: '100%' }}
+                    opts={{ renderer: 'canvas' }} />
+                </div>
               </div>
 
               {/* CONTAINER TIPO DE AÇÕES — COM OS 3 ÍCONES NO CANTO SUPERIOR DIREITO */}
@@ -3966,10 +5194,24 @@ const JuridicoDashboardPage: React.FC = () => {
                   <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                     <button
                       type="button" className="interactive"
-                      onClick={handleCsv}
-                      title="Exportar dados para CSV"
+                      onClick={() => { void handleExportXlsx(); }}
+                      title="Exportar XLSX"
                       style={{ ...iconBtnBase, color: '#0B8077' }}>
                       <Download size={20} strokeWidth={2.05} />
+                    </button>
+                    <button
+                      type="button"
+                      className="interactive"
+                      onClick={() => { void resetTipoAcoesColumnWidths(); }}
+                      disabled={!tipoAcoesColumnWidthsCustomized}
+                      title={tipoAcoesColumnWidthsCustomized ? 'Resetar larguras personalizadas' : 'Usando larguras padrão da página'}
+                      style={{
+                        ...iconBtnBase,
+                        color: tipoAcoesColumnWidthsCustomized ? '#0B8077' : 'rgba(0,54,65,0.36)',
+                        cursor: tipoAcoesColumnWidthsCustomized ? 'pointer' : 'not-allowed',
+                        opacity: tipoAcoesColumnWidthsCustomized ? 1 : 0.75,
+                      }}>
+                      <FilterX size={18} strokeWidth={2.15} />
                     </button>
                     <button
                       type="button" className="interactive"
@@ -3996,32 +5238,49 @@ const JuridicoDashboardPage: React.FC = () => {
                   border: '1px solid rgba(0,54,65,0.10)',
                 }}>
                   <table style={{
-                    width: '100%', minWidth: 1080,
+                    width: tipoAcoesColumnWidthsCustomized ? tipoAcoesTableMinWidth : '100%',
+                    minWidth: tipoAcoesColumnWidthsCustomized ? tipoAcoesTableMinWidth : '100%',
                     borderCollapse: 'separate', borderSpacing: 0,
                     tableLayout: 'fixed',
                   }}>
                     <colgroup>
-                      <col style={{ width: TH_WIDTHS.origem }} />
-                      <col style={{ width: TH_WIDTHS.autor }} />
-                      <col style={{ width: TH_WIDTHS.reu }} />
-                      <col style={{ width: TH_WIDTHS.contrato }} />
-                      <col style={{ width: TH_WIDTHS.processo }} />
-                      <col style={{ width: TH_WIDTHS.status }} />
-                      <col style={{ width: TH_WIDTHS.natureza }} />
-                      <col style={{ width: TH_WIDTHS.valor }} />
-                      <col style={{ width: TH_WIDTHS.action }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('origem') }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('autor') }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('reu') }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('contrato') }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('processo') }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('status') }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('natureza') }} />
+                      <col style={{ width: getTipoAcoesColumnCssWidth('valor') }} />
+                      <col style={{ width: 52 }} />
                     </colgroup>
                     <thead style={{ position: 'sticky', top: 0, zIndex: 3 }}>
                       <tr>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.origem }}>Origem</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.autor }}>Autor(es)</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.reu }}>Réu(s)</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.contrato }}>Contrato Sicoob</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.processo }}>Nº Processo</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.status }}>Status</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.natureza }}>Natureza</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.valor, textAlign: 'right' }}>Valor</th>
-                        <th style={{ ...thStyle, width: TH_WIDTHS.action, textAlign: 'right', paddingRight: 12 }}></th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('origem'), position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Origem{renderTipoAcoesResizeHandle('origem')}</div>
+                        </th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('autor'), position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Autor(es){renderTipoAcoesResizeHandle('autor')}</div>
+                        </th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('reu'), position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Réu(s){renderTipoAcoesResizeHandle('reu')}</div>
+                        </th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('contrato'), position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Contrato Sicoob{renderTipoAcoesResizeHandle('contrato')}</div>
+                        </th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('processo'), position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Nº Processo{renderTipoAcoesResizeHandle('processo')}</div>
+                        </th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('status'), position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Status{renderTipoAcoesResizeHandle('status')}</div>
+                        </th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('natureza'), position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Natureza{renderTipoAcoesResizeHandle('natureza')}</div>
+                        </th>
+                        <th style={{ ...thStyle, width: getTipoAcoesColumnCssWidth('valor'), textAlign: 'right', position: 'sticky' }}>
+                          <div style={{ position: 'relative' }}>Valor</div>
+                        </th>
+                        <th style={{ ...thStyle, width: 52, textAlign: 'right', paddingRight: 12 }}></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -4038,13 +5297,13 @@ const JuridicoDashboardPage: React.FC = () => {
                             background: idx % 2 ? 'rgba(0, 174, 157, 0.04)' : 'transparent',
                           }}>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.origem,
+                              ...tdStyle, width: getTipoAcoesColumnCssWidth('origem'),
                               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                             }} title={r.origem || ''}>
                               {r.origem || '-'}
                             </td>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.autor,
+                              ...tdStyle, width: getTipoAcoesColumnCssWidth('autor'),
                               overflow: 'hidden', textOverflow: 'ellipsis',
                             }} title={r.autor || ''}>
                               <span style={{
@@ -4055,7 +5314,7 @@ const JuridicoDashboardPage: React.FC = () => {
                               </span>
                             </td>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.reu,
+                              ...tdStyle, width: getTipoAcoesColumnCssWidth('reu'),
                               overflow: 'hidden', textOverflow: 'ellipsis',
                             }} title={r.reu || ''}>
                               <span style={{
@@ -4066,50 +5325,68 @@ const JuridicoDashboardPage: React.FC = () => {
                               </span>
                             </td>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.contrato,
+                              ...tdStyle, width: getTipoAcoesColumnCssWidth('contrato'),
                               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                               fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
                             }} className="mono" title={r.contrato || ''}>
                               {r.contrato || '-'}
                             </td>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.processo,
+                              ...tdStyle, width: getTipoAcoesColumnCssWidth('processo'),
                               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                               fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
                             }} className="mono" title={r.processo || ''}>
                               {r.processo || '-'}
                             </td>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.status,
-                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              ...tdStyle, width: getTipoAcoesColumnCssWidth('status'),
+                              overflow: 'hidden',
                             }} title={r.status || ''}>
-                              {r.status || '-'}
-                            </td>
-                            <td style={{ ...tdStyle, width: TH_WIDTHS.natureza, textAlign: 'center' }}>
                               <span style={{
-                                display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'center',
-                                padding: '3px 10px', borderRadius: 999,
-                                fontSize: 11.5, fontWeight: 700,
+                                display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                                overflow: 'hidden', lineHeight: 1.35,
+                              }}>
+                                {r.status || '-'}
+                              </span>
+                            </td>
+                            <td style={{ ...tdStyle, width: getTipoAcoesColumnCssWidth('natureza'), textAlign: 'left' }}>
+                              <span style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 5, justifyContent: 'flex-start',
+                                padding: '3px 6px', borderRadius: 999,
+                                fontSize: 10.25, fontWeight: 700,
                                 border: '1px solid rgba(0,54,65,0.16)',
                                 background: naturezaBg(r.natureza),
                                 color: '#003641',
+                                width: 'fit-content',
                                 maxWidth: '100%',
+                                minWidth: 0,
                               }}>
+                                <span
+                                  className={`natureza-dot-wrap${String(r.natureza || '').trim().toLowerCase() === 'ativo' ? ' is-ativo' : ''}`}
+                                >
+                                  <span
+                                    className="natureza-dot-core"
+                                    style={{ background: naturezaDot(r.natureza) }}
+                                  />
+                                  {String(r.natureza || '').trim().toLowerCase() === 'ativo' ? (
+                                    <>
+                                      <span className="natureza-dot-wave wave-1" />
+                                      <span className="natureza-dot-wave wave-2" />
+                                    </>
+                                  ) : null}
+                                </span>
                                 <span style={{
-                                  width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
-                                  background: naturezaDot(r.natureza),
-                                  border: '1px solid rgba(0,0,0,0.10)',
-                                }} />
-                                <span style={{
+                                  display: 'inline-block',
                                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                                  maxWidth: `calc(100% - 18px)`,
+                                  minWidth: 0,
+                                  maxWidth: '100%',
                                 }}>
                                   {r.natureza || '-'}
                                 </span>
                               </span>
                             </td>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.valor,
+                              ...tdStyle, width: getTipoAcoesColumnCssWidth('valor'),
                               textAlign: 'right', paddingRight: 12,
                               fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
                               whiteSpace: 'nowrap',
@@ -4117,7 +5394,7 @@ const JuridicoDashboardPage: React.FC = () => {
                               {brl(r.valor)}
                             </td>
                             <td style={{
-                              ...tdStyle, width: TH_WIDTHS.action, textAlign: 'right',
+                              ...tdStyle, width: 52, textAlign: 'right',
                               whiteSpace: 'nowrap', paddingRight: 12,
                             }}>
                               <button
@@ -4157,7 +5434,7 @@ const JuridicoDashboardPage: React.FC = () => {
           backdropFilter: 'blur(3px)', WebkitBackdropFilter: 'blur(3px)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
           padding: '18px 16px',
-        }} onClick={() => setDlgOpen(false)}>
+        }}>
           <div onClick={e => e.stopPropagation()} style={{
             width: 'min(960px, 97vw)',
             maxHeight: '88vh',
@@ -4373,7 +5650,12 @@ const JuridicoDashboardPage: React.FC = () => {
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <select style={{ ...formInp, flex: '1 1 auto', minWidth: 0 }}
                     value={form.status ?? ''}
-                    onChange={e => setForm({ ...form, status: e.target.value })}>
+                    onChange={e => setForm({
+                      ...form,
+                      status: e.target.value,
+                      status_ultimo_andamento_ajuizamento: e.target.value,
+                      status_extrajudicial: e.target.value,
+                    })}>
                     {(() => {
                       const arr = statusesDistinctDb.length ? statusesDistinctDb : ([
                         'Aguardando Cumprimento de Subsídio',
@@ -4471,136 +5753,158 @@ const JuridicoDashboardPage: React.FC = () => {
                 </select>
               </div>
 
-              <div style={sectionHdr}><Database size={14} color="#00695C" /><span style={sectionLbl}>Ajuizamento (1º Grau)</span></div>
+              {showAjuizamentoSection && (
+                <>
+                  <div style={sectionHdr}><Database size={14} color="#00695C" /><span style={sectionLbl}>Ajuizamento (1º Grau)</span></div>
 
-              <div>
-                <label style={formLbl}>Nº PA (enviados ajuizamento)</label>
-                <input style={formInp} value={(form as any).numero_pa_enviados_ajuizamento ?? ''}
-                  onChange={e => setForm({ ...form, numero_pa_enviados_ajuizamento: e.target.value })} />
-              </div>
-              <div>
-                <label style={formLbl}>Valor Dado Causa (R$)</label>
-                <input type="number" step="0.01" style={formInp}
-                  value={(form as any).valor_dado_causa_ajuizamento ?? 0}
-                  onChange={e => setForm({ ...form, valor_dado_causa_ajuizamento: parseFloat(e.target.value) || 0 })} />
-              </div>
-              <div>
-                <JuridicoDateInput
-                  label="Data Distribuição (ajuizamento)"
-                  value={(form as any).data_distribuicao_ajuizamento ?? ''}
-                  onChange={(d) => {
-                    const after = { ...form, data_distribuicao_ajuizamento: d };
-                    setForm(_autoCalcDataLimiteAjuizamento(after, prazoAjuizamento));
-                  }}
-                  onAfterChange={(d) => {
-                    const after = { ...form, data_distribuicao_ajuizamento: d };
-                    setForm(_autoCalcDataLimiteAjuizamento(after, prazoAjuizamento));
-                  }}
-                />
-              </div>
-              <div>
-                <JuridicoDateInput
-                  label="Data Limite Ajuizamento"
-                  value={(form as any).data_limite_ajuizamento ?? ''}
-                  onChange={(d) => setForm({ ...form, data_limite_ajuizamento: d })}
-                />
-              </div>
-              <div>
-                <label style={formLbl}>Tipo de Ação</label>
-                <input style={formInp} value={(form as any).tipo_acao_ajuizamento ?? ''}
-                  onChange={e => setForm({ ...form, tipo_acao_ajuizamento: e.target.value })} />
-              </div>
-              <div>
-                <label style={formLbl}>Status Último Andamento</label>
-                <textarea style={formTxt} rows={2} value={(form as any).status_ultimo_andamento_ajuizamento ?? ''}
-                  onChange={e => setForm({ ...form, status_ultimo_andamento_ajuizamento: e.target.value })} />
-              </div>
-              <div>
-                <JuridicoDateInput
-                  label="Data Último Andamento"
-                  value={(form as any).data_ultimo_andamento_ajuizamento ?? ''}
-                  onChange={(d) => setForm({ ...form, data_ultimo_andamento_ajuizamento: d })}
-                />
-              </div>
+                  <div>
+                    <label style={formLbl}>Nº PA (enviados ajuizamento)</label>
+                    <input style={{ ...formInp, background: 'rgba(0,54,65,0.045)', cursor: 'default', color: 'rgba(0,54,65,0.85)' }}
+                      readOnly
+                      title="Preenchido automaticamente pelo gerente selecionado"
+                      value={(form as any).numero_pa_enviados_ajuizamento ?? ''} />
+                  </div>
+                  <div>
+                    <label style={formLbl}>Valor Dado Causa (R$)</label>
+                    <input type="number" step="0.01" style={formInp}
+                      value={(form as any).valor_dado_causa_ajuizamento ?? 0}
+                      onChange={e => setForm({ ...form, valor_dado_causa_ajuizamento: parseFloat(e.target.value) || 0 })} />
+                  </div>
+                  <div>
+                    <JuridicoDateInput
+                      label="Data Distribuição (ajuizamento)"
+                      value={(form as any).data_distribuicao_ajuizamento ?? ''}
+                      onChange={(d) => {
+                        const after = { ...form, data_distribuicao_ajuizamento: d };
+                        setForm(_autoCalcDataLimiteAjuizamento(after, prazoAjuizamento));
+                      }}
+                      onAfterChange={(d) => {
+                        const after = { ...form, data_distribuicao_ajuizamento: d };
+                        setForm(_autoCalcDataLimiteAjuizamento(after, prazoAjuizamento));
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <JuridicoDateInput
+                      label="Data Limite Ajuizamento"
+                      value={(form as any).data_limite_ajuizamento ?? ''}
+                      onChange={(d) => setForm({ ...form, data_limite_ajuizamento: d })}
+                    />
+                  </div>
+                  <div>
+                    <label style={formLbl}>Tipo de Ação</label>
+                    <input style={formInp} value={(form as any).tipo_acao_ajuizamento ?? ''}
+                      onChange={e => setForm({ ...form, tipo_acao_ajuizamento: e.target.value })} />
+                  </div>
+                  <div>
+                    <JuridicoDateInput
+                      label="Data Último Andamento"
+                      value={(form as any).data_ultimo_andamento_ajuizamento ?? ''}
+                      onChange={(d) => setForm({ ...form, data_ultimo_andamento_ajuizamento: d })}
+                    />
+                  </div>
+                </>
+              )}
 
-              <div style={sectionHdr}><Hourglass size={14} color="#C2410C" /><span style={sectionLbl}>Extrajudicial / Cartório</span></div>
+              {showExtrajudicialSection && (
+                <>
+                  <div style={sectionHdr}><Hourglass size={14} color="#C2410C" /><span style={sectionLbl}>Extrajudicial / Cartório</span></div>
 
-              <div>
-                <JuridicoDateInput
-                  label="Data Recebimento (cobrança extrajudicial)"
-                  value={(form as any).data_recebimento_cobranca_extrajudicial ?? ''}
-                  onChange={(d) => setForm({ ...form, data_recebimento_cobranca_extrajudicial: d })}
-                />
-              </div>
-              <div>
-                <label style={formLbl}>Status (extrajudicial)</label>
-                <input style={formInp} value={(form as any).status_extrajudicial ?? ''}
-                  onChange={e => setForm({ ...form, status_extrajudicial: e.target.value })} />
-              </div>
-              <div>
-                <label style={formLbl}>Matrícula (extrajudicial)</label>
-                <input style={formInp} value={(form as any).matricula_extrajudicial ?? ''}
-                  onChange={e => setForm({ ...form, matricula_extrajudicial: e.target.value })} />
-              </div>
-              <div>
-                <label style={formLbl}>Cartório (extrajudicial)</label>
-                <input style={formInp} value={(form as any).cartorio_extrajudicial ?? ''}
-                  onChange={e => setForm({ ...form, cartorio_extrajudicial: e.target.value })} />
-              </div>
-              <div>
-                <label style={formLbl}>Nº Protocolo Cartório</label>
-                <input style={formInp} value={(form as any).numero_protocolo_cartorio_extrajudicial ?? ''}
-                  onChange={e => setForm({ ...form, numero_protocolo_cartorio_extrajudicial: e.target.value })} />
-              </div>
-              <div>
-                <JuridicoDateInput
-                  label="Data Protocolização Cartório"
-                  value={(form as any).data_protocolizacao_cartorio_extrajudicial ?? ''}
-                  onChange={(d) => setForm({ ...form, data_protocolizacao_cartorio_extrajudicial: d })}
-                />
-              </div>
-              <div>
-                <JuridicoDateInput
-                  label="Data Limite p/ Protocolar"
-                  value={(form as any).data_limite_protocolar_extrajudicial ?? ''}
-                  onChange={(d) => setForm({ ...form, data_limite_protocolar_extrajudicial: d })}
-                />
-              </div>
-              <div>
-                <JuridicoDateInput
-                  label="Data Última Etapa (extrajudicial)"
-                  value={(form as any).data_ultima_etapa_extrajudicial ?? ''}
-                  onChange={(d) => setForm({ ...form, data_ultima_etapa_extrajudicial: d })}
-                />
-              </div>
-
-              <div style={sectionHdr}><CalendarDays size={14} color="#FB8C00" /><span style={sectionLbl}>Financeiro / Custas</span></div>
-
-              <div>
-                <label style={formLbl}>Valor (R$)</label>
-                <input type="number" step="0.01" style={formInp}
-                  value={form.valor ?? 0}
-                  onChange={e => setForm({ ...form, valor: parseFloat(e.target.value) || 0 })} />
-              </div>
-              <div>
-                <label style={formLbl}>Honorários Realizados (R$)</label>
-                <input type="number" step="0.01" style={formInp}
-                  value={(form as any).honorarios_realizados ?? 0}
-                  onChange={e => setForm({ ...form, honorarios_realizados: parseFloat(e.target.value) || 0 })} />
-              </div>
-              <div>
-                <label style={formLbl}>Custas Processuais Extraj. (R$)</label>
-                <input type="number" step="0.01" style={formInp}
-                  value={(form as any).custas_processuais_extrajudiciais ?? 0}
-                  onChange={e => setForm({ ...form, custas_processuais_extrajudiciais: parseFloat(e.target.value) || 0 })} />
-              </div>
+                  <div>
+                    <JuridicoDateInput
+                      label="Data Recebimento (cobrança extrajudicial)"
+                      value={(form as any).data_recebimento_cobranca_extrajudicial ?? ''}
+                      onChange={(d) => setForm({ ...form, data_recebimento_cobranca_extrajudicial: d })}
+                    />
+                  </div>
+                  <div>
+                    <label style={formLbl}>Matrícula (extrajudicial)</label>
+                    <input style={formInp} value={(form as any).matricula_extrajudicial ?? ''}
+                      onChange={e => setForm({ ...form, matricula_extrajudicial: e.target.value })} />
+                  </div>
+                  <div>
+                    <label style={formLbl}>Cartório (extrajudicial)</label>
+                    <input style={formInp} value={(form as any).cartorio_extrajudicial ?? ''}
+                      onChange={e => setForm({ ...form, cartorio_extrajudicial: e.target.value })} />
+                  </div>
+                  <div>
+                    <label style={formLbl}>Nº Protocolo Cartório</label>
+                    <input style={formInp} value={(form as any).numero_protocolo_cartorio_extrajudicial ?? ''}
+                      onChange={e => setForm({ ...form, numero_protocolo_cartorio_extrajudicial: e.target.value })} />
+                  </div>
+                  <div>
+                    <JuridicoDateInput
+                      label="Data Protocolização Cartório"
+                      value={(form as any).data_protocolizacao_cartorio_extrajudicial ?? ''}
+                      onChange={(d) => setForm({ ...form, data_protocolizacao_cartorio_extrajudicial: d })}
+                    />
+                  </div>
+                  <div>
+                    <JuridicoDateInput
+                      label="Data Limite p/ Protocolar"
+                      value={(form as any).data_limite_protocolar_extrajudicial ?? ''}
+                      onChange={(d) => setForm({ ...form, data_limite_protocolar_extrajudicial: d })}
+                    />
+                  </div>
+                  <div>
+                    <JuridicoDateInput
+                      label="Data Última Etapa (extrajudicial)"
+                      value={(form as any).data_ultima_etapa_extrajudicial ?? ''}
+                      onChange={(d) => setForm({ ...form, data_ultima_etapa_extrajudicial: d })}
+                    />
+                  </div>
+                </>
+              )}
 
               <div style={sectionHdr}><Users size={14} color="#1565C0" /><span style={sectionLbl}>Rastreabilidade / Equipe</span></div>
 
               <div>
                 <label style={formLbl}>Gerente</label>
-                <input style={formInp} value={(form as any).gerente ?? ''}
-                  onChange={e => setForm({ ...form, gerente: e.target.value })} />
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <select
+                    style={{ ...formInp, flex: '1 1 auto', minWidth: 0 }}
+                    value={(form as any).gerente ?? ''}
+                    onChange={e => {
+                      const nome = e.target.value;
+                      setForm(prev => {
+                        const next: any = { ...prev, gerente: nome };
+                        const match = gerentesCadastro.find(
+                          g => g.nome.localeCompare(nome, 'pt-BR', { sensitivity: 'base' }) === 0,
+                        );
+                        next.numero_pa_enviados_ajuizamento = match?.pa ?? '';
+                        return next;
+                      });
+                    }}>
+                    <option value="">Selecione</option>
+                    {Array.from(new Set([...gerentesDistinctDb, ...gerentesCadastro.map(g => g.nome)]))
+                      .sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' }))
+                      .map(g => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                  <button type="button" className="interactive" title="Cadastrar novo gerente"
+                    onClick={() => {
+                      setGerenteNewNome(String((form as any).gerente ?? '').trim());
+                      const paAtual = String((form as any).numero_pa_enviados_ajuizamento ?? '').trim();
+                      setGerenteNewPa(GERENTE_PA_OPTIONS.includes(paAtual as typeof GERENTE_PA_OPTIONS[number]) ? paAtual : GERENTE_PA_OPTIONS[0]);
+                      setGerenteAddOpen(true);
+                    }}
+                    style={{
+                      ...iconBtnBase,
+                      color: '#6A9F16',
+                      border: '1px solid rgba(106, 159, 22, 0.18)',
+                      background: 'rgba(125, 182, 28, 0.10)',
+                      transition: 'transform 130ms ease, box-shadow 160ms ease, background 150ms ease, color 150ms ease',
+                      flexShrink: 0,
+                    }}>
+                    <SquarePlus size={20} strokeWidth={2.05} />
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label style={formLbl}>Nº PA</label>
+                <input style={{ ...formInp, background: 'rgba(0,54,65,0.045)', cursor: 'default', color: 'rgba(0,54,65,0.85)' }}
+                  readOnly
+                  title="Preenchido automaticamente pelo gerente selecionado"
+                  value={(form as any).numero_pa_enviados_ajuizamento ?? ''} />
               </div>
               <div style={{ gridColumn: '1 / -1' }}>
                 <label style={formLbl}>Observações Gerais</label>
@@ -4692,27 +5996,31 @@ const JuridicoDashboardPage: React.FC = () => {
                 })()}
                 <button onClick={() => setDlgOpen(false)}
                   className="interactive"
+                  disabled={dlgSaving}
                   style={{
                     padding: '10px 18px', borderRadius: 12,
                     border: '1px solid rgba(0,54,65,0.16)',
                     background: '#FFFFFF', color: '#003641',
-                    fontWeight: 750, fontSize: 13, cursor: 'pointer',
+                    fontWeight: 750, fontSize: 13, cursor: dlgSaving ? 'not-allowed' : 'pointer',
+                    opacity: dlgSaving ? 0.6 : 1,
                     transition: 'transform 150ms ease, box-shadow 180ms ease, background 150ms ease',
                   }}>Cancelar</button>
                 <button onClick={handleSalvar}
                   className="interactive"
+                  disabled={dlgSaving}
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 8,
                     padding: '10px 22px', borderRadius: 12,
                     background: 'linear-gradient(135deg, #96CB3A 0%, #7DB61C 50%, #6A9F16 100%)',
                     color: '#FFFFFF', fontWeight: 850, fontSize: 13.2,
-                    cursor: 'pointer',
-                    boxShadow: '0 10px 26px rgba(125,182,28,0.32)',
+                    cursor: dlgSaving ? 'not-allowed' : 'pointer',
+                    boxShadow: dlgSaving ? 'none' : '0 10px 26px rgba(125,182,28,0.32)',
+                    opacity: dlgSaving ? 0.75 : 1,
                     border: '1px solid rgba(0, 54, 65, 0.32)',
                     letterSpacing: 0.01,
                     transition: 'transform 150ms cubic-bezier(.22,.9,.28,1.1), box-shadow 180ms ease',
                   }}>
-                  <Save size={15} strokeWidth={2.2} /> Salvar
+                  <Save size={15} strokeWidth={2.2} /> {dlgSaving ? 'Salvando...' : 'Salvar'}
                 </button>
               </div>
             </div>
@@ -4720,8 +6028,154 @@ const JuridicoDashboardPage: React.FC = () => {
         </div>
       )}
 
+      {gerenteAddOpen && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 210,
+            background: 'rgba(0, 20, 25, 0.45)', backdropFilter: 'blur(3px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 24,
+          }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{
+              width: 'min(560px, 96vw)',
+              maxHeight: '92vh',
+              background: '#FFFFFF',
+              borderRadius: 20,
+              boxShadow: '0 30px 80px rgba(0,54,65,0.28), 0 10px 26px rgba(0,54,65,0.18)',
+              border: '1px solid rgba(0, 174, 157, 0.18)',
+              overflow: 'hidden',
+              display: 'flex', flexDirection: 'column',
+            }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '16px 22px',
+              borderBottom: '1px solid rgba(0,174,157,0.18)',
+              background: 'linear-gradient(180deg, rgba(240,253,250,1) 0%, rgba(255,255,255,0) 100%)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{
+                  width: 40, height: 40, borderRadius: 12,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  background: 'linear-gradient(135deg, rgba(0,174,157,0.20) 0%, rgba(125,182,28,0.24) 100%)',
+                  color: '#0B8077',
+                }}>
+                  <Users size={20} strokeWidth={2.2} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 16.5, fontWeight: 850, color: '#003641', lineHeight: 1.1 }}>
+                    Novo Gerente
+                  </div>
+                  <div style={{ fontSize: 12, color: 'rgba(0,54,65,0.6)', marginTop: 2 }}>
+                    Cadastre o gerente e o número do PA vinculado
+                  </div>
+                </div>
+              </div>
+              <button onClick={() => setGerenteAddOpen(false)}
+                className="interactive"
+                disabled={gerenteAddSaving}
+                style={{
+                  width: 36, height: 36, borderRadius: 10, border: '1px solid rgba(0,54,65,0.12)',
+                  background: '#FFFFFF', cursor: gerenteAddSaving ? 'not-allowed' : 'pointer', color: '#003641',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  opacity: gerenteAddSaving ? 0.55 : 1,
+                }}>
+                <X size={17} strokeWidth={2.2} />
+              </button>
+            </div>
+
+            <div style={{
+              overflowY: 'auto',
+              padding: '20px 24px 16px',
+              display: 'flex', flexDirection: 'column', gap: 14,
+            }}>
+              <div>
+                <label style={formLbl}>Gerente</label>
+                <input
+                  id="jur-gerente-new-nome"
+                  style={formInp}
+                  placeholder="Nome do gerente"
+                  value={gerenteNewNome}
+                  onChange={e => setGerenteNewNome(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void addGerenteCadastro(gerenteNewNome, gerenteNewPa).then(ok => {
+                        if (ok) { setGerenteAddOpen(false); setGerenteNewNome(''); setGerenteNewPa(''); }
+                      });
+                    } else if (e.key === 'Escape') {
+                      setGerenteAddOpen(false);
+                    }
+                  }}
+                />
+              </div>
+              <div>
+                <label style={formLbl}>Nº PA</label>
+                <select
+                  style={{ ...formInp, ...inputReadOnlyStyle }}
+                  title="Selecione um PA padronizado"
+                  value={gerenteNewPa}
+                  onChange={e => setGerenteNewPa(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void addGerenteCadastro(gerenteNewNome, gerenteNewPa).then(ok => {
+                        if (ok) { setGerenteAddOpen(false); setGerenteNewNome(''); setGerenteNewPa(''); }
+                      });
+                    } else if (e.key === 'Escape') {
+                      setGerenteAddOpen(false);
+                    }
+                  }}
+                >
+                  {GERENTE_PA_OPTIONS.map((pa) => (
+                    <option key={pa} value={pa}>{pa}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div style={{
+              display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center',
+              padding: '14px 22px 18px',
+              borderTop: '1px solid rgba(0, 174, 157, 0.16)',
+              background: 'linear-gradient(0deg, rgba(0, 174, 157, 0.05) 0%, rgba(255,255,255,0) 100%)',
+            }}>
+              <button type="button" className="interactive"
+                onClick={() => setGerenteAddOpen(false)}
+                disabled={gerenteAddSaving}
+                style={{
+                  padding: '10px 18px', borderRadius: 12,
+                  border: '1px solid rgba(0,54,65,0.14)', background: '#FFFFFF',
+                  color: '#003641', fontSize: 13.5, fontWeight: 750,
+                  cursor: gerenteAddSaving ? 'not-allowed' : 'pointer',
+                  opacity: gerenteAddSaving ? 0.6 : 1,
+                }}>
+                Cancelar
+              </button>
+              <button type="button" className="interactive"
+                onClick={() => {
+                  void addGerenteCadastro(gerenteNewNome, gerenteNewPa).then(ok => {
+                    if (ok) { setGerenteAddOpen(false); setGerenteNewNome(''); setGerenteNewPa(''); }
+                  });
+                }}
+                disabled={gerenteAddSaving}
+                style={{
+                  padding: '10px 20px', borderRadius: 12, border: 0,
+                  background: 'linear-gradient(135deg, #0B8077 0%, #00AE9D 100%)',
+                  color: '#FFFFFF', fontSize: 13.5, fontWeight: 800,
+                  cursor: gerenteAddSaving ? 'not-allowed' : 'pointer',
+                  boxShadow: gerenteAddSaving ? 'none' : '0 10px 24px rgba(0,174,157,0.28)',
+                  opacity: gerenteAddSaving ? 0.7 : 1,
+                }}>
+                {gerenteAddSaving ? 'Cadastrando...' : 'Cadastrar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {acordoDlgOpen && (
-        <div onClick={() => setAcordoDlgOpen(false)}
+        <div
           style={{
             position: 'fixed', inset: 0, zIndex: 200,
             background: 'rgba(0, 20, 25, 0.45)', backdropFilter: 'blur(3px)',
@@ -5032,26 +6486,15 @@ const chipStyle: React.CSSProperties = {
 
 const thStyle: React.CSSProperties = {
   background: 'linear-gradient(180deg, #0A4A57 0%, #003641 100%)',
-  color: '#FFFFFF', textAlign: 'left', padding: '9px 10px',
+  color: '#FFFFFF', textAlign: 'left', padding: '8px 8px',
   fontSize: 12, letterSpacing: 0.06, fontWeight: 800,
   textTransform: 'uppercase',
   position: 'sticky', top: 0, zIndex: 2,
   boxSizing: 'border-box',
 };
-const TH_WIDTHS = {
-  origem: 146,
-  autor: '22%',
-  reu: '22%',
-  contrato: 130,
-  processo: 170,
-  status: 130,
-  natureza: 140,
-  valor: 110,
-  action: 52,
-} as const;
 
 const tdStyle: React.CSSProperties = {
-  padding: '7px 10px',
+  padding: '7px 8px',
   borderBottom: '1px solid rgba(0,54,65,0.10)',
   fontSize: 13.2,
   color: '#003641',
@@ -5109,11 +6552,9 @@ function naturezaDot(n?: string): string {
 
 const emptyKpis: KpiTrend[] = [
   { label: 'Solicitações enviadas ao jurídico', value: '-', variant: 'def' },
-  { label: 'Contratos em atraso judicial', value: '-', variant: 'al' },
   { label: 'Total valor Passivo', value: '-', variant: 'def' },
   { label: 'Total valor Ativo', value: '-', variant: 'def' },
   { label: 'Total valor Extinta', value: '-', variant: 'def' },
-  { label: 'Custas / honorários', value: '-', variant: 'def' },
   { label: 'Processos extintos', value: '-', variant: 'def' },
   { label: 'Processos ajuizados', value: '-', variant: 'gray' },
 ];

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import { ConflictException } from '@nestjs/common';
 import { getJuridicoDbFilePath, openJuridicoDatabase } from './juridico.db.js';
 import * as jdb from './juridico.db.js';
 
@@ -99,6 +100,22 @@ export class JuridicoService {
   private async withDb<T>(fn: (ctx: DbCtx) => Promise<T> | T): Promise<T> {
     const ctx = await openJuridicoDatabase();
     try { return await fn(ctx); } finally { try { ctx.db.close(); } catch {} }
+  }
+
+  private normalizeParteNome(value: string | undefined): string | undefined {
+    const raw = String(value ?? '').trim().replace(/\s+/g, ' ');
+    if (!raw) return undefined;
+    if (/^juriscred(?:\s*celg)?$/i.test(raw)) return 'JURISCRED';
+    return raw
+      .toLocaleLowerCase('pt-BR')
+      .split(' ')
+      .map((token) => token
+        .split('-')
+        .map((part) => (part
+          ? part.charAt(0).toLocaleUpperCase('pt-BR') + part.slice(1)
+          : part))
+        .join('-'))
+      .join(' ');
   }
 
   // ============= KPIs (8 cards do dashboard) =============
@@ -212,7 +229,7 @@ export class JuridicoService {
   // ============= Ativo×Passivo mensal 12m =============
   async graficoAtivoPassivoPorMes(filtros?: FiltrosListagem) { return this.serieNaturezaPorMes(filtros); }
 
-  async serieNaturezaPorMes(filtros?: FiltrosListagem): Promise<{ mes_ano:string; ativo:number; passivo:number; mes_idx:number; }[]> {
+  async serieNaturezaPorMes(filtros?: FiltrosListagem): Promise<{ mes_ano:string; ativo:number; passivo:number; acordos:number; mes_idx:number; }[]> {
     // where: filtros COMPLETOS do usuário (inclui status, natureza, origem, busca, ano, mes etc)
     const where = this.buildWhere(filtros, { forAgg: true });
     return this.withDb(async ({ db }) => {
@@ -252,23 +269,51 @@ export class JuridicoService {
         ${where.sql ? 'WHERE ' + where.sql : ''}
         GROUP BY mes
       `, where.params as any)[0]?.values || [];
-      const map = new Map<number, { ativo:number; passivo:number }>();
+      const whereAcordo = this.buildWhere(filtros, {
+        forAgg: true,
+        prefix: 'p',
+        dateColumn: `COALESCE(NULLIF(a.created_at,''), NULLIF(a.updated_at,''), p.created_at)`,
+      });
+      const acordoRows = db.exec(`
+        SELECT
+          CAST(strftime('%m', COALESCE(NULLIF(a.created_at,''), NULLIF(a.updated_at,''), p.created_at)) AS INTEGER) AS m,
+          SUM(
+            CASE
+              WHEN COALESCE(a.total_parcelas, 0) > 0 THEN COALESCE(a.valor_parcela, 0) * a.total_parcelas
+              ELSE COALESCE(a.valor_parcela, 0)
+            END
+          ) AS acordos
+        FROM juridico_acordos a
+        INNER JOIN processos p ON p.id = a.processo_id
+        ${whereAcordo.sql ? 'WHERE ' + whereAcordo.sql : ''}
+        GROUP BY m
+      `, whereAcordo.params as any)[0]?.values || [];
+
+      const map = new Map<number, { ativo:number; passivo:number; acordos:number }>();
       for (const r of dataRow) {
         const m = Number(r[1]);
         if (!m || m < 1 || m > 12) continue;
         const atv = Number(r[2]) || 0;
         const pas = Number(r[3]) || 0;
-        const prev = map.get(m) || { ativo: 0, passivo: 0 };
-        map.set(m, { ativo: prev.ativo + atv, passivo: prev.passivo + pas });
+        const prev = map.get(m) || { ativo: 0, passivo: 0, acordos: 0 };
+        map.set(m, { ativo: prev.ativo + atv, passivo: prev.passivo + pas, acordos: prev.acordos });
       }
-      const out: { mes_ano:string; ativo:number; passivo:number; mes_idx:number }[] = [];
+      for (const r of acordoRows) {
+        const m = Number(r[0]);
+        if (!m || m < 1 || m > 12) continue;
+        const acd = Number(r[1]) || 0;
+        const prev = map.get(m) || { ativo: 0, passivo: 0, acordos: 0 };
+        map.set(m, { ativo: prev.ativo, passivo: prev.passivo, acordos: prev.acordos + acd });
+      }
+      const out: { mes_ano:string; ativo:number; passivo:number; acordos:number; mes_idx:number }[] = [];
       const pad2 = (n: number) => n.toString().padStart(2, '0');
       for (let m = 1; m <= 12; m++) {
-        const d = map.get(m) || { ativo: 0, passivo: 0 };
+        const d = map.get(m) || { ativo: 0, passivo: 0, acordos: 0 };
         out.push({
           mes_ano: `${anoRef}-${pad2(m)}`,
           ativo: d.ativo,
           passivo: d.passivo,
+          acordos: d.acordos,
           mes_idx: m,
         });
       }
@@ -310,6 +355,11 @@ export class JuridicoService {
         const v = pRaw[k];
         if (v === undefined) continue;
         p[k] = v == null ? null : v;
+      }
+      const dup = this.findDuplicateProcesso(db, p);
+      if (dup) {
+        const ref = dup.numero_processo_ajuizamento || dup.numero_processo || dup.numero_contrato_sicoob || `ID ${dup.id}`;
+        throw new ConflictException(`Já existe um processo cadastrado com esta referência (${ref}).`);
       }
       const cols = Object.keys(p).filter((k) => k !== 'id' && k !== 'created_at' && k !== 'updated_at');
       const placeholders = cols.map(() => '?').join(',');
@@ -554,36 +604,88 @@ export class JuridicoService {
     return require('node:crypto').createHash('sha1').update(s).digest('hex');
   }
 
-  private buildWhere(f?: FiltrosListagem, opts?: { forAgg?: boolean }) {
+  private findDuplicateProcesso(db: any, input: Record<string, any>): null | {
+    id: number;
+    numero_processo_ajuizamento?: string;
+    numero_processo?: string;
+    numero_contrato_sicoob?: string;
+  } {
+    const processo = String(input.numero_processo_ajuizamento ?? input.numero_processo ?? '').trim();
+    if (processo) {
+      const rs = db.exec(
+        `SELECT id, numero_processo_ajuizamento, numero_processo, numero_contrato_sicoob
+           FROM processos
+          WHERE TRIM(COALESCE(numero_processo_ajuizamento, '')) = ?
+             OR TRIM(COALESCE(numero_processo, '')) = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+        [processo, processo] as any,
+      );
+      const row = rs[0]?.values?.[0];
+      const cols = rs[0]?.columns ?? [];
+      if (row && cols.length) {
+        const out: Record<string, any> = {};
+        for (let i = 0; i < cols.length; i++) out[cols[i]] = row[i];
+        return out as any;
+      }
+    }
+
+    const contrato = String(input.numero_contrato_sicoob ?? input.contrato_sicoob ?? '').trim();
+    const autor1 = String(input.autor_1_nome ?? '').trim();
+    const reu1 = String(input.reu_1_nome ?? '').trim();
+    const origem = String(input.origem ?? '').trim();
+    if (contrato && autor1 && reu1 && origem) {
+      const rs = db.exec(
+        `SELECT id, numero_processo_ajuizamento, numero_processo, numero_contrato_sicoob
+           FROM processos
+          WHERE TRIM(COALESCE(numero_contrato_sicoob, '')) = ?
+            AND TRIM(COALESCE(autor_1_nome, '')) = ?
+            AND TRIM(COALESCE(reu_1_nome, '')) = ?
+            AND TRIM(COALESCE(origem, '')) = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+        [contrato, autor1, reu1, origem] as any,
+      );
+      const row = rs[0]?.values?.[0];
+      const cols = rs[0]?.columns ?? [];
+      if (row && cols.length) {
+        const out: Record<string, any> = {};
+        for (let i = 0; i < cols.length; i++) out[cols[i]] = row[i];
+        return out as any;
+      }
+    }
+    return null;
+  }
+
+  private buildWhere(f?: FiltrosListagem, opts?: { forAgg?: boolean; dateColumn?: string; prefix?: string }) {
     const parts: string[] = []; const params: any[] = [];
     if (!f) return { sql: '', params };
+    const prefix = opts?.prefix ? `${opts.prefix}.` : '';
     if (f.ano != null || f.mes != null) {
-      const col = `COALESCE(NULLIF(data_distribuicao_ajuizamento,''),NULLIF(data_evento,''),NULLIF(data_recebimento_cobranca_extrajudicial,''),NULLIF(data_protocolizacao_cartorio_extrajudicial,''),created_at)`;
+      const col = opts?.dateColumn ?? `COALESCE(NULLIF(${prefix}data_distribuicao_ajuizamento,''),NULLIF(${prefix}data_evento,''),NULLIF(${prefix}data_recebimento_cobranca_extrajudicial,''),NULLIF(${prefix}data_protocolizacao_cartorio_extrajudicial,''),${prefix}created_at)`;
       if (f.ano != null) { parts.push(`CAST(strftime('%Y', ${col}) AS INTEGER) = ?`); params.push(Number(f.ano)); }
       if (f.mes != null) { parts.push(`CAST(strftime('%m', ${col}) AS INTEGER) = ?`); params.push(Number(f.mes)); }
     }
-    if (f.origem) { parts.push("origem = ?"); params.push(f.origem); }
-    if (f.status) { parts.push("(status=? OR status_ultimo_andamento_ajuizamento=? OR status_extrajudicial=?)"); params.push(f.status, f.status, f.status); }
-    if (f.natureza) { parts.push("natureza = ?"); params.push(f.natureza); }
+    if (f.origem) { parts.push(`${prefix}origem = ?`); params.push(f.origem); }
+    if (f.status) { parts.push(`(${prefix}status=? OR ${prefix}status_ultimo_andamento_ajuizamento=? OR ${prefix}status_extrajudicial=?)`); params.push(f.status, f.status, f.status); }
+    if (f.natureza) { parts.push(`${prefix}natureza = ?`); params.push(f.natureza); }
     let buscaSql = '';
-    let buscaParams: any[] = [];
     if (f.busca) {
       const like = `%${String(f.busca).replace(/[%_]/g, '\\$&')}%`;
       buscaSql = `(
-        numero_contrato_sicoob LIKE ? ESCAPE '\\' OR
-        numero_processo_ajuizamento LIKE ? ESCAPE '\\' OR
-        COALESCE(numero_processo,'') LIKE ? ESCAPE '\\' OR
-        autor_1_nome LIKE ? ESCAPE '\\' OR autor_2_nome LIKE ? ESCAPE '\\' OR
-        autor_3_nome LIKE ? ESCAPE '\\' OR autor_4_nome LIKE ? ESCAPE '\\' OR
-        autor_5_nome LIKE ? ESCAPE '\\' OR autor_6_nome LIKE ? ESCAPE '\\' OR
-        reu_1_nome LIKE ? ESCAPE '\\' OR reu_2_nome LIKE ? ESCAPE '\\' OR
-        reu_3_nome LIKE ? ESCAPE '\\' OR reu_4_nome LIKE ? ESCAPE '\\' OR
-        reu_5_nome LIKE ? ESCAPE '\\' OR reu_6_nome LIKE ? ESCAPE '\\' OR
-        COALESCE(autores,'') LIKE ? ESCAPE '\\' OR COALESCE(reus,'') LIKE ? ESCAPE '\\' OR
-        autor_1_cpf_cnpj LIKE ? ESCAPE '\\' OR reu_1_cpf_cnpj LIKE ? ESCAPE '\\'
+        ${prefix}numero_contrato_sicoob LIKE ? ESCAPE '\\' OR
+        ${prefix}numero_processo_ajuizamento LIKE ? ESCAPE '\\' OR
+        COALESCE(${prefix}numero_processo,'') LIKE ? ESCAPE '\\' OR
+        ${prefix}autor_1_nome LIKE ? ESCAPE '\\' OR ${prefix}autor_2_nome LIKE ? ESCAPE '\\' OR
+        ${prefix}autor_3_nome LIKE ? ESCAPE '\\' OR ${prefix}autor_4_nome LIKE ? ESCAPE '\\' OR
+        ${prefix}autor_5_nome LIKE ? ESCAPE '\\' OR ${prefix}autor_6_nome LIKE ? ESCAPE '\\' OR
+        ${prefix}reu_1_nome LIKE ? ESCAPE '\\' OR ${prefix}reu_2_nome LIKE ? ESCAPE '\\' OR
+        ${prefix}reu_3_nome LIKE ? ESCAPE '\\' OR ${prefix}reu_4_nome LIKE ? ESCAPE '\\' OR
+        ${prefix}reu_5_nome LIKE ? ESCAPE '\\' OR ${prefix}reu_6_nome LIKE ? ESCAPE '\\' OR
+        COALESCE(${prefix}autores,'') LIKE ? ESCAPE '\\' OR COALESCE(${prefix}reus,'') LIKE ? ESCAPE '\\' OR
+        ${prefix}autor_1_cpf_cnpj LIKE ? ESCAPE '\\' OR ${prefix}reu_1_cpf_cnpj LIKE ? ESCAPE '\\'
       )`;
       const qty = (buscaSql.match(/\?/g) || []).length;
-      buscaParams = Array(qty).fill(like);
       parts.push(buscaSql);
       for (let i = 0; i < qty; i++) params.push(like);
     }
@@ -658,38 +760,38 @@ export class JuridicoService {
       'origem','Origem*','Origem','ORIGEM','Tipo de Origem','origem_tipo'
     ]) || 'Enviado ao Jurídico';
 
-    const autor1 = T([
+    const autor1 = this.normalizeParteNome(T([
       'autor_1_nome','Autor(ES)-1*','Autor(ES)-1','Autor-1','autor_1','Autor 1','Autores','autor','Autor(es)','Autor'
-    ]);
+    ]));
     const autor1cpf = T([
       'autor_1_cpf_cnpj','CPF/CNPJ Autor(ES)-1*','CPF/CNPJ Autor(ES)-1','Autor-1 CPF/CNPJ'
     ], 40);
-    const autor2 = T(['autor_2_nome','Autor(ES)-2','Autor-2','Autor 2']);
+    const autor2 = this.normalizeParteNome(T(['autor_2_nome','Autor(ES)-2','Autor-2','Autor 2']));
     const autor2cpf = T(['autor_2_cpf_cnpj','CPF/CNPJ Autor(ES)-2','Autor-2 CPF/CNPJ'], 40);
-    const autor3 = T(['autor_3_nome','Autor(ES)-3','Autor-3','Autor 3']);
+    const autor3 = this.normalizeParteNome(T(['autor_3_nome','Autor(ES)-3','Autor-3','Autor 3']));
     const autor3cpf = T(['autor_3_cpf_cnpj','CPF/CNPJ Autor(ES)-3','Autor-3 CPF/CNPJ'], 40);
-    const autor4 = T(['autor_4_nome','Autor(ES)-4','Autor-4','Autor 4']);
+    const autor4 = this.normalizeParteNome(T(['autor_4_nome','Autor(ES)-4','Autor-4','Autor 4']));
     const autor4cpf = T(['autor_4_cpf_cnpj','CPF/CNPJ Autor(ES)-4','Autor-4 CPF/CNPJ'], 40);
-    const autor5 = T(['autor_5_nome','Autor(ES)-5','Autor-5','Autor 5']);
+    const autor5 = this.normalizeParteNome(T(['autor_5_nome','Autor(ES)-5','Autor-5','Autor 5']));
     const autor5cpf = T(['autor_5_cpf_cnpj','CPF/CNPJ Autor(ES)-5','Autor-5 CPF/CNPJ'], 40);
-    const autor6 = T(['autor_6_nome','Autor(ES)-6','Autor-6','Autor 6']);
+    const autor6 = this.normalizeParteNome(T(['autor_6_nome','Autor(ES)-6','Autor-6','Autor 6']));
     const autor6cpf = T(['autor_6_cpf_cnpj','CPF/CNPJ Autor(ES)-6','Autor-6 CPF/CNPJ'], 40);
 
-    const reu1 = T([
+    const reu1 = this.normalizeParteNome(T([
       'reu_1_nome','Réu(s)-1*','Réu(s)-1','Réu 1','Reu(s)-1','Reu-1','Réus','Réu(s)','reu','Réu','Reu'
-    ]);
+    ]));
     const reu1cpf = T([
       'reu_1_cpf_cnpj','CPF/CNPJ Réu(s)-1*','CPF/CNPJ Réu(s)-1','Reu(s)-1 CPF/CNPJ'
     ], 40);
-    const reu2 = T(['reu_2_nome','Réu(s)-2','Réu-2','Reu(s)-2']);
+    const reu2 = this.normalizeParteNome(T(['reu_2_nome','Réu(s)-2','Réu-2','Reu(s)-2']));
     const reu2cpf = T(['reu_2_cpf_cnpj','CPF/CNPJ Réu(s)-2','Reu-2 CPF/CNPJ'], 40);
-    const reu3 = T(['reu_3_nome','Réu(s)-3','Réu-3','Reu(s)-3']);
+    const reu3 = this.normalizeParteNome(T(['reu_3_nome','Réu(s)-3','Réu-3','Reu(s)-3']));
     const reu3cpf = T(['reu_3_cpf_cnpj','CPF/CNPJ Réu(s)-3','Reu-3 CPF/CNPJ'], 40);
-    const reu4 = T(['reu_4_nome','Réu(s)-4','Réu-4','Reu(s)-4']);
+    const reu4 = this.normalizeParteNome(T(['reu_4_nome','Réu(s)-4','Réu-4','Reu(s)-4']));
     const reu4cpf = T(['reu_4_cpf_cnpj','CPF/CNPJ Réu(s)-4','Reu-4 CPF/CNPJ'], 40);
-    const reu5 = T(['reu_5_nome','Réu(s)-5','Réu-5','Reu(s)-5']);
+    const reu5 = this.normalizeParteNome(T(['reu_5_nome','Réu(s)-5','Réu-5','Reu(s)-5']));
     const reu5cpf = T(['reu_5_cpf_cnpj','CPF/CNPJ Réu(s)-5','Reu-5 CPF/CNPJ'], 40);
-    const reu6 = T(['reu_6_nome','Réu(s)-6','Réu-6','Reu(s)-6']);
+    const reu6 = this.normalizeParteNome(T(['reu_6_nome','Réu(s)-6','Réu-6','Reu(s)-6']));
     const reu6cpf = T(['reu_6_cpf_cnpj','CPF/CNPJ Réu(s)-6','Reu-6 CPF/CNPJ'], 40);
 
     const numero_processo_ajuizamento = T([

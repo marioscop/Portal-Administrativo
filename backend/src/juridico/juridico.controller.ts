@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Put, Delete, Patch, Query, Param, Body, Header, Res, UseInterceptors, UploadedFile, ForbiddenException, InternalServerErrorException } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Patch, Query, Param, Body, Header, Res, UseInterceptors, UploadedFile, ForbiddenException, InternalServerErrorException, HttpException } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import * as fs from 'node:fs';
@@ -13,6 +13,7 @@ function jurCatch<T>(p: Promise<T>): Promise<T> {
   return p.catch((e) => {
     if (e instanceof JuridicoForbiddenError) throw new ForbiddenException(e.message);
     if (e?.name === 'JuridicoForbiddenError') throw new ForbiddenException(String(e.message || 'Forbidden'));
+    if (e instanceof HttpException) throw e;
     if (e instanceof ForbiddenException || e instanceof InternalServerErrorException) throw e;
     throw new InternalServerErrorException(String(e?.message || e));
   });
@@ -100,6 +101,16 @@ export class JuridicoController {
     return out;
   }
 
+  @Get('options/distinct-gerentes')
+  async distinctGerentes() {
+    try {
+      const list = await Promise.resolve(jdb.getDistinctGerentesOptions?.()).then(r => (Array.isArray(r) ? r : []));
+      return { options: Array.isArray(list) ? list : [] };
+    } catch (e: any) {
+      return { options: [], error: e?.message || 'Falha ao carregar gerentes.' };
+    }
+  }
+
   @Get('options/distinct-statuses')
   async distinctStatuses() {
     try {
@@ -108,6 +119,27 @@ export class JuridicoController {
     } catch (e: any) {
       return { options: [], error: e?.message || 'Falha ao carregar statuses.' };
     }
+  }
+
+  @Get('options/cadastro-gerentes')
+  async cadastroGerentes() {
+    try {
+      const list = await Promise.resolve(jdb.getJuridicoGerentesCadastro?.()).then(r => (Array.isArray(r) ? r : []));
+      return { options: Array.isArray(list) ? list : [] };
+    } catch (e: any) {
+      return { options: [], error: e?.message || 'Falha ao carregar cadastro de gerentes.' };
+    }
+  }
+
+  @Post('config/gerentes/add')
+  async gerentesAdd(@Body() body: any) {
+    return jurCatch(
+      Promise.resolve(jdb.addJuridicoGerenteCadastro?.({
+        nome: body?.nome,
+        pa: body?.pa,
+        requestedByEmail: body?.requestedByEmail,
+      })).then(r => ({ entries: Array.isArray(r) ? r : [] })),
+    );
   }
 
   @Get('csv')
@@ -373,6 +405,31 @@ export class JuridicoController {
         prazoAjuizamentoDias: body?.prazoAjuizamentoDias,
         requestedByEmail: body?.requestedByEmail ?? body?.requestedBy,
       })
+    );
+  }
+
+  @Get('config/tipo-acoes-colunas')
+  async tipoAcoesColunasGet(@Query() q: any) {
+    const by = q?.requestedBy;
+    return jurCatch(
+      Promise.resolve(jdb.getJuridicoTipoAcoesColumnWidths?.(by)).then((cfg) => ({
+        widths: cfg?.widths,
+        customized: Boolean(cfg?.customized),
+      }))
+    );
+  }
+
+  @Put('config/tipo-acoes-colunas')
+  async tipoAcoesColunasSet(@Body() body: any) {
+    return jurCatch(
+      Promise.resolve(jdb.setJuridicoTipoAcoesColumnWidths?.({
+        requestedByEmail: body?.requestedByEmail ?? body?.requestedBy,
+        widths: body?.widths,
+        reset: body?.reset,
+      })).then((cfg) => ({
+        widths: cfg?.widths,
+        customized: Boolean(cfg?.customized),
+      }))
     );
   }
 

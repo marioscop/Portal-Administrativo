@@ -13713,6 +13713,9 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     }
     void hasRecursoRecebidoMaior;
   }
+  const remainingRecursoRecebidoMaiorByCpf = new Map<string, number>(
+    linkedRecursoRecebidoMaiorByCpf,
+  );
   for (const o of ocorrencias) {
     const action = typeof o?.action === 'string' ? o.action.trim() : '';
     const isQuitado = action === 'quitado_recurso' || action.startsWith('quitado_recurso');
@@ -13905,11 +13908,21 @@ function computeConsolidadoPorDataForContabilidade(opts: {
     const maiorTotalCents = Math.max(recursoRecebidoMaiorDeductCents, inlineMaiorCents);
     const recursoJudicialValores = pickRecursoJudicialValores(r);
     if (maiorTotalCents > 0 && !recursoJudicialValores) {
-      const deducao = Math.min(cents, maiorTotalCents);
-      recursoRecebidoMaiorDebitoDeductionByDate.set(
-        effDate,
-        (recursoRecebidoMaiorDebitoDeductionByDate.get(effDate) ?? 0) + deducao,
-      );
+      // O valor devolvido a maior é indexado por CPF; deve ser consumido conforme é
+      // aplicado nas parcelas do cooperado, para não deduzir mais do que o devolvido.
+      const disponivelCents = cpfKey
+        ? remainingRecursoRecebidoMaiorByCpf.get(cpfKey) ?? 0
+        : maiorTotalCents;
+      const deducao = Math.min(cents, disponivelCents);
+      if (deducao > 0) {
+        recursoRecebidoMaiorDebitoDeductionByDate.set(
+          effDate,
+          (recursoRecebidoMaiorDebitoDeductionByDate.get(effDate) ?? 0) + deducao,
+        );
+        if (cpfKey) {
+          remainingRecursoRecebidoMaiorByCpf.set(cpfKey, disponivelCents - deducao);
+        }
+      }
     }
     if (recursoJudicialValores) {
       recursoJudicialEditedByDate.set(
